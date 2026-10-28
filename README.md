@@ -49,7 +49,7 @@ cd src-tauri && cargo test # Rust unit tests (incl. Ctrl+Break / taskkill checks
 ```bash
 cd app
 npm run tauri build -- --debug     # fast debug build
-npm run tauri build                # release: app/src-tauri/target/release/app.exe (+ installers)
+npm run tauri build                # release: app/src-tauri/target/release/agentAutoX1.exe (+ installers)
 ```
 
 The executable finds the engines by walking up from its own location looking for `engines/warmup`,

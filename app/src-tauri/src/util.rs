@@ -41,6 +41,27 @@ pub fn is_valid_pod_name(name: &str) -> bool {
     name.len() <= 24 && chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Digits only, with the Colombian country code removed (12 digits starting with 57), so that
+/// 57XXXXXXXXXX and XXXXXXXXXX compare equal. Same rule as `phoneKey` in the warm-up engine.
+pub fn phone_key(input: &str) -> String {
+    let digits: String = input.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() == 12 && digits.starts_with("57") { digits[2..].to_string() } else { digits }
+}
+
+/// Phone as stored in pods-wsp.json: digits only, 10 digits for Colombian lines (no 57), 7-15 digits otherwise.
+/// Blank input means "no phone" (`None`).
+pub fn pods_phone(input: &str) -> Result<Option<String>, String> {
+    if input.trim().is_empty() {
+        return Ok(None);
+    }
+    let key = phone_key(input);
+    if (7..=15).contains(&key.len()) {
+        Ok(Some(key))
+    } else {
+        Err("El número debe tener entre 7 y 15 dígitos (para Colombia, 10 dígitos que empiecen por 3).".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +71,24 @@ mod tests {
         assert!(is_valid_pod_name("pod2"));
         assert!(is_valid_pod_name("a_b-c"));
         assert!(is_valid_pod_name(&"a".repeat(24)));
+    }
+
+    #[test]
+    fn pod_phone_keeps_the_ten_digit_format_of_pods_wsp() {
+        assert_eq!(pods_phone("304 237 4349").unwrap(), Some("3042374349".to_string()));
+        assert_eq!(pods_phone("+57 304 237 4349").unwrap(), Some("3042374349".to_string()));
+        assert_eq!(pods_phone("573042374349").unwrap(), Some("3042374349".to_string()));
+        assert_eq!(pods_phone("14155550123").unwrap(), Some("14155550123".to_string()));
+        assert_eq!(pods_phone("   ").unwrap(), None);
+        assert!(pods_phone("12345").is_err());
+        assert!(pods_phone("1234567890123456").is_err());
+    }
+
+    #[test]
+    fn phone_key_matches_with_and_without_country_code() {
+        assert_eq!(phone_key("573042374349"), phone_key("304 237 4349"));
+        assert_eq!(phone_key("+57 304 237 4349"), "3042374349");
+        assert_eq!(phone_key("abc"), "");
     }
 
     #[test]
