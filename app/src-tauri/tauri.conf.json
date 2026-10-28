@@ -13,9 +13,14 @@
   "app": {
     "windows": [
       {
-        "title": "app",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "agentAutoX1",
+        "theme": "Dark",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 980,
+        "minHeight": 640,
+        "center": true
       }
     ],
     "security": {

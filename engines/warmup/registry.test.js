@@ -55,7 +55,9 @@ test('a pod number without a tester is "pod sin calentar"; a tester without a po
 test('reports pods without phone and testers without phone separately', () => {
   const out = buildRegistry({ config, profiles, pods, hasSession });
   assert.deepEqual(out.podsWithoutPhone.map((p) => p.name), ['pod3']);
-  assert.deepEqual(out.testersWithoutPhone, ['tester1']);
+  assert.deepEqual(out.testersWithoutPhone, [
+    { id: 'tester1', linked: false, profiles: [], groups: [] },
+  ]);
   assert.equal(out.rows.length, 3);
 });
 
@@ -74,4 +76,14 @@ test('flags the bot number', () => {
 test('marks tester as linked only with a session', () => {
   const { rows } = buildRegistry({ config, profiles, pods, hasSession: () => false });
   assert.ok(rows.every((r) => r.linked === false));
+});
+
+test('testers without a phone still report their session, profiles and groups', () => {
+  const out = buildRegistry({
+    config,
+    profiles: { tres: { testers: ['tester1'] } },
+    pods: [],
+    hasSession: (id) => id === 'tester1',
+  });
+  assert.deepEqual(out.testersWithoutPhone[0], { id: 'tester1', linked: true, profiles: ['tres'], groups: ['Calentamiento'] });
 });

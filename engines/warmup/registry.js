@@ -25,6 +25,18 @@ export function buildRegistry({ config, profiles = {}, pods = [], hasSession = (
   const podsWithoutPhone = [];
   const testersWithoutPhone = [];
 
+  // Profiles (and their groups) that use a tester.
+  const usage = (id) => {
+    const used = { profiles: [], groups: [] };
+    for (const [name, profile] of Object.entries(profiles)) {
+      if (!(profile?.testers ?? []).includes(id)) continue;
+      used.profiles.push(name);
+      const group = profileGroupName(profile, config);
+      if (group && !used.groups.includes(group)) used.groups.push(group);
+    }
+    return used;
+  };
+
   const ensure = (phone) => {
     const key = phoneKey(phone);
     if (!rows.has(key)) {
@@ -60,7 +72,7 @@ export function buildRegistry({ config, profiles = {}, pods = [], hasSession = (
 
   for (const tester of testerEntries(config)) {
     if (!phoneKey(tester.phone)) {
-      testersWithoutPhone.push(tester.id);
+      testersWithoutPhone.push({ id: tester.id, linked: Boolean(hasSession(tester.id)), ...usage(tester.id) });
       continue;
     }
     const row = ensure(tester.phone);
@@ -68,12 +80,7 @@ export function buildRegistry({ config, profiles = {}, pods = [], hasSession = (
     row.testerId = tester.id;
     row.linked = Boolean(hasSession(tester.id));
     if (row.pod) row.source = 'pod';
-    for (const [name, profile] of Object.entries(profiles)) {
-      if (!(profile?.testers ?? []).includes(tester.id)) continue;
-      row.profiles.push(name);
-      const group = profileGroupName(profile, config);
-      if (group && !row.groups.includes(group)) row.groups.push(group);
-    }
+    Object.assign(row, usage(tester.id));
   }
 
   const sorted = [...rows.values()].sort((a, b) => a.key.localeCompare(b.key));
