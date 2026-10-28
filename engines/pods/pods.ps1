@@ -17,6 +17,12 @@
     .\pods.ps1 reinstalar-wa <nombre>   -> reinstala WhatsApp Business SIN borrar la cuenta y lo compila (AOT)
     .\pods.ps1 prender-todos | apagar-todos
 
+  Modo no interactivo (lo usa la app agentAutoX1): agrega -NoInteractivo a cualquier acción.
+    - "borrar" no pregunta el nombre (quien llama ya lo confirmó).
+    - "nuevo" y los asistentes que necesitan manos humanas (instalar BlueStacks, crear la instancia a mano) fallan con un mensaje
+      en lugar de esperar. Nunca pide nada por teclado.
+    - La salida siempre va en UTF-8 (sin BOM), así los acentos llegan bien a quien lee el proceso.
+
   Un pod es una instancia de BlueStacks (Android 11, familia Rvc64) cuyo nombre visible es "wa-<nombre>".
   Todas comparten el Root.vhd de la instancia base Rvc64 (solo lectura); cada una tiene su propio Data.vhdx,
   que es donde vive la cuenta de WhatsApp.
@@ -24,7 +30,8 @@
 param(
     [Parameter(Position = 0)] [string] $Accion,
     [Parameter(Position = 1)] [string] $Nombre,
-    [Parameter(Position = 2)] [string] $Extra
+    [Parameter(Position = 2)] [string] $Extra,
+    [switch] $NoInteractivo
 )
 
 $ErrorActionPreference = 'Stop'
@@ -81,6 +88,22 @@ $ConfGlobalVolatil = [ordered]@{
 function Escribir([string] $texto, [string] $color = 'Gray') { Write-Host $texto -ForegroundColor $color }
 
 function Paso([int] $n, [int] $total, [string] $texto) { Write-Host "[$n/$total] $texto" -ForegroundColor Cyan }
+
+# Modo no interactivo: ninguna acción puede quedarse esperando teclado ni pasos manuales.
+function Exigir-Interactivo([string] $motivo) {
+    if ($script:NoInteractivo) { throw "Esto necesita intervención manual ($motivo) y no se puede hacer en modo automático. Hazlo desde la consola: .\pods.ps1" }
+}
+
+# La confirmación de borrado exige el nombre exacto (distingue mayúsculas).
+function Test-Confirmacion([string] $nombre, [string] $escrito) { return [bool]($nombre -ceq $escrito) }
+
+# Salida en UTF-8 sin BOM para que los acentos lleguen bien a la app (que lee el proceso como UTF-8).
+function Usar-Utf8 {
+    $utf8 = New-Object Text.UTF8Encoding($false)
+    $script:OutputEncoding = $utf8
+    $global:OutputEncoding = $utf8
+    try { [Console]::OutputEncoding = $utf8 } catch { }
+}
 
 function Test-NombrePod([string] $nombre) {
     return [bool]($nombre -match '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,23}$')
@@ -642,6 +665,7 @@ function Quitar-InstanciaArchivos([string] $id) {
 
 # Plan B (no probado aquí): el usuario crea la instancia en el Administrador de instancias y el script la adopta.
 function Crear-InstanciaGuiada([string] $nombre) {
+    Exigir-Interactivo 'crear la instancia a mano en el Administrador de instancias'
     Escribir 'No encuentro la plantilla limpia, así que necesito que crees la instancia a mano (una sola vez):' Yellow
     Escribir '  1) En el Administrador de instancias (se abre ahora) pulsa "Instancia nueva".' Yellow
     Escribir '  2) Elige "Android 11" (Nueva instancia > Android 11, 64 bits) y pulsa "Siguiente".' Yellow
@@ -715,11 +739,12 @@ function Quitar-DeMim([string] $id) {
 
 function Asegurar-BlueStacks {
     if (-not (Detectar-BlueStacks)) {
+        Exigir-Interactivo 'instalar BlueStacks'
         Escribir 'BlueStacks no está instalado: empiezo la instalación de primera vez.' Yellow
         Instalar-BlueStacks
         if (-not (Detectar-BlueStacks)) { throw 'BlueStacks sigue sin estar disponible tras la instalación.' }
     }
-    if ((Obtener-ConfValor (Leer-Conf) 'bst.installed_images') -notmatch $ImagenBase) { Instalar-BlueStacks }
+    if ((Obtener-ConfValor (Leer-Conf) 'bst.installed_images') -notmatch $ImagenBase) { Exigir-Interactivo "instalar la imagen $ImagenBase"; Instalar-BlueStacks }
 }
 
 function Listar {
@@ -794,8 +819,10 @@ function Borrar([string] $nombre) {
         throw "El pod '$nombre' es la instancia base ($ImagenBase): aloja el Root.vhd que comparten todos los pods, así que no se puede borrar desde aquí."
     }
     Escribir "Esto BORRA el pod '$nombre' y la cuenta de WhatsApp que tenga dentro. No se puede deshacer." Red
-    $confirmacion = Read-Host 'Escribe el nombre del pod para confirmar'
-    if ($confirmacion -ne $nombre) { Escribir 'Cancelado.' Yellow; return }
+    if (-not $script:NoInteractivo) {
+        $confirmacion = Read-Host 'Escribe el nombre del pod para confirmar'
+        if (-not (Test-Confirmacion $nombre $confirmacion)) { Escribir 'Cancelado.' Yellow; return }
+    }
     $prendidos = Cerrar-PodsPrendidos
     Quitar-InstanciaArchivos $pod.Instancia
     Guardar-Conf (Quitar-ConfInstancia (Leer-Conf) $pod.Instancia)
@@ -978,6 +1005,9 @@ function Menu {
 
 # Con "dot-sourcing" (. .\pods.ps1) solo se cargan las funciones (lo usan las pruebas).
 if ($MyInvocation.InvocationName -eq '.') { return }
+
+Usar-Utf8
+$script:NoInteractivo = [bool]$NoInteractivo
 
 if ($Accion -ne 'instalar') {
     if (-not (Detectar-BlueStacks)) {

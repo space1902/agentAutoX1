@@ -128,3 +128,27 @@ Describe 'Convertir-PodAFilaJson / Convertir-FilasAJson' {
         $datos[1].name | Should Be 'pod2'
     }
 }
+
+Describe 'Modo no interactivo' {
+    It 'Exigir-Interactivo no hace nada en modo normal' {
+        $script:NoInteractivo = $false
+        { Exigir-Interactivo 'instalar BlueStacks' } | Should Not Throw
+    }
+    It 'Exigir-Interactivo falla en modo no interactivo y dice el motivo' {
+        $script:NoInteractivo = $true
+        try { Exigir-Interactivo 'instalar BlueStacks'; $msg = '' } catch { $msg = $_.Exception.Message }
+        $script:NoInteractivo = $false
+        $msg | Should Match 'instalar BlueStacks'
+        $msg | Should Match 'automático'
+    }
+    It 'Test-Confirmacion exige el nombre exacto (con mayusculas)' {
+        Test-Confirmacion 'pod1' 'pod1' | Should Be $true
+        Test-Confirmacion 'pod1' 'POD1' | Should Be $false
+        Test-Confirmacion 'pod1' '' | Should Be $false
+    }
+    It 'Usar-Utf8 deja la salida en UTF-8 sin BOM' {
+        Usar-Utf8
+        $OutputEncoding.WebName | Should Be 'utf-8'
+        $OutputEncoding.GetPreamble().Length | Should Be 0
+    }
+}
