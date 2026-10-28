@@ -49,7 +49,7 @@ cd src-tauri && cargo test # Rust unit tests (incl. Ctrl+Break / taskkill checks
 ```bash
 cd app
 npm run tauri build -- --debug     # fast debug build
-npm run tauri build                # release: app/src-tauri/target/release/agentAutoX1.exe (+ installers)
+npm run tauri build                # release: app/src-tauri/target/release/app.exe (+ installers)
 ```
 
 The executable finds the engines by walking up from its own location looking for `engines/warmup`,
@@ -67,8 +67,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File engines/pods/pods.ps1 listar
 Stop sends Ctrl+Break to the profile's hidden console (the engine closes its Baileys sessions on SIGBREAK),
 then `taskkill /PID <pid> /T`, and only then `taskkill /PID <pid> /T /F`. Closing the window also stops a running profile.
 
-## Phase 1 limits
+## Phase 2: manage pods and warm-up instances from the app
 
-- The embedded BlueStacks view is a placeholder ("Vista embebida (próximamente)").
-- Creating, renaming or deleting pods, and creating profiles, are still done from the original tools.
-- Unlinked testers print a QR as terminal text in the log panel; linking is easier from the original CLI.
+- **MultiWhatsApp**: Nuevo pod (runs `pods.ps1 nuevo <name> -NoInteractivo`, 9 steps, about 12-15 minutes, shown as a step list with a
+  progress bar; BlueStacks may be closed and reopened), Editar (rename + phone) and Borrar (typed-name confirmation).
+  `-NoInteractivo` makes the script fail with a message instead of waiting for the keyboard or for manual steps.
+  All PowerShell output is UTF-8.
+- **Numeros**: one row per normalised phone (57XXXXXXXXXX and XXXXXXXXXX are the same line) with pod, tester, linked session, profiles
+  and groups. Source: `pod`, `pod sin calentar` (pod number with no tester) or `externo` (tester with no pod).
+- **Calentador Bots**: Nueva instancia wizard, Editar and Eliminar. The rules live in the engine
+  (`engines/warmup/perfil-api.js`, a JSON CLI: `node perfil-api.js <list|registry|create|update|delete|set-group> --stdin`), so the app
+  and the engine never diverge. Deleting a profile never deletes testers or sessions. The running profile cannot be edited.
+
+Safety: JSON writes are atomic (temp file + rename) and the previous `config.json`, `profiles.json` and `pods-wsp.json` are copied to
+`backups/` (next to each file) with a timestamp before every write.
+
+Remaining limits: the embedded BlueStacks view is still a placeholder, and unlinked testers still print their QR as text in the log panel.

@@ -4,6 +4,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Flame, Hash, LogOut, MessageCircleMore, Settings as SettingsIcon, Smartphone, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api, type LogLine } from "./lib/api";
+import { usePodCreation } from "./lib/podCreation";
 import { applyTheme, loadTheme, type Theme } from "./lib/theme";
 import Ajustes from "./sections/Ajustes";
 import CalentadorBots from "./sections/CalentadorBots";
@@ -64,6 +65,7 @@ export default function App() {
   const [section, setSection] = useState<SectionId>("pods");
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const warmup = useWarmupRun();
+  const podCreation = usePodCreation(() => undefined);
 
   useEffect(() => applyTheme(theme), [theme]);
 
@@ -106,7 +108,7 @@ export default function App() {
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.22, ease: "easeOut" }}
           >
-            {section === "pods" && <MultiWhatsApp />}
+            {section === "pods" && <MultiWhatsApp creation={podCreation} />}
             {section === "bots" && (
               <CalentadorBots running={warmup.running} profile={warmup.profile} logs={warmup.logs} onClearLogs={warmup.clearLogs} />
             )}
