@@ -6,7 +6,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { buildUpdatedConfig, normalizePhone, writeJsonAtomic } from './profile-creation.js';
+import { buildLineHealth } from './line-health.js';
 import { botKeys, buildRegistry, phoneKey } from './registry.js';
+import { readActivity } from './wa-activity.js';
 import {
   SelectionError,
   addProfile,
@@ -154,7 +156,60 @@ function decorateProfile(name, profile, config, pods, hasSession) {
   };
 }
 
+function readLines(file) {
+  try {
+    return fs
+      .readFileSync(file, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line)];
+        } catch {
+          return [];
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+// results/run-*.csv texts (a CSV still being written is skipped, never fatal).
+function readCsvTexts(resultsDir) {
+  let names = [];
+  try {
+    names = fs.readdirSync(resultsDir).filter((name) => name.startsWith('run-') && name.endsWith('.csv'));
+  } catch {
+    return [];
+  }
+  return names.flatMap((name) => {
+    try {
+      return [fs.readFileSync(path.join(resultsDir, name), 'utf8')];
+    } catch {
+      return [];
+    }
+  });
+}
+
 const COMMANDS = {
+  // Traffic light + strength score per tester id (see line-health.js and the README).
+  'line-health'(payload, { dataDir, now }) {
+    const { configFile, authDir } = paths(dataDir);
+    const config = readConfig(configFile);
+    const resultsDir = path.join(dataDir, 'results');
+    const wanted = Array.isArray(payload.testers) ? payload.testers.map(clean).filter(Boolean) : null;
+    const ids = testerIds(config.testers).filter((id) => !wanted || wanted.includes(id));
+    const lines = buildLineHealth({
+      testerIds: ids,
+      linkedOf: (id) => hasSavedSession(authDir, id),
+      events: readLines(path.join(resultsDir, 'events.jsonl')),
+      activityOf: (id, sinceSeconds) => readActivity(resultsDir, id, sinceSeconds),
+      csvTexts: readCsvTexts(resultsDir),
+      now,
+    });
+    return { generatedAt: now.toISOString(), lines };
+  },
+
   list(payload, { dataDir }) {
     const { configFile, profilesFile, authDir } = paths(dataDir);
     const config = readConfig(configFile);

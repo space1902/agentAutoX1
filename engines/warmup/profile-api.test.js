@@ -184,3 +184,42 @@ test('registry command and unknown commands', () => {
   assert.throws(() => runCommand('explode', {}, t.ctx), /Comando desconocido/);
   t.cleanup();
 });
+
+test('line-health scores every tester from the data dir (events, activity, csv) and marks unlinked ones', () => {
+  const t = setup();
+  const results = path.join(t.dir, 'results');
+  fs.mkdirSync(results, { recursive: true });
+  fs.writeFileSync(
+    path.join(results, 'events.jsonl'),
+    `${JSON.stringify({ at: '2026-10-20T10:00:00.000Z', session: 'tester2', event: 'ready' })}
+`,
+  );
+  const sec = (iso) => new Date(iso).getTime() / 1000;
+  fs.writeFileSync(
+    path.join(results, 'activity-tester2.jsonl'),
+    [
+      { t: sec('2026-10-28T10:00:00.000Z'), me: 1, chat: 'g', type: 'chat', len: 5 },
+      { t: sec('2026-10-28T10:05:00.000Z'), me: 0, chat: 'g', type: 'chat', len: 5 },
+    ]
+      .map((r) => JSON.stringify(r))
+      .join('\n'),
+  );
+  const out = runCommand('line-health', {}, t.ctx);
+  assert.deepEqual(Object.keys(out.lines).sort(), ['tester1', 'tester2', 'tester3']);
+  assert.equal(out.lines.tester2.linked, true);
+  assert.equal(out.lines.tester2.stats.sent, 1);
+  assert.equal(out.lines.tester2.stats.received, 1);
+  assert.equal(out.lines.tester2.stats.days, 9);
+  assert.equal(out.lines.tester1.light, 'rojo');
+  assert.equal(out.lines.tester1.linked, false);
+  assert.equal(out.generatedAt, NOW.toISOString());
+  t.cleanup();
+});
+
+test('line-health works with no results folder at all', () => {
+  const t = setup();
+  const out = runCommand('line-health', {}, t.ctx);
+  assert.equal(out.lines.tester2.stats.sent, 0);
+  assert.equal(out.lines.tester2.stats.days, 0);
+  t.cleanup();
+});
