@@ -116,6 +116,43 @@ export interface PodProgress {
   line: string;
 }
 
+export type LinkStage =
+  | "queued"
+  | "powering-on"
+  | "waiting-android"
+  | "requesting-code"
+  | "typing-code"
+  | "waiting-link"
+  | "linked"
+  | "powering-off"
+  | "manual"
+  | "failed"
+  | "cancelled"
+  | "dry-run";
+
+export interface LinkTarget {
+  testerId: string;
+  phone: string;
+  podName: string;
+}
+
+export interface LinkProgress extends LinkTarget {
+  stage: LinkStage;
+  message: string;
+  code: string | null;
+  index: number;
+  total: number;
+}
+
+export interface LinkResult {
+  testerId: string;
+  podName: string;
+  stage: LinkStage;
+  ok: boolean;
+  message: string;
+  code: string | null;
+}
+
 export type Light = "verde" | "amarillo" | "rojo";
 
 export interface LineHealthPart {
@@ -167,6 +204,10 @@ export const api = {
   profileUpdate: (name: string, newName: string | null, group: string | null, selections: Selection[] | null) =>
     invoke<unknown>("profile_update", { name, newName, group, selections }),
   profileDelete: (name: string) => invoke<unknown>("profile_delete", { name }),
+  planPodLinks: (name: string) => invoke<LinkTarget[]>("plan_pod_links", { name }),
+  runPodLinks: (name: string, dryRun: boolean, powerOffAfter: boolean) =>
+    invoke<LinkResult[]>("run_pod_links", { name, dryRun, powerOffAfter }),
+  cancelPodLinks: () => invoke<void>("cancel_pod_links"),
   lineHealth: () => invoke<LineHealthData>("line_health"),
   readWarmupData: () => invoke<WarmupData>("read_warmup_data"),
   readPodsWsp: () => invoke<Record<string, string>>("read_pods_wsp"),

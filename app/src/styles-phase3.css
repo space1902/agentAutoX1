@@ -44,3 +44,27 @@
 .health-tip em { font-style: normal; font-variant-numeric: tabular-nums; color: var(--accent); }
 .health-tip small { color: var(--muted); font-size: 11.5px; }
 .health-reasons { border-top: 1px solid var(--border); padding-top: 6px !important; }
+
+/* ---- Auto-link pods ---- */
+.check { display: flex; align-items: center; gap: 8px; font-size: 13.5px; margin: 6px 0; cursor: pointer; }
+.link-list { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.link-row { padding: 10px 12px; border-radius: 12px; background: var(--chip-bg); border: 1px solid var(--border); }
+.link-row.linked { border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.link-row.failed, .link-row.manual { border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.link-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.link-head .pill { margin-left: auto; }
+.link-icon { display: inline-flex; color: var(--accent); }
+.link-msg { margin: 6px 0 0 24px; font-size: 12.5px; color: var(--muted); }
+.big-code {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 18px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--banner-from), var(--banner-to));
+  text-align: center;
+}
+.big-code strong { font-size: 38px; letter-spacing: 0.18em; font-variant-numeric: tabular-nums; user-select: all; }
+.big-code small { color: var(--muted); max-width: 520px; }

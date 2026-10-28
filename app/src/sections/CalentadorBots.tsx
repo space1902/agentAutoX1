@@ -2,10 +2,11 @@ import { AnimatePresence } from "framer-motion";
 import { ArrowLeft, ArrowRight, Check, Flame, Link2, Loader2, MessagesSquare, Pencil, Play, Plus, RefreshCw, Square, Trash2, Users } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { HealthBadge, useLineHealth } from "../components/Health";
+import LinkPodsModal from "../components/LinkPods";
 import { Modal, Warning } from "../components/Modal";
 import NumberPicker, { buildItems, initialSelection, toSelections } from "../components/NumberPicker";
 import { Banner, Card, Notice, Pill, SkeletonGrid, StatCard } from "../components/ui";
-import { api, errorText, type LogLine, type ProfileView, type ProfilesData } from "../lib/api";
+import { api, errorText, type LinkTarget, type LogLine, type ProfileView, type ProfilesData } from "../lib/api";
 
 interface Props {
   running: boolean;
@@ -14,7 +15,7 @@ interface Props {
   onClearLogs: () => void;
 }
 
-type Dialog = { kind: "create" } | { kind: "edit"; profile: ProfileView } | { kind: "delete"; profile: ProfileView } | null;
+type Dialog = { kind: "link"; profile: string; targets: LinkTarget[] } | { kind: "create" } | { kind: "edit"; profile: ProfileView } | { kind: "delete"; profile: ProfileView } | null;
 
 export default function CalentadorBots({ running, profile, logs, onClearLogs }: Props) {
   const [data, setData] = useState<ProfilesData | null>(null);
@@ -52,6 +53,24 @@ export default function CalentadorBots({ running, profile, logs, onClearLogs }: 
     const el = logRef.current;
     if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
   }, [logs]);
+
+  /** Iniciar: first link the pods whose number is not linked yet (one by one), then start the profile. */
+  const requestStart = async (name: string) => {
+    setPending("start");
+    setError(null);
+    try {
+      const targets = await api.planPodLinks(name);
+      if (targets.length > 0) {
+        setDialog({ kind: "link", profile: name, targets });
+        setPending(null);
+        return;
+      }
+    } catch (e) {
+      // Without a plan (e.g. BlueStacks missing) the profile starts the old way.
+      setInfo(`No se pudo revisar los pods antes de iniciar: ${errorText(e)}`);
+    }
+    await start(name);
+  };
 
   const start = async (name: string) => {
     setPending("start");
@@ -152,7 +171,7 @@ export default function CalentadorBots({ running, profile, logs, onClearLogs }: 
                       <Square size={14} aria-hidden /> Detener
                     </button>
                   ) : (
-                    <button className="btn sm" onClick={() => void start(p.name)} disabled={running || pending !== null}>
+                    <button className="btn sm" onClick={() => void requestStart(p.name)} disabled={running || pending !== null}>
                       <Play size={14} aria-hidden /> Iniciar
                     </button>
                   )}
@@ -201,6 +220,22 @@ export default function CalentadorBots({ running, profile, logs, onClearLogs }: 
       </Card>
 
       <AnimatePresence>
+        {dialog?.kind === "link" && (
+          <LinkPodsModal
+            key="link"
+            profile={dialog.profile}
+            targets={dialog.targets}
+            onClose={() => {
+              setDialog(null);
+              void load();
+            }}
+            onStart={() => {
+              const name = dialog.profile;
+              setDialog(null);
+              void start(name).then(load);
+            }}
+          />
+        )}
         {dialog?.kind === "create" && data && (
           <ProfileForm key="create" mode="create" data={data} onClose={() => setDialog(null)} onSaved={saved} />
         )}
