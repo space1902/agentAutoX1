@@ -1,0 +1,5 @@
+<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0">
+  <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="com.whatsapp.w4b" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[0,0][720,1280]" />
+  <node index="1" text="Confirma tu identidad" resource-id="" class="android.widget.TextView" package="com.whatsapp.w4b" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[60,300][660,380]" />
+  <node index="2" text="Usa tu huella o el PIN del dispositivo" resource-id="" class="android.widget.TextView" package="com.whatsapp.w4b" content-desc="" checkable="false" checked="false" clickable="false" enabled="true" focusable="false" focused="false" scrollable="false" long-clickable="false" password="false" selected="false" bounds="[60,400][660,480]" />
+</hierarchy>
