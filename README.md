@@ -82,4 +82,70 @@ then `taskkill /PID <pid> /T`, and only then `taskkill /PID <pid> /T /F`. Closin
 Safety: JSON writes are atomic (temp file + rename) and the previous `config.json`, `profiles.json` and `pods-wsp.json` are copied to
 `backups/` (next to each file) with a timestamp before every write.
 
-Remaining limits: the embedded BlueStacks view is still a placeholder, and unlinked testers still print their QR as text in the log panel.
+## Phase 3: link pods, line health, keep-alive and embedded view
+
+### Auto-link pods (Calentador Bots > Iniciar)
+
+When you press **Iniciar**, testers whose phone belongs to a pod and have no saved session are linked first, one pod at a time:
+
+1. power the pod on (`pods.ps1 prender`) if it is off;
+2. `pod-driver-cli.js ready`: adb online, Android booted, `com.whatsapp.w4b` in the foreground (it launches it if needed);
+3. `link-session-cli.js --tester <id>` starts a Baileys client for that phone and prints the 8-character pairing code as JSON lines;
+4. `pod-driver-cli.js link` drives WhatsApp Business through `uiautomator dump` + `input tap/text`:
+   Menu (3 dots) > Dispositivos vinculados > Vincular un dispositivo > Vincular con el número de teléfono > type the code;
+5. wait until `creds.json` holds the paired account, then power the pod off again if it was off before.
+
+Pods whose number is already linked are not touched and do not need to be on. Progress is shown per number; when a screen cannot be
+driven the dialog shows the code big, says which screen to finish by hand, and keeps the pod on while it waits.
+The dialog has **Solo simular** (dry-run): it never powers anything, never opens a WhatsApp session and only reads the screen of pods
+that are already on.
+
+The UI-driving code is separate and tested without a device: `engines/warmup/pod-ui.js` (selector map in Spanish, English and
+Portuguese, screen recognition), `pod-driver.js` (the loop and the adb wrapper) and XML fixtures in `engines/warmup/fixtures/uia/`.
+If WhatsApp changes a label, edit `SELECTORS` in `pod-ui.js` and add a fixture. Offline check of a real dump:
+
+```bash
+adb -s emulator-5564 shell uiautomator dump /sdcard/x.xml && adb -s emulator-5564 shell cat /sdcard/x.xml > dump.xml
+node engines/warmup/pod-driver-cli.js link --fixture dump.xml --code ABCD-1234 --dry-run
+```
+
+BlueStacks gotchas respected: never `adb reboot`; HD-Adb may print results on stderr; serials are `emulator-<port-1>`.
+The fixtures are modelled on the WhatsApp Business screens, not captured from a pod: validate with a real pod before relying on it.
+
+### Line health and strength
+
+`node perfil-api.js line-health` (also `line_health` in the app) returns, per tester, a traffic light and a 0-100 score computed in
+`engines/warmup/line-health.js` from `results/events.jsonl`, `results/activity-<id>.jsonl`, `results/run-*.csv` and `creds.json`.
+The window is 14 days. Not linked = 0 and red. Otherwise the score is the sum of:
+
+| Part | Max | Rule |
+| --- | --- | --- |
+| Antigüedad | 35 | days since first activity (first `ready`, first CSV row or first sent message), `min(days, 14) / 14` |
+| Volumen | 20 | messages sent + received in the window, `min(n, 60) / 60` |
+| Respuestas recibidas | 15 | `min(received / sent, 1)`; 0 when nothing was sent |
+| Estabilidad | 20 | `20 - min(12, 4 x disconnects) - 10 x relinks - 10 x auth failures`, never below 0 |
+| Actividad reciente | 10 | last activity <= 24 h: 10, <= 72 h: 6, <= 7 days: 3, older or never: 0 |
+
+Light: green from 70, yellow from 40, red below. A logout (`logged_out_relink`) or `auth_failure` in the last 72 h forces red.
+These are community heuristics, not official WhatsApp numbers. Hover a badge in Números or on a profile card for the breakdown.
+
+### Auto revisión de números en los pods (keep-alive)
+
+MultiWhatsApp header switch (Sí/No, OFF by default, saved in the app settings). When ON, a Rust scheduler records the last time
+each pod was seen running (`pods-last-on.json` in the app config folder, updated whenever the pod list is read and when the app
+turns a pod on) and, every 30 minutes, builds a queue of **stopped pods with a phone number** that have been off for more than 24 h
+(a pod the app has never seen on counts as the oldest). It processes ONE pod at a time: power on, keep it on 15 minutes, power off,
+then wait until the pod reads as stopped and free memory is back within 400 MB of the level measured before it started (120 s
+timeout, never fatal). It never runs a pod when another pod operation is active (it takes the same job slot as create / rename /
+delete / phone / link), and a pod that is already on when its turn comes is only recorded and skipped. Turning the switch off, or
+closing the app, powers the pod off right away. Status ("Revisando wa-pod2: 7 min restantes", queue, last run) is shown in MultiWhatsApp.
+The pure queue and timing logic is unit-tested with a fake clock (`app/src-tauri/src/keepalive.rs`).
+
+### Embedded BlueStacks view (experimental)
+
+MultiWhatsApp > Vista embebida, behind its own Sí/No flag (OFF by default). Each running pod gets a tab; the active tab shows its
+BlueStacks window (`HD-Player.exe`, title `wa-<pod>`) as a child of the app window (Win32 `SetParent`, caption and borders stripped,
+resized with the layout). Other tabs are hidden with `ShowWindow(SW_HIDE)`; dialogs hide the view too (a native window is always
+drawn on top of the web content). Closing a tab, the **Abrir en ventana aparte** button, turning the flag off or closing the app
+restores the original parent, style and position. Windows only. The re-parenting code is tested with dummy windows, not with BlueStacks.
+
