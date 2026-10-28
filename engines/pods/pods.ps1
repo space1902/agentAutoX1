@@ -132,8 +132,18 @@ function Leer-Wsp {
     return $m
 }
 
+# Escritura atómica (temporal + renombrar) y copia con fecha del archivo anterior en backups\ junto al mapa.
 function Guardar-Wsp($mapa) {
-    [IO.File]::WriteAllText($WspArchivo, ([pscustomobject]$mapa | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+    $dir = Split-Path $WspArchivo -Parent
+    if (Test-Path $WspArchivo) {
+        $copias = Join-Path $dir 'backups'
+        New-Item -ItemType Directory -Path $copias -Force | Out-Null
+        $sello = (Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss-fff')
+        Copy-Item $WspArchivo (Join-Path $copias "pods-wsp.$sello.json")
+    }
+    $temporal = "$WspArchivo.$PID.tmp"
+    [IO.File]::WriteAllText($temporal, ([pscustomobject]$mapa | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+    Move-Item $temporal $WspArchivo -Force
 }
 
 function Nueva-GuidTexto { return [guid]::NewGuid().ToString() }

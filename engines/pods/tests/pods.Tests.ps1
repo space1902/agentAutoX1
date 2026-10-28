@@ -152,3 +152,29 @@ Describe 'Modo no interactivo' {
         $OutputEncoding.GetPreamble().Length | Should Be 0
     }
 }
+
+Describe 'Guardar-Wsp' {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ("pods-wsp-test-" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    $viejo = $script:WspArchivo
+    $script:WspArchivo = Join-Path $dir 'pods-wsp.json'
+    It 'crea el archivo sin dejar temporales ni copias cuando no existia' {
+        Guardar-Wsp ([ordered]@{ Rvc64 = '3042374349' })
+        (Get-Content $script:WspArchivo -Raw | ConvertFrom-Json).Rvc64 | Should Be '3042374349'
+        @(Get-ChildItem $dir -Filter '*.tmp').Count | Should Be 0
+        Test-Path (Join-Path $dir 'backups') | Should Be $false
+    }
+    It 'guarda una copia con fecha del archivo anterior antes de sobrescribir' {
+        Guardar-Wsp ([ordered]@{ Rvc64 = '3042374349'; Rvc64_1 = '3042339130' })
+        $copias = @(Get-ChildItem (Join-Path $dir 'backups') -Filter 'pods-wsp.*.json')
+        $copias.Count | Should Be 1
+        $copias[0].Name | Should Match '^pods-wsp\.\d{8}-\d{6}-\d{3}\.json$'
+        $anterior = Get-Content $copias[0].FullName -Raw | ConvertFrom-Json
+        $anterior.Rvc64 | Should Be '3042374349'
+        $anterior.PSObject.Properties.Name -contains 'Rvc64_1' | Should Be $false
+        (Get-Content $script:WspArchivo -Raw | ConvertFrom-Json).Rvc64_1 | Should Be '3042339130'
+        @(Get-ChildItem $dir -Filter '*.tmp').Count | Should Be 0
+    }
+    $script:WspArchivo = $viejo
+    Remove-Item $dir -Recurse -Force
+}
