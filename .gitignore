@@ -1,0 +1,8 @@
+node_modules/
+dist/
+target/
+.env
+.baileys_auth/
+.wwebjs_auth/
+results/
+*.log

@@ -1,0 +1,26 @@
+{
+  "name": "whatsapp-bot-tester",
+  "version": "1.0.0",
+  "description": "Test WhatsApp sessions post scripted messages into a group and a bot session answers them using a local Ollama model.",
+  "type": "module",
+  "main": "tester.js",
+  "scripts": {
+    "all": "node --env-file-if-exists=.env run.js",
+    "start": "node tester.js",
+    "login": "node tester.js --login-only",
+    "bot": "node --env-file-if-exists=.env bot.js",
+    "health": "node health.js",
+    "perfil": "node --env-file-if-exists=.env perfil.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "baileys": "7.0.0-rc14",
+    "https-proxy-agent": "9.1.0",
+    "msedge-tts": "^2.1.0",
+    "qrcode-terminal": "^0.12.0",
+    "socks-proxy-agent": "10.1.0"
+  }
+}

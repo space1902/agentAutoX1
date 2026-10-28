@@ -1,0 +1,7 @@
+node_modules/
+.wwebjs_auth/
+.wwebjs_cache/
+results/
+config.json
+.env
+.baileys_auth/
