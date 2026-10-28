@@ -108,4 +108,21 @@ mod tests {
         assert!(dir.join("backups").is_dir());
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn line_health_goes_through_the_real_engine() {
+        let dir = std::env::temp_dir().join(format!("agentautox1-health-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("config.json"), r#"{"botNumber":"573000000000","testers":[{"id":"tester1","phone":"573001112233"}]}"#).unwrap();
+        fs::write(dir.join("profiles.json"), "{}").unwrap();
+        let mut settings = Settings::defaults(Path::new("C:/x"));
+        settings.warmup_dir = engine_dir().to_string_lossy().into_owned();
+        settings.data_dir = dir.to_string_lossy().into_owned();
+
+        let health = call(&settings, "line-health", &json!({})).unwrap();
+        assert_eq!(health["lines"]["tester1"]["light"], "rojo");
+        assert_eq!(health["lines"]["tester1"]["linked"], false);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

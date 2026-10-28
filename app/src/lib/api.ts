@@ -116,6 +116,32 @@ export interface PodProgress {
   line: string;
 }
 
+export type Light = "verde" | "amarillo" | "rojo";
+
+export interface LineHealthPart {
+  key: string;
+  label: string;
+  points: number;
+  max: number;
+  detail: string;
+}
+
+export interface LineHealth {
+  score: number;
+  light: Light;
+  linked: boolean;
+  phase: { phase: number; name: string };
+  components: LineHealthPart[];
+  reasons: string[];
+  severeRecent: boolean;
+  stats?: { days: number; sent: number; received: number; lastActivityAt: string | null };
+}
+
+export interface LineHealthData {
+  generatedAt: string;
+  lines: Record<string, LineHealth>;
+}
+
 /** Tauri rejects with a plain string; normalize anything else. */
 export function errorText(error: unknown): string {
   if (typeof error === "string") return error;
@@ -141,6 +167,7 @@ export const api = {
   profileUpdate: (name: string, newName: string | null, group: string | null, selections: Selection[] | null) =>
     invoke<unknown>("profile_update", { name, newName, group, selections }),
   profileDelete: (name: string) => invoke<unknown>("profile_delete", { name }),
+  lineHealth: () => invoke<LineHealthData>("line_health"),
   readWarmupData: () => invoke<WarmupData>("read_warmup_data"),
   readPodsWsp: () => invoke<Record<string, string>>("read_pods_wsp"),
   warmupStatus: () => invoke<WarmupStatus>("warmup_status"),

@@ -1,5 +1,6 @@
 import { Hash, Layers, Link2, RefreshCw, Smartphone } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { HealthBadge, useLineHealth } from "../components/Health";
 import { Banner, Card, Notice, Pill, Skeleton, StatCard, type PillTone } from "../components/ui";
 import { api, errorText, type NumberSource, type Registry, type RegistryRow } from "../lib/api";
 
@@ -30,10 +31,12 @@ export default function Numeros() {
   const [source, setSource] = useState<SourceFilter>("todos");
   const [linked, setLinked] = useState<LinkedFilter>("todos");
   const [group, setGroup] = useState("");
+  const health = useLineHealth();
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    void health.reload();
     try {
       const overview = await api.registryOverview();
       setRegistry(overview.data);
@@ -43,6 +46,7 @@ export default function Numeros() {
     } finally {
       setLoading(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -125,6 +129,7 @@ export default function Numeros() {
                   <th>Pod</th>
                   <th>Tester</th>
                   <th>Vinculado</th>
+                  <th>Salud</th>
                   <th>Perfiles</th>
                   <th>Grupos</th>
                 </tr>
@@ -149,13 +154,14 @@ export default function Numeros() {
                     </td>
                     <td>{r.testerId ?? <span className="muted">–</span>}</td>
                     <td>{r.testerId ? <Pill tone={r.linked ? "green" : "amber"}>{r.linked ? "Sí" : "No"}</Pill> : <span className="muted">–</span>}</td>
+                    <td>{r.testerId ? <HealthBadge health={health.lines[r.testerId]} /> : <span className="muted">Sin calentar</span>}</td>
                     <td>{r.profiles.length ? r.profiles.join(", ") : <span className="muted">–</span>}</td>
                     <td>{r.groups.length ? r.groups.join(", ") : <span className="muted">–</span>}</td>
                   </tr>
                 ))}
                 {registry && visible.length === 0 && (
                   <tr>
-                    <td colSpan={7} className="muted">
+                    <td colSpan={8} className="muted">
                       {rows.length === 0 ? "Todavía no hay números registrados." : "Ningún número coincide con los filtros."}
                     </td>
                   </tr>

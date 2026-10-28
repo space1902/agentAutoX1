@@ -1,6 +1,7 @@
 import { AnimatePresence } from "framer-motion";
 import { ArrowLeft, ArrowRight, Check, Flame, Link2, Loader2, MessagesSquare, Pencil, Play, Plus, RefreshCw, Square, Trash2, Users } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { HealthBadge, useLineHealth } from "../components/Health";
 import { Modal, Warning } from "../components/Modal";
 import NumberPicker, { buildItems, initialSelection, toSelections } from "../components/NumberPicker";
 import { Banner, Card, Notice, Pill, SkeletonGrid, StatCard } from "../components/ui";
@@ -24,10 +25,12 @@ export default function CalentadorBots({ running, profile, logs, onClearLogs }: 
   const [pending, setPending] = useState<"start" | "stop" | null>(null);
   const [dialog, setDialog] = useState<Dialog>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  const health = useLineHealth();
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    void health.reload();
     try {
       const overview = await api.profilesOverview();
       setData(overview.data);
@@ -37,6 +40,7 @@ export default function CalentadorBots({ running, profile, logs, onClearLogs }: 
     } finally {
       setLoading(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -138,6 +142,7 @@ export default function CalentadorBots({ running, profile, logs, onClearLogs }: 
                     <span key={t.id} className={`chip ${t.linked ? "" : "unlinked"}`} title={t.linked ? "Sesión vinculada" : "Sin vincular: pedirá QR al iniciar"}>
                       <i aria-hidden /> {t.phone ?? t.id}
                       {t.podName ? ` · ${t.podName}` : " · Externo"}
+                      <HealthBadge health={health.lines[t.id]} compact />
                     </span>
                   ))}
                 </div>

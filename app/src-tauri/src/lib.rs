@@ -181,6 +181,13 @@ async fn profile_set_group(state: State<'_, AppState>, name: String, group: Stri
     profile_mutation(&state, "set-group", json!({ "name": name, "group": group })).await
 }
 
+/// Traffic light and 0-100 strength per tester (computed by the engine from events, activity and results).
+#[tauri::command]
+async fn line_health(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || profiles::call(&settings, "line-health", &json!({}))).await
+}
+
 #[tauri::command]
 fn read_warmup_data(state: State<'_, AppState>) -> Result<data::WarmupData, String> {
     data::read_warmup(&state.current())
@@ -250,6 +257,7 @@ pub fn run() {
             profile_update,
             profile_delete,
             profile_set_group,
+            line_health,
             read_warmup_data,
             read_pods_wsp,
             warmup_status,
