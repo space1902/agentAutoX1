@@ -90,6 +90,33 @@ pub fn list(settings: &Settings) -> Result<Vec<Pod>, String> {
     parse_pods_json(&out.stdout)
 }
 
+/// Paths BlueStacks installed (`pods.ps1 info-json`): needed to talk to a pod over adb.
+#[derive(Deserialize, Debug, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BlueStacksInfo {
+    pub adb: String,
+    pub hd_player: String,
+}
+
+pub fn parse_info_json(stdout: &str) -> Result<BlueStacksInfo, String> {
+    let line = stdout
+        .lines()
+        .rev()
+        .map(|l| l.trim().trim_start_matches('\u{feff}'))
+        .find(|l| l.starts_with('{'))
+        .ok_or_else(|| format!("Respuesta inesperada de pods.ps1: {}", preview(stdout.trim())))?;
+    serde_json::from_str(line).map_err(|e| format!("JSON de pods.ps1 no válido ({e}): {}", preview(line)))
+}
+
+pub fn bluestacks_info(settings: &Settings) -> Result<BlueStacksInfo, String> {
+    let out = run_pods(settings, &["info-json"])?;
+    if !out.ok {
+        let detail = if out.stderr.trim().is_empty() { &out.stdout } else { &out.stderr };
+        return Err(last_lines(detail, 4));
+    }
+    parse_info_json(&out.stdout)
+}
+
 /// Actions the UI may trigger on a single pod.
 pub fn is_allowed_action(action: &str) -> bool {
     matches!(action, "prender" | "apagar" | "ver")
@@ -282,6 +309,14 @@ mod tests {
         assert_eq!(pods[0].adb_port, 5565);
         assert_eq!(pods[0].serial, None);
         assert_eq!(pods[0].phone.as_deref(), Some("3042339130"));
+    }
+
+    #[test]
+    fn parses_bluestacks_info_with_bom_and_noise() {
+        let out = "noise\n\u{feff}{\"adb\":\"C:\\\\BS\\\\HD-Adb.exe\",\"hdPlayer\":\"C:\\\\BS\\\\HD-Player.exe\"}\n";
+        let info = parse_info_json(out).unwrap();
+        assert!(info.adb.ends_with("HD-Adb.exe") && info.hd_player.ends_with("HD-Player.exe"));
+        assert!(parse_info_json("nada").is_err());
     }
 
     #[test]

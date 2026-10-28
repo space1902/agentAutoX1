@@ -178,3 +178,13 @@ Describe 'Guardar-Wsp' {
     $script:WspArchivo = $viejo
     Remove-Item $dir -Recurse -Force
 }
+
+Describe 'Convertir-InfoAJson' {
+    It 'devuelve las rutas de adb y del reproductor como JSON de una linea' {
+        $json = Convertir-InfoAJson 'C:\Program Files\BlueStacks_nxt\HD-Adb.exe' 'C:\Program Files\BlueStacks_nxt\HD-Player.exe'
+        $json.Contains("`n") | Should Be $false
+        $d = $json | ConvertFrom-Json
+        $d.adb | Should Be 'C:\Program Files\BlueStacks_nxt\HD-Adb.exe'
+        $d.hdPlayer | Should Be 'C:\Program Files\BlueStacks_nxt\HD-Player.exe'
+    }
+}

@@ -1,4 +1,6 @@
 mod data;
+mod linker;
+mod linker_real;
 mod pods;
 mod profiles;
 mod settings;
@@ -10,6 +12,7 @@ use serde_json::{Value, json};
 use settings::Settings;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -19,6 +22,7 @@ struct AppState {
     settings: Arc<Mutex<Settings>>,
     runner: warmup::Runner,
     pod_job: pods::PodJob,
+    link_cancel: Arc<AtomicBool>,
 }
 
 /// Profile the app is running right now (the engine refuses to edit it).
@@ -135,6 +139,58 @@ async fn delete_pod(state: State<'_, AppState>, name: String, confirm: String) -
     .await
 }
 
+/// Pods that must be linked before `name` can start: unlinked testers whose phone belongs to a pod.
+#[tauri::command]
+async fn plan_pod_links(state: State<'_, AppState>, name: String) -> Result<Vec<linker::LinkTarget>, String> {
+    let settings = state.current();
+    blocking(move || {
+        let pods = pods::list(&settings)?;
+        let data = profiles::call(&settings, "list", &json!({ "pods": pods }))?;
+        let profile = data["profiles"]
+            .as_array()
+            .and_then(|list| list.iter().find(|p| p["name"] == name.as_str()))
+            .ok_or_else(|| format!("El perfil «{name}» no existe."))?;
+        Ok(linker::plan_links(profile, &pods))
+    })
+    .await
+}
+
+/// Links the pods of `name` one at a time. Streams `pod-link-progress` events. `dry_run` only reads screens.
+#[tauri::command]
+async fn run_pod_links(app: AppHandle, state: State<'_, AppState>, name: String, dry_run: bool, power_off_after: bool) -> Result<Vec<linker::LinkResult>, String> {
+    let settings = state.current();
+    if let Some(running) = running_profile(&state) {
+        return Err(format!("El perfil «{running}» está en curso; detenlo antes de vincular pods."));
+    }
+    let guard = state.pod_job.begin("vincular pods")?;
+    let cancel = state.link_cancel.clone();
+    cancel.store(false, Ordering::SeqCst);
+    blocking(move || {
+        let _guard = guard;
+        let pods = pods::list(&settings)?;
+        let data = profiles::call(&settings, "list", &json!({ "pods": pods }))?;
+        let profile = data["profiles"]
+            .as_array()
+            .and_then(|list| list.iter().find(|p| p["name"] == name.as_str()))
+            .ok_or_else(|| format!("El perfil «{name}» no existe."))?;
+        let targets = linker::plan_links(profile, &pods);
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ops = linker_real::RealOps::new(settings, cancel)?;
+        let options = linker::Options { power_off_after, dry_run };
+        Ok(linker::run_links(&ops, &targets, &options, &linker::Limits::default(), &mut |p| {
+            let _ = app.emit("pod-link-progress", p);
+        }))
+    })
+    .await
+}
+
+#[tauri::command]
+fn cancel_pod_links(state: State<'_, AppState>) {
+    state.link_cancel.store(true, Ordering::SeqCst);
+}
+
 /// Profiles (with numbers, pod names and linked state) plus the merged number registry.
 #[tauri::command]
 async fn profiles_overview(state: State<'_, AppState>) -> Result<Overview, String> {
@@ -229,6 +285,7 @@ pub fn run() {
                 settings: Arc::new(Mutex::new(settings)),
                 runner: warmup::Runner::default(),
                 pod_job: pods::PodJob::default(),
+                link_cancel: Arc::new(AtomicBool::new(false)),
             });
             Ok(())
         })
@@ -258,6 +315,9 @@ pub fn run() {
             profile_delete,
             profile_set_group,
             line_health,
+            plan_pod_links,
+            run_pod_links,
+            cancel_pod_links,
             read_warmup_data,
             read_pods_wsp,
             warmup_status,

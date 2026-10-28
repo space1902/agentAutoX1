@@ -7,6 +7,7 @@
     .\pods.ps1 nuevo   <nombre>         -> crea un pod, instala WhatsApp Business y lo deja en la pantalla de bienvenida
     .\pods.ps1 listar
     .\pods.ps1 listar-json             -> lo mismo en JSON puro (sin texto extra): [{ name, instanceId, state, serial, adbPort, phone }]
+    .\pods.ps1 info-json              -> rutas de HD-Adb.exe y HD-Player.exe en JSON (las usa la app)
     .\pods.ps1 prender <nombre>
     .\pods.ps1 apagar  <nombre>
     .\pods.ps1 ver     <nombre>         -> trae la ventana al frente (prende el pod si está apagado)
@@ -796,6 +797,16 @@ function Listar-Json {
     [Console]::Out.WriteLine((Convertir-FilasAJson $filas))
 }
 
+# Rutas que la app necesita para hablar con adb (una sola linea JSON).
+function Convertir-InfoAJson([string] $adb, [string] $hdPlayer) {
+    return ([ordered]@{ adb = $adb; hdPlayer = $hdPlayer } | ConvertTo-Json -Compress)
+}
+
+function Info-Json {
+    [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+    [Console]::Out.WriteLine((Convertir-InfoAJson $script:Adb $script:HdPlayer))
+}
+
 function Prender([string] $nombre) {
     $pod = Obtener-Pod $nombre
     if (-not (Pod-Prendido $pod)) { Iniciar-Pod $pod }
@@ -1031,6 +1042,7 @@ switch ($Accion) {
     'instalar'      { Instalar-BlueStacks }
     'listar'        { Listar }
     'listar-json'   { Listar-Json }
+    'info-json'     { Info-Json }
     'nuevo'         { Nuevo $Nombre }
     'prender'       { Prender $Nombre }
     'apagar'        { Apagar $Nombre }
@@ -1042,5 +1054,5 @@ switch ($Accion) {
     'reinstalar-wa' { Reinstalar-Wa $Nombre }
     'prender-todos' { Todos 'prender' }
     'apagar-todos'  { Todos 'apagar' }
-    default         { throw "Acción desconocida '$Accion'. Usa: instalar, nuevo, listar, listar-json, prender, apagar, ver, borrar, renombrar, wsp, optimizar, reinstalar-wa, prender-todos, apagar-todos." }
+    default         { throw "Acción desconocida '$Accion'. Usa: instalar, nuevo, listar, listar-json, info-json, prender, apagar, ver, borrar, renombrar, wsp, optimizar, reinstalar-wa, prender-todos, apagar-todos." }
 }
