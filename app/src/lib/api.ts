@@ -167,6 +167,11 @@ export interface KeepAliveStatus {
   message: string;
 }
 
+export interface EmbedState {
+  attached: string[];
+  active: string | null;
+}
+
 export type Light = "verde" | "amarillo" | "rojo";
 
 export interface LineHealthPart {
@@ -222,6 +227,14 @@ export const api = {
   runPodLinks: (name: string, dryRun: boolean, powerOffAfter: boolean) =>
     invoke<LinkResult[]>("run_pod_links", { name, dryRun, powerOffAfter }),
   cancelPodLinks: () => invoke<void>("cancel_pod_links"),
+  getEmbedView: async () => Boolean(((await invoke<Settings>("get_settings")) as Settings & { embedView?: boolean }).embedView),
+  setEmbedView: (enabled: boolean) => invoke<Settings>("set_embed_view", { enabled }),
+  embedAttach: (name: string, x: number, y: number, width: number, height: number, dpr: number) =>
+    invoke<EmbedState>("embed_attach", { name, x, y, width, height, dpr }),
+  embedResize: (name: string, x: number, y: number, width: number, height: number, dpr: number) =>
+    invoke<void>("embed_resize", { name, x, y, width, height, dpr }),
+  embedActivate: (name: string | null) => invoke<EmbedState>("embed_activate", { name }),
+  embedDetach: (name: string) => invoke<EmbedState>("embed_detach", { name }),
   keepAliveStatus: () => invoke<KeepAliveStatus>("keepalive_status"),
   setKeepAlive: (enabled: boolean) => invoke<KeepAliveStatus>("set_keep_alive", { enabled }),
   lineHealth: () => invoke<LineHealthData>("line_health"),

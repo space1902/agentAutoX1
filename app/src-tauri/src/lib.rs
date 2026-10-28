@@ -1,4 +1,5 @@
 mod data;
+mod embed;
 mod linker;
 mod keepalive;
 mod keepalive_real;
@@ -28,6 +29,7 @@ struct AppState {
     keepalive: Arc<keepalive::Scheduler>,
     keep_stop: Arc<AtomicBool>,
     last_on_file: PathBuf,
+    embedder: Mutex<Option<Arc<embed::Embedder<embed::win::RealWin>>>>,
 }
 
 /// Profile the app is running right now (the engine refuses to edit it).
@@ -79,6 +81,7 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Setti
     let mut merged = Settings::merge_saved(&state.root, &serde_json::to_value(&settings).map_err(|e| e.to_string())?);
     // The Ajustes form does not own this switch: it has its own command.
     merged.keep_alive = state.current().keep_alive;
+    merged.embed_view = state.current().embed_view;
     merged.save(&state.settings_file)?;
     *state.settings.lock().unwrap() = merged.clone();
     Ok(merged)
@@ -167,6 +170,79 @@ fn set_keep_alive(state: State<'_, AppState>, enabled: bool) -> Result<keepalive
     *state.settings.lock().unwrap() = next;
     state.keepalive.set_enabled(enabled);
     Ok(state.keepalive.status())
+}
+
+// ---------- embedded BlueStacks view (experimental, behind settings.embedView) ----------
+
+/// The embedder is created on first use, parented to the main window.
+fn embedder_for(window: &tauri::WebviewWindow, state: &AppState) -> Result<Arc<embed::Embedder<embed::win::RealWin>>, String> {
+    if !state.current().embed_view {
+        return Err("La vista embebida está desactivada (función experimental).".into());
+    }
+    let mut slot = state.embedder.lock().unwrap();
+    if let Some(existing) = slot.as_ref() {
+        return Ok(existing.clone());
+    }
+    let hwnd = window.hwnd().map_err(|e| format!("No se pudo obtener la ventana de la app: {e}"))?;
+    let created = Arc::new(embed::Embedder::new(embed::win::RealWin::default(), hwnd.0 as isize));
+    *slot = Some(created.clone());
+    Ok(created)
+}
+
+#[tauri::command]
+fn set_embed_view(state: State<'_, AppState>, enabled: bool) -> Result<Settings, String> {
+    let mut next = state.current();
+    next.embed_view = enabled;
+    next.save(&state.settings_file)?;
+    *state.settings.lock().unwrap() = next.clone();
+    if !enabled {
+        if let Some(embedder) = state.embedder.lock().unwrap().take() {
+            embedder.detach_all();
+        }
+    }
+    Ok(next)
+}
+
+/// Puts the pod's BlueStacks window inside the app at the measured rectangle (CSS pixels + devicePixelRatio).
+#[tauri::command]
+async fn embed_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String, x: f64, y: f64, width: f64, height: f64, dpr: f64) -> Result<embed::EmbedState, String> {
+    if !util::is_valid_pod_name(&name) {
+        return Err(format!("Nombre de pod no válido: {name}"));
+    }
+    let embedder = embedder_for(&window, &state)?;
+    blocking(move || {
+        embedder.attach(&name, embed::scale_rect(x, y, width, height, dpr))?;
+        Ok(embedder.state())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn embed_resize(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String, x: f64, y: f64, width: f64, height: f64, dpr: f64) -> Result<(), String> {
+    let embedder = embedder_for(&window, &state)?;
+    blocking(move || embedder.resize(&name, embed::scale_rect(x, y, width, height, dpr))).await
+}
+
+/// Shows that pod's window and hides the rest; `None` hides all of them (modal open, other section...).
+#[tauri::command]
+async fn embed_activate(window: tauri::WebviewWindow, state: State<'_, AppState>, name: Option<String>) -> Result<embed::EmbedState, String> {
+    let embedder = embedder_for(&window, &state)?;
+    blocking(move || {
+        embedder.activate(name.as_deref());
+        Ok(embedder.state())
+    })
+    .await
+}
+
+/// Gives the window back (top-level, original place) and brings it to the front: "Abrir en ventana aparte".
+#[tauri::command]
+async fn embed_detach(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String) -> Result<embed::EmbedState, String> {
+    let embedder = embedder_for(&window, &state)?;
+    blocking(move || {
+        embedder.detach(&name)?;
+        Ok(embedder.state())
+    })
+    .await
 }
 
 /// Pods that must be linked before `name` can start: unlinked testers whose phone belongs to a pod.
@@ -340,6 +416,7 @@ pub fn run() {
                 keepalive,
                 keep_stop,
                 last_on_file,
+                embedder: Mutex::new(None),
             });
             Ok(())
         })
@@ -348,6 +425,10 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let state = window.state::<AppState>();
                 // A pod turned on by the keep-alive check must be turned off before the app goes away.
+                // Embedded BlueStacks windows must go back to top level or they would die with the app window.
+                if let Some(embedder) = state.embedder.lock().unwrap().take() {
+                    embedder.detach_all();
+                }
                 state.keep_stop.store(true, Ordering::SeqCst);
                 for _ in 0..90 {
                     if state.keepalive.status().phase == keepalive::Phase::Idle {
@@ -382,6 +463,11 @@ pub fn run() {
             cancel_pod_links,
             keepalive_status,
             set_keep_alive,
+            set_embed_view,
+            embed_attach,
+            embed_resize,
+            embed_activate,
+            embed_detach,
             read_warmup_data,
             read_pods_wsp,
             warmup_status,

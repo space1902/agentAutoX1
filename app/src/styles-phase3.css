@@ -77,3 +77,14 @@
 .info:hover .info-tip, .info:focus-visible .info-tip { display: block; }
 .yesno button { min-width: 38px; }
 .keepalive-line { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }
+
+/* ---- Embedded BlueStacks view ---- */
+.head-actions { display: inline-flex; align-items: center; gap: 10px; }
+.embed-tabs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.embed-tab { display: inline-flex; align-items: center; border-radius: 999px; background: var(--chip-bg); border: 1px solid var(--border); }
+.embed-tab button { background: none; border: 0; color: var(--text); font: inherit; font-size: 13px; padding: 6px 10px 6px 14px; cursor: pointer; border-radius: 999px; }
+.embed-tab.active { background: var(--nav-active-bg); border-color: var(--accent); }
+.embed-tab .embed-close { padding: 6px 10px 6px 4px; color: var(--muted); display: inline-flex; }
+.embed-popout { margin-left: auto; }
+.embed-stage { height: min(68vh, 720px); border-radius: 14px; background: var(--log-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
+.link-btn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; }

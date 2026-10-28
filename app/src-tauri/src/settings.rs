@@ -22,6 +22,9 @@ pub struct Settings {
     /// "Auto revisión de números en los pods": keeps WhatsApp from unlinking pods that stay off. OFF by default.
     #[serde(default)]
     pub keep_alive: bool,
+    /// Experimental: show each running pod's BlueStacks window inside the app (feature flag, OFF by default).
+    #[serde(default)]
+    pub embed_view: bool,
 }
 
 /// Locates the agentAutoX1 folder: walks up from the executable looking for `engines/warmup`,
@@ -59,6 +62,7 @@ impl Settings {
             pods_wsp_file: s(sibling.join("whatsapp-pods").join("pods-wsp.json")),
             node_path: "node".to_string(),
             keep_alive: false,
+            embed_view: false,
         }
     }
 
@@ -79,6 +83,7 @@ impl Settings {
         pick("podsWspFile", &mut out.pods_wsp_file);
         pick("nodePath", &mut out.node_path);
         out.keep_alive = saved.get("keepAlive").and_then(|v| v.as_bool()).unwrap_or(false);
+        out.embed_view = saved.get("embedView").and_then(|v| v.as_bool()).unwrap_or(false);
         out
     }
 
@@ -141,6 +146,14 @@ mod tests {
         s.save(&file).unwrap();
         assert!(Settings::load(&file, root).keep_alive);
         let _ = fs::remove_file(file);
+    }
+
+    #[test]
+    fn embed_view_flag_is_off_by_default_and_persisted_when_on() {
+        let root = Path::new("C:/p/agentAutoX1");
+        assert!(!Settings::defaults(root).embed_view);
+        assert!(!Settings::merge_saved(root, &serde_json::json!({ "embedView": 1 })).embed_view);
+        assert!(Settings::merge_saved(root, &serde_json::json!({ "embedView": true })).embed_view);
     }
 
     #[test]

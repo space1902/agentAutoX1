@@ -1,6 +1,7 @@
 import { AnimatePresence } from "framer-motion";
-import { Cable, Check, Eye, Loader2, MonitorSmartphone, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, Smartphone, Trash2 } from "lucide-react";
+import { Check, Eye, Loader2, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, Smartphone, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import EmbeddedView from "../components/EmbeddedView";
 import { KeepAliveCard, KeepAliveSwitch, useKeepAlive } from "../components/KeepAlive";
 import { Modal, ProgressBar, Warning } from "../components/Modal";
 import { Banner, Card, Notice, Pill, SkeletonGrid, StatCard } from "../components/ui";
@@ -152,19 +153,7 @@ export default function MultiWhatsApp({ creation }: Props) {
         </div>
       )}
 
-      {/* The BlueStacks window will be embedded here in a later phase. */}
-      <Card>
-        <div className="card-head">
-          <h2 className="card-title">Vista embebida</h2>
-          <Pill tone="amber">Próximamente</Pill>
-        </div>
-        <div className="placeholder" data-phase="2">
-          <MonitorSmartphone size={30} aria-hidden />
-          <strong>Vista embebida (próximamente)</strong>
-          <span>Aquí verás la ventana de BlueStacks de cada pod dentro de la app.</span>
-          <Cable size={16} aria-hidden />
-        </div>
-      </Card>
+      <EmbeddedView pods={pods ?? []} suspended={dialog !== null} />
 
       <AnimatePresence>
         {dialog?.kind === "create" && (
