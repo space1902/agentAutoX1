@@ -1,0 +1,26 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "agentAutoX1 - unified desktop panel for WhatsApp pods and the warm-up bots"
+authors = ["agentAutoX1"]
+edition = "2024"
+
+[lib]
+# The `_lib` suffix keeps the lib name unique vs. the bin name (Windows quirk, see rust-lang/cargo#8519).
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
