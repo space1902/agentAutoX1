@@ -1,5 +1,7 @@
 mod data;
 mod linker;
+mod keepalive;
+mod keepalive_real;
 mod linker_real;
 mod pods;
 mod profiles;
@@ -23,6 +25,9 @@ struct AppState {
     runner: warmup::Runner,
     pod_job: pods::PodJob,
     link_cancel: Arc<AtomicBool>,
+    keepalive: Arc<keepalive::Scheduler>,
+    keep_stop: Arc<AtomicBool>,
+    last_on_file: PathBuf,
 }
 
 /// Profile the app is running right now (the engine refuses to edit it).
@@ -71,7 +76,9 @@ fn get_default_settings(state: State<'_, AppState>) -> Settings {
 
 #[tauri::command]
 fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings, String> {
-    let merged = Settings::merge_saved(&state.root, &serde_json::to_value(&settings).map_err(|e| e.to_string())?);
+    let mut merged = Settings::merge_saved(&state.root, &serde_json::to_value(&settings).map_err(|e| e.to_string())?);
+    // The Ajustes form does not own this switch: it has its own command.
+    merged.keep_alive = state.current().keep_alive;
     merged.save(&state.settings_file)?;
     *state.settings.lock().unwrap() = merged.clone();
     Ok(merged)
@@ -80,7 +87,14 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Setti
 #[tauri::command]
 async fn list_pods(state: State<'_, AppState>) -> Result<Vec<pods::Pod>, String> {
     let settings = state.current();
-    blocking(move || pods::list(&settings)).await
+    let last_on = state.last_on_file.clone();
+    blocking(move || {
+        let list = pods::list(&settings)?;
+        // Every pod seen running counts as "last on now" for the keep-alive scheduler.
+        keepalive_real::record_running(&last_on, &list);
+        Ok(list)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -137,6 +151,22 @@ async fn delete_pod(state: State<'_, AppState>, name: String, confirm: String) -
         pods::delete(&settings, &name, &confirm)
     })
     .await
+}
+
+#[tauri::command]
+fn keepalive_status(state: State<'_, AppState>) -> keepalive::KeepAliveStatus {
+    state.keepalive.status()
+}
+
+/// Turns the "Auto revisión de números en los pods" switch on or off (persisted in the app settings).
+#[tauri::command]
+fn set_keep_alive(state: State<'_, AppState>, enabled: bool) -> Result<keepalive::KeepAliveStatus, String> {
+    let mut next = state.current();
+    next.keep_alive = enabled;
+    next.save(&state.settings_file)?;
+    *state.settings.lock().unwrap() = next;
+    state.keepalive.set_enabled(enabled);
+    Ok(state.keepalive.status())
 }
 
 /// Pods that must be linked before `name` can start: unlinked testers whose phone belongs to a pod.
@@ -279,13 +309,37 @@ pub fn run() {
             let root = settings::find_project_root();
             let settings_file = app.path().app_config_dir()?.join("settings.json");
             let settings = Settings::load(&settings_file, &root);
+            let last_on_file = app.path().app_config_dir()?.join("pods-last-on.json");
+            let notifier = app.handle().clone();
+            let keepalive = Arc::new(keepalive::Scheduler::new(
+                keepalive::Config::default(),
+                Box::new(move |status| {
+                    let _ = notifier.emit("keepalive-status", status);
+                }),
+            ));
+            keepalive.set_enabled(settings.keep_alive);
+            let settings = Arc::new(Mutex::new(settings));
+            let pod_job = pods::PodJob::default();
+            let keep_stop = Arc::new(AtomicBool::new(false));
+            keepalive_real::spawn_loop(
+                keepalive.clone(),
+                Arc::new(keepalive_real::RealHost {
+                    settings: settings.clone(),
+                    pod_job: pod_job.clone(),
+                    state_file: last_on_file.clone(),
+                    stop: keep_stop.clone(),
+                }),
+            );
             app.manage(AppState {
                 root,
                 settings_file,
-                settings: Arc::new(Mutex::new(settings)),
+                settings,
                 runner: warmup::Runner::default(),
-                pod_job: pods::PodJob::default(),
+                pod_job,
                 link_cancel: Arc::new(AtomicBool::new(false)),
+                keepalive,
+                keep_stop,
+                last_on_file,
             });
             Ok(())
         })
@@ -293,6 +347,14 @@ pub fn run() {
             // Never leave a warm-up profile orphaned when the window is closed.
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let state = window.state::<AppState>();
+                // A pod turned on by the keep-alive check must be turned off before the app goes away.
+                state.keep_stop.store(true, Ordering::SeqCst);
+                for _ in 0..90 {
+                    if state.keepalive.status().phase == keepalive::Phase::Idle {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
                 if state.runner.status().running {
                     let _ = state.runner.stop(window.app_handle());
                 }
@@ -318,6 +380,8 @@ pub fn run() {
             plan_pod_links,
             run_pod_links,
             cancel_pod_links,
+            keepalive_status,
+            set_keep_alive,
             read_warmup_data,
             read_pods_wsp,
             warmup_status,

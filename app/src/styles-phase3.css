@@ -68,3 +68,12 @@
 }
 .big-code strong { font-size: 38px; letter-spacing: 0.18em; font-variant-numeric: tabular-nums; user-select: all; }
 .big-code small { color: var(--muted); max-width: 520px; }
+
+/* ---- Keep-alive switch ---- */
+.keepalive-switch { display: inline-flex; align-items: center; gap: 8px; padding: 6px 8px 6px 14px; border-radius: 999px; background: rgba(0, 0, 0, 0.28); font-size: 13px; }
+.info { position: relative; display: inline-flex; color: var(--muted); cursor: help; outline: none; }
+.info:hover, .info:focus-visible { color: var(--text); }
+.info-tip { position: absolute; z-index: 40; top: calc(100% + 10px); right: -8px; width: 280px; display: none; padding: 10px 12px; border-radius: 12px; background: var(--tip-bg); color: var(--tip-text); border: 1px solid var(--border); box-shadow: var(--shadow); font-size: 12.5px; line-height: 1.45; text-align: left; }
+.info:hover .info-tip, .info:focus-visible .info-tip { display: block; }
+.yesno button { min-width: 38px; }
+.keepalive-line { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; }

@@ -1,6 +1,7 @@
 import { AnimatePresence } from "framer-motion";
 import { Cable, Check, Eye, Loader2, MonitorSmartphone, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, Smartphone, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { KeepAliveCard, KeepAliveSwitch, useKeepAlive } from "../components/KeepAlive";
 import { Modal, ProgressBar, Warning } from "../components/Modal";
 import { Banner, Card, Notice, Pill, SkeletonGrid, StatCard } from "../components/ui";
 import { api, errorText, type Pod, type RegistryRow } from "../lib/api";
@@ -49,6 +50,7 @@ export default function MultiWhatsApp({ creation }: Props) {
     void load();
   }, [load]);
 
+  const keepAlive = useKeepAlive();
   const creating = creation.state.running;
   const locked = busy !== null || creating;
 
@@ -75,6 +77,7 @@ export default function MultiWhatsApp({ creation }: Props) {
         title="MultiWhatsApp"
         subtitle="Tus pods de WhatsApp Business sobre BlueStacks: crea, edita, enciende, apaga o trae al frente cada uno."
       >
+        <KeepAliveSwitch enabled={keepAlive.status?.enabled ?? false} onChange={(v) => void keepAlive.toggle(v)} />
         <button className="btn secondary" onClick={() => void load()} disabled={loading || locked}>
           <RefreshCw size={15} aria-hidden /> Actualizar lista
         </button>
@@ -94,6 +97,9 @@ export default function MultiWhatsApp({ creation }: Props) {
       {info && <Notice kind="ok">{info}</Notice>}
       {busy && <Notice kind="ok">Ejecutando «{busy.replace(":", " ")}». Prender puede tardar hasta unos 4 minutos mientras arranca Android.</Notice>}
       {creating && <Notice kind="ok">Creando el pod «{creation.state.name}»: paso {creation.state.step} de {creation.state.total}. No cierres la app.</Notice>}
+
+      {keepAlive.error && <Notice>{keepAlive.error}</Notice>}
+      {keepAlive.status && <KeepAliveCard status={keepAlive.status} />}
 
       {loading && !pods ? (
         <SkeletonGrid />

@@ -153,6 +153,20 @@ export interface LinkResult {
   code: string | null;
 }
 
+export type KeepAlivePhase = "idle" | "scanning" | "powering-on" | "holding" | "powering-off" | "waiting-exit";
+
+export interface KeepAliveStatus {
+  enabled: boolean;
+  phase: KeepAlivePhase;
+  current: string | null;
+  /** Unix second when the pod being checked will be turned off. */
+  holdUntil: number | null;
+  queue: string[];
+  lastRun: { pod: string; at: number; outcome: "ok" | "skipped" | "failed" | "interrupted"; note: string } | null;
+  lastScanAt: number | null;
+  message: string;
+}
+
 export type Light = "verde" | "amarillo" | "rojo";
 
 export interface LineHealthPart {
@@ -208,6 +222,8 @@ export const api = {
   runPodLinks: (name: string, dryRun: boolean, powerOffAfter: boolean) =>
     invoke<LinkResult[]>("run_pod_links", { name, dryRun, powerOffAfter }),
   cancelPodLinks: () => invoke<void>("cancel_pod_links"),
+  keepAliveStatus: () => invoke<KeepAliveStatus>("keepalive_status"),
+  setKeepAlive: (enabled: boolean) => invoke<KeepAliveStatus>("set_keep_alive", { enabled }),
   lineHealth: () => invoke<LineHealthData>("line_health"),
   readWarmupData: () => invoke<WarmupData>("read_warmup_data"),
   readPodsWsp: () => invoke<Record<string, string>>("read_pods_wsp"),

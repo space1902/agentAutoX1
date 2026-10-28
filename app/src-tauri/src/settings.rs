@@ -19,6 +19,9 @@ pub struct Settings {
     pub pods_wsp_file: String,
     /// Node executable.
     pub node_path: String,
+    /// "Auto revisión de números en los pods": keeps WhatsApp from unlinking pods that stay off. OFF by default.
+    #[serde(default)]
+    pub keep_alive: bool,
 }
 
 /// Locates the agentAutoX1 folder: walks up from the executable looking for `engines/warmup`,
@@ -55,6 +58,7 @@ impl Settings {
             apk_dir: s(sibling.join("whatsapp-pods").join("apk")),
             pods_wsp_file: s(sibling.join("whatsapp-pods").join("pods-wsp.json")),
             node_path: "node".to_string(),
+            keep_alive: false,
         }
     }
 
@@ -74,6 +78,7 @@ impl Settings {
         pick("apkDir", &mut out.apk_dir);
         pick("podsWspFile", &mut out.pods_wsp_file);
         pick("nodePath", &mut out.node_path);
+        out.keep_alive = saved.get("keepAlive").and_then(|v| v.as_bool()).unwrap_or(false);
         out
     }
 
@@ -120,6 +125,22 @@ mod tests {
         let m = Settings::merge_saved(root, &saved);
         assert_eq!(m.data_dir, "D:/data");
         assert_eq!(m.node_path, "node");
+    }
+
+    #[test]
+    fn keep_alive_is_off_by_default_and_persisted_when_on() {
+        let root = Path::new("C:/p/agentAutoX1");
+        assert!(!Settings::defaults(root).keep_alive);
+        assert!(!Settings::merge_saved(root, &serde_json::json!({})).keep_alive);
+        assert!(!Settings::merge_saved(root, &serde_json::json!({ "keepAlive": "yes" })).keep_alive, "only a real boolean counts");
+        assert!(Settings::merge_saved(root, &serde_json::json!({ "keepAlive": true })).keep_alive);
+
+        let file = std::env::temp_dir().join(format!("agentautox1-keepalive-settings-{}.json", std::process::id()));
+        let mut s = Settings::defaults(root);
+        s.keep_alive = true;
+        s.save(&file).unwrap();
+        assert!(Settings::load(&file, root).keep_alive);
+        let _ = fs::remove_file(file);
     }
 
     #[test]

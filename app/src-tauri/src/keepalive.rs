@@ -1,0 +1,706 @@
+//! "Auto revisión de números en los pods": WhatsApp unlinks devices that stay off too long, so when this is ON every
+//! pod that has been off for more than 24 h is turned on for ~15 minutes, then off again, ONE pod at a time.
+//!
+//! The decisions live here and run against `KeepOps` + `Clock` (fake clock in the tests):
+//!   - `observe_running` / `due_pods`: the per-pod "last time it was on" bookkeeping and the queue.
+//!   - `Scheduler::scan`: build the queue and process it sequentially.
+//!   - `Scheduler::check_pod`: on -> hold -> off -> wait until the BlueStacks process is gone and memory is free.
+//! Real PowerShell/process/memory access is in `keepalive_real.rs`.
+
+use crate::pods::Pod;
+use serde::{Deserialize, Serialize};
+use std::any::Any;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
+pub const HOLD_SECS: i64 = 15 * 60;
+pub const THRESHOLD_SECS: i64 = 24 * 3600;
+pub const SCAN_SECS: i64 = 30 * 60;
+
+/// Last moment each pod was seen on (unix seconds), keyed by BlueStacks instance id so renames do not lose it.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LastOnState {
+    #[serde(default)]
+    pub last_on: BTreeMap<String, i64>,
+}
+
+/// Records every running pod as seen on at `now`. Returns true when the state changed.
+pub fn observe_running(state: &mut LastOnState, pods: &[Pod], now: i64) -> bool {
+    let mut changed = false;
+    for pod in pods.iter().filter(|p| p.state == "running") {
+        if state.last_on.get(&pod.instance_id) != Some(&now) {
+            state.last_on.insert(pod.instance_id.clone(), now);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Stopped pods with a phone number that were last on more than `threshold` ago, oldest first.
+/// A pod we never saw on counts as the oldest (the app cannot know how long it has been off).
+pub fn due_pods(state: &LastOnState, pods: &[Pod], now: i64, threshold: i64) -> Vec<Pod> {
+    let mut due: Vec<(i64, Pod)> = pods
+        .iter()
+        .filter(|p| p.state != "running" && p.phone.as_deref().is_some_and(|ph| !ph.trim().is_empty()))
+        .filter_map(|p| match state.last_on.get(&p.instance_id) {
+            Some(&at) if now - at <= threshold => None,
+            Some(&at) => Some((at, p.clone())),
+            None => Some((i64::MIN, p.clone())),
+        })
+        .collect();
+    due.sort_by_key(|(at, pod)| (*at, pod.name.clone()));
+    due.into_iter().map(|(_, p)| p).collect()
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Phase {
+    #[default]
+    Idle,
+    Scanning,
+    PoweringOn,
+    Holding,
+    PoweringOff,
+    WaitingExit,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LastRun {
+    pub pod: String,
+    pub at: i64,
+    /// "ok" | "skipped" | "failed" | "interrupted"
+    pub outcome: String,
+    pub note: String,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeepAliveStatus {
+    pub enabled: bool,
+    pub phase: Phase,
+    pub current: Option<String>,
+    /// Unix second when the current pod will be turned off (only while holding).
+    pub hold_until: Option<i64>,
+    pub queue: Vec<String>,
+    pub last_run: Option<LastRun>,
+    pub last_scan_at: Option<i64>,
+    pub message: String,
+}
+
+pub trait Clock {
+    fn now(&self) -> i64;
+    fn sleep(&self, secs: i64);
+}
+
+pub trait KeepOps {
+    fn enabled(&self) -> bool;
+    /// The app is closing: finish what is on and stop.
+    fn should_stop(&self) -> bool;
+    fn list(&self) -> Result<Vec<Pod>, String>;
+    fn power_on(&self, name: &str) -> Result<(), String>;
+    fn power_off(&self, name: &str) -> Result<(), String>;
+    /// Takes the global pod-job slot (create/rename/delete/phone/link). None when something else is running.
+    fn try_begin_job(&self, what: &str) -> Option<Box<dyn Any>>;
+    fn available_memory_mb(&self) -> Option<u64>;
+    fn load_state(&self) -> LastOnState;
+    fn save_state(&self, state: &LastOnState);
+}
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub hold_secs: i64,
+    pub threshold_secs: i64,
+    /// How long to wait for the BlueStacks process to disappear and memory to come back after turning a pod off.
+    pub exit_timeout_secs: i64,
+    /// Memory may stay this far below the level measured before the pod was turned on.
+    pub memory_tolerance_mb: u64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config { hold_secs: HOLD_SECS, threshold_secs: THRESHOLD_SECS, exit_timeout_secs: 120, memory_tolerance_mb: 400 }
+    }
+}
+
+type Notify = Box<dyn Fn(&KeepAliveStatus) + Send + Sync>;
+
+pub struct Scheduler {
+    status: Arc<Mutex<KeepAliveStatus>>,
+    config: Config,
+    notify: Notify,
+}
+
+impl Scheduler {
+    pub fn new(config: Config, notify: Notify) -> Scheduler {
+        Scheduler { status: Arc::new(Mutex::new(KeepAliveStatus::default())), config, notify }
+    }
+
+    pub fn status(&self) -> KeepAliveStatus {
+        self.status.lock().unwrap().clone()
+    }
+
+    fn update(&self, change: impl FnOnce(&mut KeepAliveStatus)) {
+        let snapshot = {
+            let mut s = self.status.lock().unwrap();
+            change(&mut s);
+            s.clone()
+        };
+        (self.notify)(&snapshot);
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.update(|s| {
+            s.enabled = enabled;
+            if !enabled && s.phase == Phase::Idle {
+                s.queue.clear();
+                s.message = "Desactivada.".into();
+            }
+        });
+    }
+
+    /// One pass: record the running pods, build the queue of due pods and process it, one pod at a time.
+    pub fn scan(&self, ops: &dyn KeepOps, clock: &dyn Clock) {
+        self.update(|s| {
+            s.phase = Phase::Scanning;
+            s.message = "Revisando qué pods llevan más de 24 horas apagados…".into();
+        });
+        let pods = match ops.list() {
+            Ok(p) => p,
+            Err(e) => {
+                self.update(|s| {
+                    s.phase = Phase::Idle;
+                    s.message = format!("No se pudo leer la lista de pods: {e}");
+                });
+                return;
+            }
+        };
+
+        let now = clock.now();
+        let mut state = ops.load_state();
+        if observe_running(&mut state, &pods, now) {
+            ops.save_state(&state);
+        }
+        let due = due_pods(&state, &pods, now, self.config.threshold_secs);
+        let names: Vec<String> = due.iter().map(|p| p.name.clone()).collect();
+        self.update(|s| {
+            s.queue = names.clone();
+            s.last_scan_at = Some(now);
+            s.message = if names.is_empty() { "Todos los pods están al día.".into() } else { format!("{} pod(s) por revisar.", names.len()) };
+            s.phase = Phase::Idle;
+        });
+
+        for pod in due {
+            if !ops.enabled() || ops.should_stop() {
+                break;
+            }
+            let run = self.check_pod(ops, clock, &pod);
+            self.update(|s| {
+                s.queue.retain(|n| n != &pod.name);
+                s.last_run = Some(run);
+            });
+        }
+        self.update(|s| {
+            s.phase = Phase::Idle;
+            s.current = None;
+            s.hold_until = None;
+            s.queue.clear();
+            if s.message.is_empty() || s.message.contains("por revisar") {
+                s.message = "Revisión terminada.".into();
+            }
+        });
+    }
+
+    fn run_record(&self, clock: &dyn Clock, pod: &Pod, outcome: &str, note: impl Into<String>) -> LastRun {
+        LastRun { pod: pod.name.clone(), at: clock.now(), outcome: outcome.into(), note: note.into() }
+    }
+
+    /// Power on, keep on for `hold_secs`, power off, wait until the process is gone and memory is free.
+    pub fn check_pod(&self, ops: &dyn KeepOps, clock: &dyn Clock, pod: &Pod) -> LastRun {
+        let name = pod.name.as_str();
+
+        // Somebody may have turned it on (or it may be gone) since the queue was built.
+        let fresh = match ops.list() {
+            Ok(list) => list.into_iter().find(|p| p.instance_id == pod.instance_id),
+            Err(e) => return self.run_record(clock, pod, "failed", format!("No se pudo leer el estado: {e}")),
+        };
+        let Some(fresh) = fresh else { return self.run_record(clock, pod, "skipped", "El pod ya no existe.") };
+        if fresh.state == "running" {
+            let mut state = ops.load_state();
+            state.last_on.insert(pod.instance_id.clone(), clock.now());
+            ops.save_state(&state);
+            return self.run_record(clock, pod, "skipped", "Ya estaba encendido (en uso): solo se anotó su última vez encendido.");
+        }
+
+        let Some(_job) = ops.try_begin_job(&format!("revisión de {name}")) else {
+            return self.run_record(clock, pod, "skipped", "Hay otra operación de pods en curso; se intentará en la próxima revisión.");
+        };
+
+        let baseline = ops.available_memory_mb();
+        self.update(|s| {
+            s.phase = Phase::PoweringOn;
+            s.current = Some(name.to_string());
+            s.hold_until = None;
+            s.message = format!("Encendiendo {name}…");
+        });
+
+        let powered = ops.power_on(name);
+        let mut state = ops.load_state();
+        if powered.is_ok() {
+            state.last_on.insert(pod.instance_id.clone(), clock.now());
+            ops.save_state(&state);
+        }
+        let mut failure = powered.err().map(|e| format!("No se pudo encender: {e}"));
+        let mut interrupted = false;
+
+        if failure.is_none() {
+            let until = clock.now() + self.config.hold_secs;
+            self.update(|s| {
+                s.phase = Phase::Holding;
+                s.hold_until = Some(until);
+                s.message = format!("Revisando {name}: se mantiene encendido unos minutos.");
+            });
+            while clock.now() < until {
+                if !ops.enabled() || ops.should_stop() {
+                    interrupted = true;
+                    break;
+                }
+                clock.sleep(1);
+            }
+        }
+
+        self.update(|s| {
+            s.phase = Phase::PoweringOff;
+            s.hold_until = None;
+            s.message = format!("Apagando {name}…");
+        });
+        let visited = failure.is_none();
+        let off = ops.power_off(name);
+        if visited {
+            // It was on until now: that is its last time on.
+            state.last_on.insert(pod.instance_id.clone(), clock.now());
+            ops.save_state(&state);
+        }
+        if let Err(e) = off {
+            failure.get_or_insert(format!("No se pudo apagar: {e}"));
+        }
+
+        let waited = self.wait_until_released(ops, clock, pod, baseline);
+
+        let (outcome, note) = match (failure, interrupted) {
+            (Some(note), _) => ("failed", note),
+            (None, true) => ("interrupted", format!("Se apagó antes de tiempo. {waited}")),
+            (None, false) => ("ok", format!("Revisado: estuvo encendido {} min. {waited}", self.config.hold_secs / 60)),
+        };
+        self.run_record(clock, pod, outcome, note.trim().to_string())
+    }
+
+    /// Waits until the pod reads as stopped and the free memory is back near its level before the pod started.
+    fn wait_until_released(&self, ops: &dyn KeepOps, clock: &dyn Clock, pod: &Pod, baseline: Option<u64>) -> String {
+        self.update(|s| {
+            s.phase = Phase::WaitingExit;
+            s.message = format!("Esperando a que {} libere la memoria…", pod.name);
+        });
+        let deadline = clock.now() + self.config.exit_timeout_secs;
+        loop {
+            let stopped = ops.list().map(|l| l.iter().any(|p| p.instance_id == pod.instance_id && p.state != "running")).unwrap_or(false);
+            let memory_ok = match (baseline, ops.available_memory_mb()) {
+                (Some(before), Some(now)) => now + self.config.memory_tolerance_mb >= before,
+                _ => true,
+            };
+            if stopped && memory_ok {
+                return "Proceso cerrado y memoria liberada.".into();
+            }
+            if clock.now() >= deadline {
+                return if stopped {
+                    "El proceso cerró, pero la memoria tardó en liberarse (se siguió igual).".into()
+                } else {
+                    "El pod seguía figurando como encendido al terminar la espera.".into()
+                };
+            }
+            clock.sleep(2);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    fn pod(name: &str, running: bool, phone: Option<&str>) -> Pod {
+        Pod {
+            name: name.into(),
+            instance_id: format!("Rvc64_{name}"),
+            state: if running { "running" } else { "stopped" }.into(),
+            serial: running.then(|| "emulator-5564".to_string()),
+            adb_port: 5565,
+            phone: phone.map(str::to_string),
+        }
+    }
+
+    const H: i64 = 3600;
+
+    // ----- pure bookkeeping -----
+
+    #[test]
+    fn running_pods_are_recorded_as_seen_now() {
+        let mut state = LastOnState::default();
+        let pods = vec![pod("a", true, Some("1")), pod("b", false, Some("2"))];
+        assert!(observe_running(&mut state, &pods, 1000));
+        assert_eq!(state.last_on.get("Rvc64_a"), Some(&1000));
+        assert!(!state.last_on.contains_key("Rvc64_b"));
+        assert!(!observe_running(&mut state, &pods, 1000), "same second: no change");
+    }
+
+    #[test]
+    fn due_pods_are_stopped_with_a_phone_and_older_than_the_threshold_oldest_first() {
+        let mut state = LastOnState::default();
+        state.last_on.insert("Rvc64_old".into(), 100 * H - 50 * H);
+        state.last_on.insert("Rvc64_older".into(), 100 * H - 90 * H);
+        state.last_on.insert("Rvc64_fresh".into(), 100 * H - 5 * H);
+        state.last_on.insert("Rvc64_edge".into(), 100 * H - 24 * H); // exactly 24 h: not yet
+        state.last_on.insert("Rvc64_running".into(), 0);
+        let pods = vec![
+            pod("old", false, Some("1")),
+            pod("older", false, Some("2")),
+            pod("fresh", false, Some("3")),
+            pod("edge", false, Some("4")),
+            pod("running", true, Some("5")),
+            pod("nophone", false, None),
+            pod("blankphone", false, Some("  ")),
+            pod("unknown", false, Some("6")),
+        ];
+        let names: Vec<String> = due_pods(&state, &pods, 100 * H, 24 * H).into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["unknown", "older", "old"], "never-seen first, then the oldest");
+    }
+
+    #[test]
+    fn state_round_trips_as_camel_case_json_and_tolerates_missing_fields() {
+        let mut state = LastOnState::default();
+        state.last_on.insert("Rvc64_1".into(), 42);
+        let text = serde_json::to_string(&state).unwrap();
+        assert!(text.contains("lastOn"));
+        assert_eq!(serde_json::from_str::<LastOnState>(&text).unwrap(), state);
+        assert_eq!(serde_json::from_str::<LastOnState>("{}").unwrap(), LastOnState::default());
+    }
+
+    // ----- scheduler against a fake pod host and a fake clock -----
+
+    struct FakeClock(Cell<i64>);
+    impl Clock for FakeClock {
+        fn now(&self) -> i64 {
+            self.0.get()
+        }
+        fn sleep(&self, secs: i64) {
+            self.0.set(self.0.get() + secs);
+        }
+    }
+
+    struct FakeHost<'a> {
+        clock: &'a FakeClock,
+        pods: RefCell<Vec<Pod>>,
+        log: RefCell<Vec<String>>,
+        state: RefCell<LastOnState>,
+        enabled: Cell<bool>,
+        stop: Cell<bool>,
+        busy: Cell<bool>,
+        power_on_error: RefCell<Option<String>>,
+        /// Free memory readings; the last one repeats.
+        memory: RefCell<Vec<u64>>,
+        /// Seconds a pod keeps reading as running after power_off.
+        exit_delay: Cell<i64>,
+        /// (pod name, unix second until which it still reads as running)
+        lingering: RefCell<Option<(String, i64)>>,
+        disable_after: Cell<Option<i64>>,
+    }
+
+    impl<'a> FakeHost<'a> {
+        fn new(clock: &'a FakeClock, pods: Vec<Pod>) -> FakeHost<'a> {
+            FakeHost {
+                clock,
+                pods: RefCell::new(pods),
+                log: RefCell::new(vec![]),
+                state: RefCell::new(LastOnState::default()),
+                enabled: Cell::new(true),
+                stop: Cell::new(false),
+                busy: Cell::new(false),
+                power_on_error: RefCell::new(None),
+                memory: RefCell::new(vec![8000]),
+                exit_delay: Cell::new(0),
+                lingering: RefCell::new(None),
+                disable_after: Cell::new(None),
+            }
+        }
+        fn log(&self) -> Vec<String> {
+            self.log.borrow().clone()
+        }
+        fn set_state(&self, name: &str, running: bool) {
+            for p in self.pods.borrow_mut().iter_mut().filter(|p| p.name == name) {
+                p.state = if running { "running" } else { "stopped" }.into();
+            }
+        }
+    }
+
+    impl KeepOps for FakeHost<'_> {
+        fn enabled(&self) -> bool {
+            if let Some(limit) = self.disable_after.get() {
+                if self.clock.now() >= limit {
+                    return false;
+                }
+            }
+            self.enabled.get()
+        }
+        fn should_stop(&self) -> bool {
+            self.stop.get()
+        }
+        fn list(&self) -> Result<Vec<Pod>, String> {
+            let mut pods = self.pods.borrow().clone();
+            // A pod that was powered off keeps reading "running" until its process is gone.
+            if let Some((name, until)) = self.lingering.borrow().clone() {
+                if self.clock.now() < until {
+                    pods.iter_mut().filter(|p| p.name == name).for_each(|p| p.state = "running".into());
+                }
+            }
+            Ok(pods)
+        }
+        fn power_on(&self, name: &str) -> Result<(), String> {
+            self.log.borrow_mut().push(format!("on:{name}@{}", self.clock.now()));
+            if let Some(e) = self.power_on_error.borrow().clone() {
+                return Err(e);
+            }
+            self.set_state(name, true);
+            self.clock.sleep(30); // Android boot
+            Ok(())
+        }
+        fn power_off(&self, name: &str) -> Result<(), String> {
+            self.log.borrow_mut().push(format!("off:{name}@{}", self.clock.now()));
+            self.set_state(name, false);
+            if self.exit_delay.get() > 0 {
+                *self.lingering.borrow_mut() = Some((name.to_string(), self.clock.now() + self.exit_delay.get()));
+            }
+            Ok(())
+        }
+        fn try_begin_job(&self, what: &str) -> Option<Box<dyn Any>> {
+            if self.busy.get() {
+                return None;
+            }
+            self.log.borrow_mut().push(format!("job:{what}"));
+            Some(Box::new(()))
+        }
+        fn available_memory_mb(&self) -> Option<u64> {
+            let mut m = self.memory.borrow_mut();
+            if m.len() > 1 { Some(m.remove(0)) } else { m.first().copied() }
+        }
+        fn load_state(&self) -> LastOnState {
+            self.state.borrow().clone()
+        }
+        fn save_state(&self, state: &LastOnState) {
+            *self.state.borrow_mut() = state.clone();
+        }
+    }
+
+    fn scheduler() -> Scheduler {
+        Scheduler::new(Config { hold_secs: 15 * 60, threshold_secs: 24 * H, exit_timeout_secs: 60, memory_tolerance_mb: 300 }, Box::new(|_| {}))
+    }
+
+    #[test]
+    fn checking_a_pod_powers_on_holds_15_minutes_and_powers_off() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("3001112233"))]);
+        let s = scheduler();
+        let candidate = host.pods.borrow()[0].clone();
+        let run = s.check_pod(&host, &clock, &candidate);
+
+        assert_eq!(run.outcome, "ok", "{run:?}");
+        let log = host.log();
+        assert_eq!(log[0], "job:revisión de a");
+        let on = 100 * H;
+        assert_eq!(log[1], format!("on:a@{on}"));
+        // Booting took 30 s, then 15 minutes hold.
+        assert_eq!(log[2], format!("off:a@{}", on + 30 + 15 * 60));
+        assert_eq!(host.state.borrow().last_on["Rvc64_a"], on + 30 + 15 * 60, "last on = when it was turned off");
+    }
+
+    #[test]
+    fn a_pod_that_is_already_on_is_not_touched_but_its_last_on_is_recorded() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", true, Some("3001112233"))]);
+        let candidate = pod("a", false, Some("3001112233")); // the queue was built when it was off
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "skipped");
+        assert!(run.note.contains("en uso"));
+        assert!(host.log().is_empty(), "no job, no power calls");
+        assert_eq!(host.state.borrow().last_on["Rvc64_a"], 100 * H);
+    }
+
+    #[test]
+    fn a_running_pod_job_pauses_the_check() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("3001112233"))]);
+        host.busy.set(true);
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "skipped");
+        assert!(run.note.contains("otra operación"));
+        assert!(host.log().is_empty());
+        assert!(host.state.borrow().last_on.is_empty(), "untouched pods keep their old timestamp");
+    }
+
+    #[test]
+    fn turning_the_feature_off_during_the_hold_powers_the_pod_off_right_away() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("3001112233"))]);
+        host.disable_after.set(Some(100 * H + 30 + 120)); // two minutes into the hold
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "interrupted");
+        assert!(host.log().iter().any(|l| l.starts_with("off:a@")));
+        assert!(clock.now() < 100 * H + 30 + 15 * 60, "did not wait out the whole hold");
+    }
+
+    #[test]
+    fn app_shutdown_during_the_hold_also_powers_off() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("3001112233"))]);
+        host.stop.set(true);
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "interrupted");
+        assert!(host.log().iter().any(|l| l.starts_with("off:a@")));
+        assert!(clock.now() < 100 * H + 15 * 60, "did not wait out the hold");
+    }
+
+    #[test]
+    fn a_failed_power_on_is_reported_and_the_pod_is_still_asked_to_stop() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("3001112233"))]);
+        *host.power_on_error.borrow_mut() = Some("Android no arrancó".into());
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "failed");
+        assert!(run.note.contains("Android no arrancó"));
+        assert!(host.log().iter().any(|l| l.starts_with("off:a@")), "a half-started BlueStacks is closed");
+        assert!(!host.state.borrow().last_on.contains_key("Rvc64_a"), "a failed check does not count as a visit");
+    }
+
+    #[test]
+    fn it_waits_until_the_bluestacks_process_is_gone_before_the_next_pod() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("3001112233"))]);
+        host.exit_delay.set(20);
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "ok");
+        assert!(run.note.contains("Proceso cerrado"), "{}", run.note);
+        let off_at = 100 * H + 30 + 15 * 60;
+        assert!(clock.now() >= off_at + 20, "waited for the process to disappear");
+    }
+
+    #[test]
+    fn it_gives_up_waiting_for_a_process_that_never_exits_but_says_so() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("3001112233"))]);
+        host.exit_delay.set(10_000);
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert!(run.note.contains("seguía figurando como encendido"), "{}", run.note);
+    }
+
+    #[test]
+    fn it_waits_for_the_memory_to_come_back_before_finishing() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("3001112233"))]);
+        // baseline 8000, then the pod ate memory: 5000, 6000, finally 7800 (within 300 MB of the baseline).
+        *host.memory.borrow_mut() = vec![8000, 5000, 6000, 7800];
+        let before = clock.now();
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "ok");
+        assert!(run.note.contains("memoria liberada"));
+        assert!(clock.now() >= before + 30 + 15 * 60 + 4, "slept at least two polls waiting for memory");
+    }
+
+    #[test]
+    fn if_memory_never_returns_it_gives_up_after_the_timeout_without_failing() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("3001112233"))]);
+        *host.memory.borrow_mut() = vec![8000, 1000];
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "ok");
+        assert!(run.note.contains("tardó en liberarse"));
+    }
+
+    #[test]
+    fn a_scan_processes_the_queue_one_pod_at_a_time_oldest_first_and_skips_fresh_ones() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(
+            &clock,
+            vec![pod("b", false, Some("2")), pod("a", false, Some("1")), pod("fresh", false, Some("3")), pod("nophone", false, None)],
+        );
+        host.state.borrow_mut().last_on.insert("Rvc64_a".into(), 100 * H - 80 * H);
+        host.state.borrow_mut().last_on.insert("Rvc64_b".into(), 100 * H - 30 * H);
+        host.state.borrow_mut().last_on.insert("Rvc64_fresh".into(), 100 * H - 2 * H);
+        let s = scheduler();
+        s.scan(&host, &clock);
+
+        let log = host.log();
+        let power: Vec<&String> = log.iter().filter(|l| l.starts_with("on:") || l.starts_with("off:")).collect();
+        assert_eq!(power.len(), 4);
+        assert!(power[0].starts_with("on:a") && power[1].starts_with("off:a") && power[2].starts_with("on:b") && power[3].starts_with("off:b"), "{power:?}");
+
+        let status = s.status();
+        assert_eq!(status.phase, Phase::Idle);
+        assert!(status.queue.is_empty());
+        assert_eq!(status.last_run.as_ref().unwrap().pod, "b");
+        assert_eq!(status.last_scan_at, Some(100 * H));
+    }
+
+    #[test]
+    fn a_scan_records_running_pods_and_does_not_power_anything_when_all_are_up_to_date() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", true, Some("1")), pod("b", false, Some("2"))]);
+        host.state.borrow_mut().last_on.insert("Rvc64_b".into(), 100 * H - H);
+        let s = scheduler();
+        s.scan(&host, &clock);
+        assert!(host.log().is_empty());
+        assert_eq!(host.state.borrow().last_on["Rvc64_a"], 100 * H);
+        assert_eq!(s.status().message, "Todos los pods están al día.");
+    }
+
+    #[test]
+    fn status_reports_the_hold_deadline_while_a_pod_is_on() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("1"))]);
+        let seen = Arc::new(Mutex::new(Vec::<KeepAliveStatus>::new()));
+        let sink = seen.clone();
+        let s = Scheduler::new(Config { hold_secs: 600, threshold_secs: 24 * H, exit_timeout_secs: 10, memory_tolerance_mb: 300 }, Box::new(move |st| sink.lock().unwrap().push(st.clone())));
+        s.scan(&host, &clock);
+        let seen = seen.lock().unwrap();
+        let holding = seen.iter().find(|st| st.phase == Phase::Holding).expect("a holding status was emitted");
+        assert_eq!(holding.current.as_deref(), Some("a"));
+        assert_eq!(holding.hold_until, Some(100 * H + 30 + 600));
+        let phases: Vec<Phase> = seen.iter().map(|st| st.phase).collect();
+        let order = [Phase::PoweringOn, Phase::Holding, Phase::PoweringOff, Phase::WaitingExit];
+        let mut at = 0;
+        for p in phases {
+            if at < order.len() && p == order[at] {
+                at += 1;
+            }
+        }
+        assert_eq!(at, order.len(), "phases went through on -> hold -> off -> wait in order");
+    }
+
+    #[test]
+    fn disabling_stops_the_queue_between_pods() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("1")), pod("b", false, Some("2"))]);
+        host.state.borrow_mut().last_on.insert("Rvc64_a".into(), 0);
+        host.state.borrow_mut().last_on.insert("Rvc64_b".into(), 1);
+        host.disable_after.set(Some(100 * H + 60)); // off during the first pod's hold
+        scheduler().scan(&host, &clock);
+        assert!(!host.log().iter().any(|l| l.starts_with("on:b")), "second pod never started: {:?}", host.log());
+    }
+}
