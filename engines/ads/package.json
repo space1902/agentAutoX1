@@ -1,0 +1,13 @@
+{
+  "name": "agentautox1-ads",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ads engine: Meta Marketing API + payments sheet -> SQLite -> report (JSON CLI used by the desktop app).",
+  "type": "module",
+  "scripts": {
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
