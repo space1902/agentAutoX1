@@ -1,3 +1,4 @@
+mod ai;
 mod data;
 mod embed;
 mod linker;
@@ -25,6 +26,7 @@ struct AppState {
     settings_file: PathBuf,
     settings: Arc<Mutex<Settings>>,
     runner: warmup::Runner,
+    pull: ai::PullJob,
     pod_job: pods::PodJob,
     link_cancel: Arc<AtomicBool>,
     keepalive: Arc<keepalive::Scheduler>,
@@ -361,6 +363,63 @@ fn read_pods_wsp(state: State<'_, AppState>) -> Result<BTreeMap<String, String>,
     data::read_pods_wsp(&state.current())
 }
 
+// ---- IA section
+
+/// Engine commands of the IA section. The key of the chosen provider is injected only for `ai-test`.
+#[tauri::command]
+async fn ai_call(state: State<'_, AppState>, command: String, payload: Value) -> Result<Value, String> {
+    let settings = state.current();
+    let mut payload = payload;
+    if command == "local-delete" {
+        payload = profiles::with_running(payload, running_profile(&state).as_deref());
+    }
+    blocking(move || {
+        let key = ai::key_for_command(&command, &payload)?;
+        ai::call(&settings, &command, &payload, key.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn ai_key_status(presets: Vec<String>) -> Result<BTreeMap<String, ai::KeyStatus>, String> {
+    blocking(move || presets.into_iter().map(|p| ai::key_status(&p).map(|s| (p, s))).collect()).await
+}
+
+#[tauri::command]
+async fn ai_key_set(preset: String, key: String) -> Result<ai::KeyStatus, String> {
+    blocking(move || ai::set_key(&preset, &key)).await
+}
+
+#[tauri::command]
+async fn ai_key_clear(preset: String) -> Result<(), String> {
+    blocking(move || ai::clear_key(&preset)).await
+}
+
+#[tauri::command]
+fn ai_pull_start(app: AppHandle, state: State<'_, AppState>, model: String) -> Result<(), String> {
+    state.pull.start(&app, &state.current(), &model)
+}
+
+#[tauri::command]
+fn ai_pull_cancel(state: State<'_, AppState>) -> bool {
+    state.pull.cancel()
+}
+
+#[tauri::command]
+fn ollama_installed() -> bool {
+    ai::ollama_exe().is_some()
+}
+
+#[tauri::command]
+fn ollama_install(app: AppHandle) {
+    ai::install_ollama(app);
+}
+
+#[tauri::command]
+fn ollama_launch() -> Result<(), String> {
+    ai::launch_ollama()
+}
+
 #[tauri::command]
 fn warmup_status(state: State<'_, AppState>) -> warmup::Status {
     state.runner.status()
@@ -412,6 +471,7 @@ pub fn run() {
                 settings_file,
                 settings,
                 runner: warmup::Runner::default(),
+                pull: ai::PullJob::default(),
                 pod_job,
                 link_cancel: Arc::new(AtomicBool::new(false)),
                 keepalive,
@@ -474,6 +534,15 @@ pub fn run() {
             warmup_status,
             start_profile,
             stop_profile,
+            ai_call,
+            ai_key_status,
+            ai_key_set,
+            ai_key_clear,
+            ai_pull_start,
+            ai_pull_cancel,
+            ollama_installed,
+            ollama_install,
+            ollama_launch,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -99,7 +99,8 @@ impl Runner {
             g.logs.clear();
             g.pairing.clear();
         }
-        let spawned = hidden_group_command(&settings.node_path)
+        let mut command = hidden_group_command(&settings.node_path);
+        command
             .arg("perfil.js")
             .arg("usar")
             .arg(profile)
@@ -107,8 +108,12 @@ impl Runner {
             .env("AGENTAUTO_DATA_DIR", &settings.data_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
+            .stderr(Stdio::piped());
+        // External AI: the provider's key goes into the child env only (never to disk or to the logs).
+        if let Some(key) = crate::ai::key_for_run(settings) {
+            command.env(crate::ai::KEY_ENV, key);
+        }
+        let spawned = command.spawn();
         let mut child = match spawned {
             Ok(c) => c,
             Err(e) => {
