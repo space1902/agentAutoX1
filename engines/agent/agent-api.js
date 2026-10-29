@@ -7,11 +7,13 @@ import { adsDbPath, agentDbPath, workspaceDir } from './paths.js';
 import { loadSettings, saveSettings, SettingsError } from './settings.js';
 import { editLesson, learningSummary, makeHooks, recordFeedback, runLearningCycle, setLessonStatus } from './learning.js';
 import { runTurn } from './turn.js';
+import { bankForUi, estimateRun, runEval } from './evals/runner.js';
+import { loadDataset } from './metrics.js';
 
 export class AgentError extends Error {}
 
-export const STREAMING = ['turn'];
-const COMMANDS = ['status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations'];
+export const STREAMING = ['turn', 'eval-run'];
+const COMMANDS = ['status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail'];
 
 const need = (cond, message) => {
   if (!cond) throw new AgentError(message);
@@ -23,6 +25,10 @@ export async function runStreaming(command, payload, { dataDir, emit, registerCa
     need(payload.text.length <= 8000, 'La pregunta es demasiado larga (máximo 8000 caracteres).');
     const learning = loadSettings(dataDir).learning;
     return runTurn({ dataDir, sessionId: payload.sessionId || undefined, text: payload.text, emit, registerCancel, hooks: hooks ?? (learning ? makeHooks() : {}) });
+  }
+  if (command === 'eval-run') {
+    const ids = Array.isArray(payload.ids) ? payload.ids.map(String) : undefined;
+    return runEval({ dataDir, ids, emit, registerCancel });
   }
   throw new AgentError(`Comando del Analista no permitido: ${command}.`);
 }
@@ -49,8 +55,14 @@ export async function runCommand(command, payload, { dataDir }) {
       settings,
     };
   }
+  if (command === 'eval-bank') {
+    const ds = loadDataset(dataDir);
+    return { questions: bankForUi(ds), estimate: estimateRun(ds), today: ds.today };
+  }
   const store = openAgentStore(dataDir);
   try {
+    if (command === 'eval-runs') return { runs: store.evalRuns() };
+    if (command === 'eval-run-detail') return { run: store.evalRuns(500).find((r) => r.id === Number(payload.runId)) ?? null, results: store.evalResults(Number(payload.runId)) };
     if (command === 'sessions') return { sessions: store.listSessions() };
     if (command === 'session-new') return { sessionId: store.createSession() };
     if (command === 'session-rename') {

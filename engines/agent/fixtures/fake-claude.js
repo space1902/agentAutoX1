@@ -33,7 +33,8 @@ const toolTurn = (text) => {
   out({ type: 'result', subtype: 'success', is_error: false, result: text, session_id: sid, duration_ms: 1234, num_turns: 2, usage, total_cost_usd: 0.01 });
 };
 
-if (scenario === 'ok') toolTurn('CT 07 gastó $100.000 y vendió 10 veces.\n\nCómo lo calculé: query_sql sobre v_ads_daily.');
+if (scenario === 'text') toolTurn(process.env.FAKE_CLAUDE_TEXT || 'sin texto');
+else if (scenario === 'ok') toolTurn('CT 07 gastó $100.000 y vendió 10 veces.\n\nCómo lo calculé: query_sql sobre v_ads_daily.');
 else if (scenario === 'ungrounded') toolTurn('CT 07 gastó $100.000, vendió 10 veces y tuvo un ROAS de 7,35.\n\nCómo lo calculé: query_sql.');
 else if (scenario === 'hang') {
   out({ type: 'system', subtype: 'init', session_id: sid, mcp_servers: [], tools: [] });

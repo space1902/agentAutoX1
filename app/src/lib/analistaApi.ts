@@ -141,6 +141,54 @@ export interface Recommendation {
   outcome: { evaluatedAt: number; after: RecMetrics; label: "acierto" | "fallo" | "neutral" | "sin_datos"; explanation: string } | null;
 }
 
+export interface EvalQuestion {
+  id: string;
+  category: "numeric" | "judged" | "scope" | "refuse";
+  question: string;
+  skip: string | null;
+  judged: boolean;
+}
+
+export interface EvalEstimate {
+  questions: number;
+  claudeRuns: number;
+  judgeRuns: number;
+  skipped: number;
+}
+
+export interface EvalRun {
+  id: number;
+  ts: number;
+  finishedAt: number | null;
+  status: "running" | "done" | "cancelled";
+  total: number;
+  passed: number;
+  failed: number;
+  excluded: number;
+  model: string;
+  passRate: number | null;
+}
+
+export interface EvalResult {
+  id: number;
+  questionId: string;
+  category: string;
+  question: string;
+  status: "pass" | "fail" | "excluded";
+  expected: string;
+  answer: string;
+  detail: string;
+  ms: number;
+  ungrounded: number;
+}
+
+export type EvalEvent =
+  | { type: "eval_start"; runId: number; total: number; estimate: EvalEstimate }
+  | { type: "eval_progress"; runId: number; index: number; total: number; id: string; question: string; phase: string }
+  | { type: "eval_result"; runId: number; index: number; id: string; status: "pass" | "fail" | "excluded"; detail: string }
+  | { type: "eval_done"; runId: number; status: string; passed: number; failed: number; excluded: number; passRate: number | null }
+  | { type: "error"; error: string };
+
 export interface ProcStatus {
   running: boolean;
   pid: number | null;
@@ -163,6 +211,11 @@ export const analista = {
   feedback: (messageId: number, kind: "up" | "down" | "wrong", comment?: string) => call<{ rating: number }>("feedback", { messageId, kind, comment }),
   recommendations: () => call<{ recommendations: Recommendation[] }>("recommendations"),
   measureNow: () => call<{ evaluated: number; candidates: number }>("learning-run"),
+  evalBank: () => call<{ questions: EvalQuestion[]; estimate: EvalEstimate; today: string }>("eval-bank"),
+  evalRuns: () => call<{ runs: EvalRun[] }>("eval-runs"),
+  evalDetail: (runId: number) => call<{ run: EvalRun | null; results: EvalResult[] }>("eval-run-detail", { runId }),
+  onEval: (cb: (event: EvalEvent) => void): Promise<UnlistenFn> => listen<EvalEvent>("analista-eval-status", (e) => cb(e.payload)),
+  onEvalExit: (cb: () => void): Promise<UnlistenFn> => listen("analista-eval-exit", () => cb()),
   settings: () => call<{ settings: AnalistaSettings }>("settings-get"),
   saveSettings: (partial: Partial<AnalistaSettings>) => call<{ settings: AnalistaSettings }>("settings-set", partial),
   start: (command: "turn" | "eval-run", payload: Record<string, unknown>) => invoke<number>("analista_start", { command, payload }),

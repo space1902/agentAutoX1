@@ -47,6 +47,17 @@ CREATE TABLE IF NOT EXISTS signals (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, session_id TEXT, message_id INTEGER, kind TEXT NOT NULL, weight REAL NOT NULL, note TEXT
 );
 CREATE INDEX IF NOT EXISTS signals_ts ON signals (ts);
+
+-- Quality evaluation: runs and per-question results (expected values are computed at run time and stored only as evidence).
+CREATE TABLE IF NOT EXISTS eval_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, finished_at INTEGER, status TEXT NOT NULL DEFAULT 'running',
+  total INTEGER NOT NULL, passed INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, excluded INTEGER NOT NULL DEFAULT 0, model TEXT NOT NULL DEFAULT '', usage_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS eval_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, question_id TEXT NOT NULL, category TEXT NOT NULL, question TEXT NOT NULL,
+  status TEXT NOT NULL, expected TEXT NOT NULL DEFAULT '', answer TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '', ms INTEGER NOT NULL DEFAULT 0, ungrounded INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS eval_results_run ON eval_results (run_id);
 `;
 
 const recRow = (r) => ({
@@ -221,6 +232,25 @@ export function createAgentStore(file = ':memory:', { now = Date.now } = {}) {
     },
     signals: (since = 0) =>
       q('SELECT * FROM signals WHERE ts >= ? ORDER BY id').all(since).map((r) => ({ id: r.id, ts: r.ts, sessionId: r.session_id, messageId: r.message_id, kind: r.kind, weight: r.weight, note: r.note })),
+
+    // ---- quality evaluation
+    createEvalRun: ({ total, model }) => Number(q('INSERT INTO eval_runs (ts, total, model) VALUES (?, ?, ?)').run(now(), total, model ?? '').lastInsertRowid),
+    addEvalResult(r) {
+      q('INSERT INTO eval_results (run_id, question_id, category, question, status, expected, answer, detail, ms, ungrounded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(r.runId, r.questionId, r.category, r.question, r.status, r.expected ?? '', String(r.answer ?? '').slice(0, 8000), r.detail ?? '', r.ms ?? 0, r.ungrounded ?? 0);
+    },
+    finishEvalRun(id, { status, passed, failed, excluded, usage }) {
+      q('UPDATE eval_runs SET finished_at = ?, status = ?, passed = ?, failed = ?, excluded = ?, usage_json = ? WHERE id = ?').run(now(), status, passed, failed, excluded, JSON.stringify(usage ?? {}), id);
+    },
+    evalRuns: (limit = 50) =>
+      q('SELECT * FROM eval_runs ORDER BY id DESC LIMIT ?').all(limit).map((r) => ({
+        id: r.id, ts: r.ts, finishedAt: r.finished_at, status: r.status, total: r.total, passed: r.passed, failed: r.failed, excluded: r.excluded, model: r.model, usage: JSON.parse(r.usage_json),
+        passRate: r.passed + r.failed > 0 ? r.passed / (r.passed + r.failed) : null,
+      })),
+    evalResults: (runId) =>
+      q('SELECT * FROM eval_results WHERE run_id = ? ORDER BY id').all(runId).map((r) => ({
+        id: r.id, runId: r.run_id, questionId: r.question_id, category: r.category, question: r.question, status: r.status, expected: r.expected, answer: r.answer, detail: r.detail, ms: r.ms, ungrounded: r.ungrounded,
+      })),
 
     logQuery({ sessionId = null, question = null, purpose = null, sql, status, layer = null, reason = null, rows = null, ms = null }) {
       q('INSERT INTO query_log (ts, session_id, question, purpose, sql, status, layer, reason, rows, ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
