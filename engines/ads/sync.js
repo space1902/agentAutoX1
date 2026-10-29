@@ -1,9 +1,13 @@
 // Sync: Meta (account, insights, ads/budgets) and the payments sheet -> SQLite. The two sources are independent:
 // one failing never blocks the other, and the previous data stays in the store.
 import { MetaApi, friendlyMetaError } from './meta-api.js';
-import { fetchAccount, fetchAds, fetchInsights } from './meta-data.js';
+import { syncActivities } from './activities.js';
+import { deriveCountry } from './country.js';
+import { fetchAccount, fetchAds, fetchFirstSpendDate, fetchInsights } from './meta-data.js';
+import { redact } from './redact.js';
 import { fetchSheetCsv, parseComprobantes } from './sheet.js';
 import { isMonitored } from './report.js';
+import { parseDateToIso } from './parse.js';
 import { addDays, daysBetween, localParts } from './time.js';
 
 export const DEFAULT_TIMEZONE = 'America/Bogota';
@@ -27,7 +31,7 @@ export function lookbackPlan({ ads, first, checked, from, prefix, today }) {
   return { ids, since: start < floor ? floor : start, until: addDays(from, -1) };
 }
 
-export const redact = (value, token) => (token ? String(value ?? '').split(token).join('***') : String(value ?? ''));
+export { redact };
 
 async function syncMeta({ store, config, token, from, to, fetchImpl, now }) {
   if (!token) {
@@ -64,11 +68,25 @@ async function syncSheet({ store, config, fetchImpl, now }) {
   try {
     const csv = await fetchSheetCsv({ sheetId: config.sheetId, tab: config.sheetTab, fetchImpl });
     const parsed = parseComprobantes(csv);
-    store.replaceComprobantes(parsed.rows, now());
+    store.syncComprobantes(parsed.rows, now());
     return { ok: true, rows: parsed.rows.length, skippedTests: parsed.skippedTests, skippedNoDate: parsed.skippedNoDate };
   } catch (error) {
     return { ok: false, code: error?.code ?? 'SHEET', error: String(error?.message ?? error) };
   }
+}
+
+// Stores the derived country (phone prefix, then the ad campaign, then the flow) of every payment that has no
+// manual override. Cheap: a few hundred rows.
+export function deriveStoredCountries(store, config) {
+  const identities = store.identities();
+  const changes = [];
+  for (const r of store.comprobantesBetween('0000-01-01', '9999-12-31')) {
+    if (r.countrySource === 'manual') continue;
+    const d = deriveCountry({ phone: r.phone, campaignName: identities[r.adId]?.campaignName, flow: r.flow }, config.countryWords);
+    if (d.country !== r.country || d.source !== r.countrySource) changes.push({ key: r.key, country: d.country, source: d.source });
+  }
+  if (changes.length) store.setComprobanteCountries(changes);
+  return changes.length;
 }
 
 export async function runSync({ store, config, token, from, to, fetchImpl = globalThis.fetch, now = Date.now }) {
@@ -76,6 +94,7 @@ export async function runSync({ store, config, token, from, to, fetchImpl = glob
     syncMeta({ store, config, token, from, to, fetchImpl, now }),
     syncSheet({ store, config, fetchImpl, now }),
   ]);
+  deriveStoredCountries(store, config);
   const previous = store.getKv('lastSync') ?? {};
   store.setKv('lastSync', {
     meta: meta.ok ? now() : (previous.meta ?? null),
@@ -85,4 +104,72 @@ export async function runSync({ store, config, token, from, to, fetchImpl = glob
   });
   const timezone = store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
   return { range: { from, to }, today: localParts(now(), timezone).date, syncedAt: now(), meta, sheet };
+}
+
+const BACKFILL_RECENT_DAYS = 3;
+
+// Incremental sync with a one-time history backfill.
+//  - First run (or after the insights table was rebuilt): everything from the history start, month by month.
+//    The start is the configured "Historial desde", else the earliest day found in the payments sheet or in Meta.
+//  - Afterwards: the last 3 days (Meta restates recent days) plus today.
+export async function runAutoSync({ store, config, token, fetchImpl = globalThis.fetch, now = Date.now }) {
+  const timezone = store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
+  const today = localParts(now(), timezone).date;
+  if (store.insightsRebuilt && store.getKv('backfillDone')) store.setKv('backfillDone', null);
+  let backfill = store.getKv('backfillDone');
+  const wantedStart = config.historyFrom || null;
+  if (backfill && wantedStart && wantedStart < backfill.from) backfill = null; // the user asked for an earlier history
+
+  let from = addDays(today, -BACKFILL_RECENT_DAYS);
+  if (!backfill) {
+    let sheetMin = null;
+    try {
+      const parsed = parseComprobantes(await fetchSheetCsv({ sheetId: config.sheetId, tab: config.sheetTab, fetchImpl }));
+      sheetMin = parsed.rows.map((r) => parseDateToIso(r.registered)).filter(Boolean).sort()[0] ?? null;
+    } catch {
+      /* the regular sync below reports the sheet problem */
+    }
+    let metaMin = null;
+    if (token && !wantedStart) {
+      try {
+        metaMin = await fetchFirstSpendDate(new MetaApi({ token, version: config.graphVersion, fetchImpl, now }), config.adAccountId);
+      } catch {
+        /* same: reported by the regular sync */
+      }
+    }
+    const detected = [metaMin, sheetMin].filter(Boolean).sort()[0] ?? null;
+    const start = wantedStart
+      ? { date: wantedStart, source: 'config' }
+      : (store.getKv('historyStart') ?? (detected ? { date: detected, source: 'auto' } : { date: addDays(today, -30), source: 'default' }));
+    store.setKv('historyStart', start);
+    from = start.date;
+  }
+
+  const result = await runSync({ store, config, token, from, to: today, fetchImpl, now });
+  result.backfilled = false;
+  if (!backfill && result.meta.ok) {
+    store.setKv('backfillDone', { from, at: now() });
+    result.backfilled = true;
+    if (token) {
+      const api = new MetaApi({ token, version: config.graphVersion, fetchImpl, now });
+      result.activities = await syncActivities({ api, store, config, since: from, timezone: store.getKv('account')?.timezone || timezone, token });
+    }
+  }
+  result.history = historyInfo(store);
+  return result;
+}
+
+// What the database holds, for the "Historial" line of the UI.
+export function historyInfo(store) {
+  const stats = store.historyStats();
+  const start = store.getKv('historyStart');
+  return {
+    from: start?.date ?? stats.insightsFrom,
+    source: start?.source ?? null,
+    firstData: stats.insightsFrom,
+    lastData: stats.insightsTo,
+    days: stats.insightDays,
+    vouchers: stats.voucherRows,
+    backfill: store.getKv('backfillDone'),
+  };
 }

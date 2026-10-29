@@ -27,6 +27,7 @@ export function parseInsightRow(row) {
     campaignName: row.campaign_name ?? '',
     adsetId: String(row.adset_id ?? ''),
     adsetName: row.adset_name ?? '',
+    country: String(row.country ?? ''),
     gasto: num(row.spend),
     impressions: num(row.impressions),
     clicks: num(row.clicks),
@@ -65,6 +66,7 @@ export async function fetchInsights(api, accountId, since, until) {
   for (const chunk of chunkRange(since, until, 31)) {
     const page = await api.getAll(`/${accountId}/insights`, {
       level: 'ad',
+      breakdowns: 'country',
       time_increment: 1,
       time_range: { since: chunk.since, until: chunk.until },
       fields: INSIGHT_FIELDS,
@@ -73,6 +75,13 @@ export async function fetchInsights(api, accountId, since, until) {
     rows.push(...page.map(parseInsightRow));
   }
   return rows.filter((r) => r.adId && r.date);
+}
+
+// Earliest day with spend in the whole account (monthly buckets of the maximum window Meta keeps).
+export async function fetchFirstSpendDate(api, accountId) {
+  const rows = await api.getAll(`/${accountId}/insights`, { level: 'account', date_preset: 'maximum', time_increment: 'monthly', fields: 'spend,date_start', limit: 100 });
+  const dates = rows.filter((r) => Number(r.spend) > 0).map((r) => r.date_start).sort();
+  return dates[0] ?? null;
 }
 
 export async function fetchAds(api, accountId) {

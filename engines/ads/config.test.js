@@ -84,3 +84,30 @@ test('saveConfig keeps at most 10 backups', () => {
   for (let i = 0; i < 14; i++) saveConfig(dir, { flowPrefix: `F${i}` }, { now: () => new Date(Date.UTC(2026, 9, 1, 0, 0, i)) });
   assert.equal(fs.readdirSync(path.join(dir, 'ads', 'backups')).length, 10);
 });
+
+test('historyFrom accepts a date or empty and rejects anything else', () => {
+  assert.equal(DEFAULT_CONFIG.historyFrom, '');
+  assert.equal(mergeConfig({ historyFrom: '2026-10-01' }).historyFrom, '2026-10-01');
+  assert.equal(mergeConfig({ historyFrom: '' }).historyFrom, '');
+  assert.throws(() => mergeConfig({ historyFrom: '01/10/2026' }), /Historial/);
+  assert.throws(() => mergeConfig({ historyFrom: '2026-13-40' }), /Historial/);
+});
+
+test('per-country settings merge, validate and allow new countries', () => {
+  assert.equal(DEFAULT_CONFIG.countries.CO.rateToCop, 1);
+  assert.equal(DEFAULT_CONFIG.countries.MX.currency, 'MXN');
+  const c = mergeConfig({ countries: { MX: { rateToCop: 215, feePct: 3.5, costPerSale: 1200, taxPct: 16 }, PE: { currency: 'pen', rateToCop: 1100 } } });
+  assert.deepEqual(c.countries.MX, { currency: 'MXN', rateToCop: 215, feePct: 3.5, costPerSale: 1200, taxPct: 16 });
+  assert.equal(c.countries.PE.currency, 'PEN');
+  assert.equal(c.countries.CO.rateToCop, 1, 'untouched countries keep their values');
+  assert.throws(() => mergeConfig({ countries: { MX: { feePct: 120 } } }), /entre 0 y 100/);
+  assert.throws(() => mergeConfig({ countries: { MX: { rateToCop: -1 } } }), /tasa/);
+  assert.throws(() => mergeConfig({ countries: { mexico: {} } }), /2 letras/);
+});
+
+test('country words are configurable per country', () => {
+  const c = mergeConfig({ countryWords: { PE: ['Peru', 'PE'] } });
+  assert.deepEqual(c.countryWords.PE, ['peru', 'pe']);
+  assert.ok(c.countryWords.CO.includes('col'));
+  assert.throws(() => mergeConfig({ countryWords: { PERU: ['x'] } }), /2 letras/);
+});

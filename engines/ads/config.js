@@ -3,6 +3,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { DEFAULT_COUNTRY_TOKENS } from './country.js';
+
 export const DEFAULT_CONFIG = Object.freeze({
   adAccountId: 'act_1962423981398837',
   graphVersion: 'v26.0',
@@ -13,6 +15,17 @@ export const DEFAULT_CONFIG = Object.freeze({
   validResult: 'Pago válido',
   flowPrefix: 'Bebidas',
   currency: 'COP',
+  // First day to keep in the history ('' = detect the earliest day found in the sheet or in Meta).
+  historyFrom: '',
+  // Words in a campaign name that tag its country.
+  countryWords: Object.freeze(Object.fromEntries(Object.entries(DEFAULT_COUNTRY_TOKENS).map(([k, v]) => [k, Object.freeze([...v])]))),
+  // Per country: currency of the sheet's Valor, exchange rate to COP (0 = not set yet), payment fee % of the value,
+  // product/other cost per sale (COP) and tax % of the value. Spend is already in the account currency (COP).
+  countries: Object.freeze({
+    CO: Object.freeze({ currency: 'COP', rateToCop: 1, feePct: 0, costPerSale: 0, taxPct: 0 }),
+    MX: Object.freeze({ currency: 'MXN', rateToCop: 0, feePct: 0, costPerSale: 0, taxPct: 0 }),
+    VE: Object.freeze({ currency: 'USD', rateToCop: 0, feePct: 0, costPerSale: 0, taxPct: 0 }),
+  }),
   // Minutes between automatic refreshes of today while the section is open (0 = off).
   autoRefreshMinutes: 15,
   // Suggested action rules (ported from the Looker report).
@@ -76,7 +89,7 @@ export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
   for (const key of Object.keys(p)) {
     if (SECRET_KEYS.test(key)) throw new ConfigError('El token de Meta no se guarda en la configuración.');
   }
-  const out = { ...base, thresholds: { ...base.thresholds }, lifecycle: { ...base.lifecycle } };
+  const out = { ...base, thresholds: { ...base.thresholds }, lifecycle: { ...base.lifecycle }, countries: structuredClone(base.countries), countryWords: structuredClone(base.countryWords) };
 
   if (p.adAccountId !== undefined) {
     const raw = text(p.adAccountId, 'La cuenta publicitaria');
@@ -91,6 +104,31 @@ export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
   if (p.validResult !== undefined) out.validResult = text(p.validResult, 'El resultado válido', { max: 100 });
   if (p.flowPrefix !== undefined) out.flowPrefix = text(p.flowPrefix, 'El prefijo de flujo', { allowEmpty: true, max: 100 });
   if (p.currency !== undefined) out.currency = text(p.currency, 'La moneda', { pattern: /^[A-Za-z]{3}$/ }).toUpperCase();
+  if (p.historyFrom !== undefined) {
+    const v = String(p.historyFrom ?? '').trim();
+    if (v && !(/^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)))) throw new ConfigError('«Historial desde» debe ser una fecha AAAA-MM-DD o quedar vacío.');
+    out.historyFrom = v;
+  }
+  for (const [code, c] of Object.entries(p.countries ?? {})) {
+    if (!/^[A-Z]{2}$/.test(code)) throw new ConfigError(`El país «${code}» debe tener un código de 2 letras (CO, MX...).`);
+    const prev = out.countries[code] ?? { currency: 'COP', rateToCop: 0, feePct: 0, costPerSale: 0, taxPct: 0 };
+    const pct = (v, label) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0 || n > 100) throw new ConfigError(`${label} de ${code} debe estar entre 0 y 100.`);
+      return n;
+    };
+    out.countries[code] = {
+      currency: c.currency === undefined ? prev.currency : text(c.currency, `La moneda de ${code}`, { pattern: /^[A-Za-z]{3}$/ }).toUpperCase(),
+      rateToCop: c.rateToCop === undefined ? prev.rateToCop : nonNegative(c.rateToCop, `tasa a COP de ${code}`),
+      feePct: c.feePct === undefined ? prev.feePct : pct(c.feePct, 'La comisión (%)'),
+      costPerSale: c.costPerSale === undefined ? prev.costPerSale : nonNegative(c.costPerSale, `costo por venta de ${code}`),
+      taxPct: c.taxPct === undefined ? prev.taxPct : pct(c.taxPct, 'El impuesto (%)'),
+    };
+  }
+  for (const [code, list] of Object.entries(p.countryWords ?? {})) {
+    if (!/^[A-Z]{2}$/.test(code) || !Array.isArray(list) || list.length > 12) throw new ConfigError('Las palabras de país deben ser una lista por código de 2 letras.');
+    out.countryWords[code] = list.map((w) => text(w, 'La palabra de país', { max: 24 }).toLowerCase());
+  }
   if (p.autoRefreshMinutes !== undefined) {
     const n = Number(p.autoRefreshMinutes);
     if (!Number.isFinite(n) || n < 0 || n > 1440) throw new ConfigError('Los minutos de actualización automática deben estar entre 0 y 1440.');

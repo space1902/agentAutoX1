@@ -2,6 +2,7 @@
 // and the payments cache. Daily insights are upserted, so past days survive even if Meta later changes them.
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 import { adsDir } from './config.js';
@@ -11,7 +12,7 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS insights (
   date TEXT NOT NULL, ad_id TEXT NOT NULL, ad_name TEXT NOT NULL, campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL,
   adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, gasto REAL NOT NULL, impressions INTEGER NOT NULL, clicks INTEGER NOT NULL,
-  mensajes INTEGER NOT NULL, synced_at INTEGER NOT NULL, PRIMARY KEY (date, ad_id)
+  mensajes INTEGER NOT NULL, synced_at INTEGER NOT NULL, country TEXT NOT NULL DEFAULT '', PRIMARY KEY (date, ad_id, country)
 );
 CREATE INDEX IF NOT EXISTS insights_ad ON insights (ad_id, date);
 CREATE TABLE IF NOT EXISTS ads (
@@ -28,9 +29,12 @@ CREATE INDEX IF NOT EXISTS budget_entity ON budget_history (entity_type, entity_
 CREATE TABLE IF NOT EXISTS comprobantes (
   id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, registered TEXT NOT NULL, result TEXT NOT NULL, phone TEXT NOT NULL,
   valor REAL NOT NULL, bank TEXT NOT NULL, flow TEXT NOT NULL, ad_id TEXT NOT NULL, ad_lossy INTEGER NOT NULL,
-  ad_url TEXT NOT NULL, synced_at INTEGER NOT NULL
+  ad_url TEXT NOT NULL, synced_at INTEGER NOT NULL,
+  key TEXT, first_seen INTEGER, missing_since INTEGER, country TEXT NOT NULL DEFAULT '', country_source TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS comprobantes_date ON comprobantes (date);
+-- Manual country of a payment, kept apart so a re-sync never overwrites it.
+CREATE TABLE IF NOT EXISTS comprobante_overrides (key TEXT PRIMARY KEY, country TEXT NOT NULL, updated_at INTEGER NOT NULL);
 -- Exact budget changes read from the account activity log (when Meta exposes it).
 CREATE TABLE IF NOT EXISTS budget_events (
   entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, time INTEGER NOT NULL, date TEXT NOT NULL,
@@ -49,10 +53,61 @@ CREATE TABLE IF NOT EXISTS wa_outbox (
 );
 `;
 
+// Stable identity of a payment row: when it arrived + who paid (+ the n-th identical one). Mutable fields such as
+// the result or the ad id are NOT part of it, so a corrected row keeps its history.
+export function comprobanteKey(row, occurrence = 0) {
+  return createHash('sha1').update(`${row.registered}|${row.phone}#${occurrence}`).digest('hex').slice(0, 20);
+}
+
+const columns = (db, table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+
+// Brings databases created by earlier versions up to date. Returns true when insights had to be rebuilt.
+function migrate(db) {
+  let rebuilt = false;
+  if (!columns(db, 'insights').includes('country')) {
+    db.exec('BEGIN');
+    db.exec('ALTER TABLE insights RENAME TO insights_old');
+    db.exec(`CREATE TABLE insights (
+      date TEXT NOT NULL, ad_id TEXT NOT NULL, ad_name TEXT NOT NULL, campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL,
+      adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, gasto REAL NOT NULL, impressions INTEGER NOT NULL, clicks INTEGER NOT NULL,
+      mensajes INTEGER NOT NULL, synced_at INTEGER NOT NULL, country TEXT NOT NULL DEFAULT '', PRIMARY KEY (date, ad_id, country)
+    )`);
+    db.exec(`INSERT INTO insights SELECT date, ad_id, ad_name, campaign_id, campaign_name, adset_id, adset_name, gasto, impressions, clicks,
+      mensajes, synced_at, '' FROM insights_old`);
+    db.exec('DROP TABLE insights_old');
+    db.exec('CREATE INDEX IF NOT EXISTS insights_ad ON insights (ad_id, date)');
+    db.exec('COMMIT');
+    rebuilt = true;
+  }
+  const cols = columns(db, 'comprobantes');
+  for (const [name, ddl] of [
+    ['key', 'key TEXT'], ['first_seen', 'first_seen INTEGER'], ['missing_since', 'missing_since INTEGER'],
+    ['country', "country TEXT NOT NULL DEFAULT ''"], ['country_source', "country_source TEXT NOT NULL DEFAULT ''"],
+  ]) {
+    if (!cols.includes(name)) db.exec(`ALTER TABLE comprobantes ADD COLUMN ${ddl}`);
+  }
+  const loose = db.prepare('SELECT id, registered, phone FROM comprobantes WHERE key IS NULL ORDER BY id').all();
+  if (loose.length) {
+    const seen = new Map();
+    const set = db.prepare('UPDATE comprobantes SET key = ?, first_seen = COALESCE(first_seen, synced_at) WHERE id = ?');
+    db.exec('BEGIN');
+    for (const r of loose) {
+      const base = `${r.registered}|${r.phone}`;
+      const n = seen.get(base) ?? 0;
+      seen.set(base, n + 1);
+      set.run(comprobanteKey(r, n), r.id);
+    }
+    db.exec('COMMIT');
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS comprobantes_key ON comprobantes (key)');
+  return rebuilt;
+}
+
 export function createStore(file = ':memory:') {
   const db = new DatabaseSync(file);
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
+  const insightsRebuilt = migrate(db);
   if (!db.prepare('PRAGMA table_info(ads)').all().some((c) => c.name === 'first_spend_date')) db.exec('ALTER TABLE ads ADD COLUMN first_spend_date TEXT');
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => {
@@ -77,21 +132,33 @@ export function createStore(file = ':memory:') {
       q('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value ?? null));
     },
 
+    // Replaces every row of each (date, ad) in the batch, so Meta restating a day (or the country split appearing)
+    // never double counts. Days Meta does not return are left untouched.
     upsertInsights(rows, now) {
-      const stmt = q(`INSERT INTO insights (date, ad_id, ad_name, campaign_id, campaign_name, adset_id, adset_name, gasto, impressions, clicks, mensajes, synced_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(date, ad_id) DO UPDATE SET ad_name = excluded.ad_name, campaign_id = excluded.campaign_id, campaign_name = excluded.campaign_name,
-          adset_id = excluded.adset_id, adset_name = excluded.adset_name, gasto = excluded.gasto, impressions = excluded.impressions,
-          clicks = excluded.clicks, mensajes = excluded.mensajes, synced_at = excluded.synced_at`);
+      const remove = q('DELETE FROM insights WHERE date = ? AND ad_id = ?');
+      const insert = q(`INSERT INTO insights (date, ad_id, ad_name, campaign_id, campaign_name, adset_id, adset_name, gasto, impressions, clicks, mensajes, synced_at, country)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(date, ad_id, country) DO UPDATE SET ad_name = excluded.ad_name, campaign_id = excluded.campaign_id, campaign_name = excluded.campaign_name,
+          adset_id = excluded.adset_id, adset_name = excluded.adset_name, gasto = gasto + excluded.gasto, impressions = impressions + excluded.impressions,
+          clicks = clicks + excluded.clicks, mensajes = mensajes + excluded.mensajes, synced_at = excluded.synced_at`);
       tx(() => {
-        for (const r of rows) stmt.run(r.date, r.adId, r.adName, r.campaignId, r.campaignName, r.adsetId, r.adsetName, r.gasto, r.impressions, r.clicks, r.mensajes, now);
+        const groups = new Set(rows.map((r) => `${r.date}|${r.adId}`));
+        for (const g of groups) remove.run(...g.split('|'));
+        for (const r of rows) insert.run(r.date, r.adId, r.adName, r.campaignId, r.campaignName, r.adsetId, r.adsetName, r.gasto, r.impressions, r.clicks, r.mensajes, now, r.country ?? '');
       });
     },
     insightsBetween: (from, to) =>
-      q('SELECT * FROM insights WHERE date >= ? AND date <= ? ORDER BY date, ad_id').all(from, to).map((r) => ({
+      q('SELECT * FROM insights WHERE date >= ? AND date <= ? ORDER BY date, ad_id, country').all(from, to).map((r) => ({
         date: r.date, adId: r.ad_id, adName: r.ad_name, campaignId: r.campaign_id, campaignName: r.campaign_name,
-        adsetId: r.adset_id, adsetName: r.adset_name, gasto: r.gasto, impressions: r.impressions, clicks: r.clicks, mensajes: r.mensajes,
+        adsetId: r.adset_id, adsetName: r.adset_name, gasto: r.gasto, impressions: r.impressions, clicks: r.clicks, mensajes: r.mensajes, country: r.country,
       })),
+    insightsRebuilt,
+    // What the database holds: first/last day with data and how many days are stored.
+    historyStats() {
+      const i = q('SELECT MIN(date) AS first, MAX(date) AS last, COUNT(DISTINCT date) AS days FROM insights').get();
+      const c = q('SELECT MIN(date) AS first, MAX(date) AS last, COUNT(*) AS rows FROM comprobantes').get();
+      return { insightsFrom: i.first, insightsTo: i.last, insightDays: i.days, vouchersFrom: c.first, vouchersTo: c.last, voucherRows: c.rows };
+    },
     // Latest known names per ad (any day), so payments of days without spend can still be attributed.
     identities() {
       const rows = q(`SELECT i.ad_id, i.ad_name, i.campaign_id, i.campaign_name FROM insights i
@@ -155,17 +222,45 @@ export function createStore(file = ':memory:') {
         entityType: r.entity_type, entityId: r.entity_id, date: r.date, dailyBudget: r.daily_budget, lifetimeBudget: r.lifetime_budget, firstSeen: r.first_seen,
       })),
 
-    replaceComprobantes(rows, now) {
-      const insert = q('INSERT INTO comprobantes (date, registered, result, phone, valor, bank, flow, ad_id, ad_lossy, ad_url, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    // Upserts the sheet rows by stable key. Rows that are no longer in the sheet are kept and flagged (missing_since):
+    // history is never deleted.
+    syncComprobantes(rows, now) {
+      const find = q('SELECT id FROM comprobantes WHERE key = ?');
+      const insert = q(`INSERT INTO comprobantes (key, date, registered, result, phone, valor, bank, flow, ad_id, ad_lossy, ad_url, synced_at, first_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const update = q(`UPDATE comprobantes SET date = ?, registered = ?, result = ?, phone = ?, valor = ?, bank = ?, flow = ?, ad_id = ?, ad_lossy = ?,
+        ad_url = ?, synced_at = ?, missing_since = NULL WHERE key = ?`);
+      const markGone = q('UPDATE comprobantes SET missing_since = ? WHERE missing_since IS NULL AND key NOT IN (SELECT value FROM json_each(?))');
       tx(() => {
-        db.exec('DELETE FROM comprobantes');
-        for (const c of rows) insert.run(c.date, c.registered, c.result, c.phone, c.valor, c.bank, c.flow, c.adId, c.adLossy ? 1 : 0, c.adUrl, now);
+        const seen = new Map();
+        const keys = [];
+        for (const c of rows) {
+          const base = `${c.registered}|${c.phone}`;
+          const n = seen.get(base) ?? 0;
+          seen.set(base, n + 1);
+          const key = c.key ?? comprobanteKey(c, n);
+          keys.push(key);
+          const args = [c.date, c.registered, c.result, c.phone, c.valor, c.bank, c.flow, c.adId, c.adLossy ? 1 : 0, c.adUrl, now];
+          if (find.get(key)) update.run(...args, key);
+          else insert.run(key, ...args, now);
+        }
+        markGone.run(now, JSON.stringify(keys));
       });
     },
+    setComprobanteCountries(list) {
+      const stmt = q('UPDATE comprobantes SET country = ?, country_source = ? WHERE key = ?');
+      tx(() => list.forEach((c) => stmt.run(c.country, c.source, c.key)));
+    },
+    setCountryOverride(key, country, now) {
+      if (!country) q('DELETE FROM comprobante_overrides WHERE key = ?').run(key);
+      else q('INSERT INTO comprobante_overrides (key, country, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET country = excluded.country, updated_at = excluded.updated_at').run(key, country, now);
+    },
     comprobantesBetween: (from, to) =>
-      q('SELECT * FROM comprobantes WHERE date >= ? AND date <= ? ORDER BY date, id').all(from, to).map((r) => ({
-        registered: r.registered, date: r.date, result: r.result, phone: r.phone, valor: r.valor, bank: r.bank, flow: r.flow,
-        adId: r.ad_id, adLossy: r.ad_lossy === 1, adUrl: r.ad_url,
+      q(`SELECT c.*, o.country AS override_country FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key
+        WHERE c.date >= ? AND c.date <= ? ORDER BY c.date, c.id`).all(from, to).map((r) => ({
+        key: r.key, registered: r.registered, date: r.date, result: r.result, phone: r.phone, valor: r.valor, bank: r.bank, flow: r.flow,
+        adId: r.ad_id, adLossy: r.ad_lossy === 1, adUrl: r.ad_url, gone: r.missing_since != null,
+        country: r.override_country ?? r.country, countrySource: r.override_country ? 'manual' : r.country_source,
       })),
 
     upsertBudgetEvents(events) {

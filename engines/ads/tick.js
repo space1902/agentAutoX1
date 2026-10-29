@@ -3,10 +3,11 @@
 //  2. checks which decisions are due (day-4 test verdicts, day-2 post-budget checks, plus catch-up for the ones
 //     missed while the app was closed) and, only if something is due, refreshes the data with a sync,
 //  3. stores each decision once (unique key) and queues the WhatsApp text when that channel is enabled.
-import { computeChanges, parseActivity } from './budget.js';
+import { computeChanges } from './budget.js';
 import { decisionMessage, dueBudgetChanges, evaluateDue } from './decisions.js';
 import { MetaApi, friendlyMetaError } from './meta-api.js';
-import { fetchActivities, fetchAccount, fetchAds } from './meta-data.js';
+import { syncActivities } from './activities.js';
+import { fetchAccount, fetchAds } from './meta-data.js';
 import { DEFAULT_TIMEZONE, redact, runSync } from './sync.js';
 import { addDays, localParts } from './time.js';
 
@@ -27,13 +28,9 @@ async function snapshotBudgets({ store, config, token, fetchImpl, now, warnings 
     store.refreshFirstSpend();
     store.setKv('lastSnapshot', now());
 
-    try {
-      const activities = await fetchActivities(api, config.adAccountId, addDays(today, -ACTIVITY_DAYS));
-      store.upsertBudgetEvents(activities.map((a) => parseActivity(a, timezone)).filter(Boolean));
-      store.setKv('activitiesOk', true);
-    } catch (error) {
-      store.setKv('activitiesOk', false);
-      warnings.push(`No se pudo leer el registro de actividad de Meta (${redact(friendlyMetaError(error), token)}). Los cambios de presupuesto se detectan por comparación y se fechan en la siguiente lectura.`);
+    const synced = await syncActivities({ api, store, config, since: addDays(today, -ACTIVITY_DAYS), timezone, token });
+    if (!synced.ok) {
+      warnings.push(`No se pudo leer el registro de actividad de Meta (${synced.error}). Los cambios de presupuesto se detectan por comparación y se fechan en la siguiente lectura.`);
     }
     return true;
   } catch (error) {

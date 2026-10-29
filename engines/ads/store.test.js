@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 
 import { createStore, openStoreAt } from './store.js';
 
@@ -59,16 +60,87 @@ test('budget history ignores entities without a budget and tracks campaign budge
   assert.equal(s.budgetHistory('campaign', 'c1')[0].dailyBudget, 9000000);
 });
 
-test('replaceComprobantes swaps the whole cache atomically', () => {
+const voucher = (date, valor, extra = {}) => ({ registered: `${date} 10:00:00`, date, result: 'Pago válido', phone: '573001234567', valor, bank: 'Nequi', flow: 'Bebidas - aporte', adId: 'A', adLossy: false, adUrl: '', ...extra });
+
+test('syncComprobantes upserts by stable key, never deletes, and flags rows that left the sheet', () => {
   const s = createStore();
-  const c = (date, valor) => ({ registered: `${date} 10:00`, date, result: 'Pago válido', phone: '573001234567', valor, bank: 'Nequi', flow: 'Bebidas - aporte', adId: 'A', adLossy: false, adUrl: '' });
-  s.replaceComprobantes([c('2026-10-27', 1000), c('2026-10-28', 2000)], 1);
-  s.replaceComprobantes([c('2026-10-28', 3000)], 2);
+  s.syncComprobantes([voucher('2026-10-27', 1000), voucher('2026-10-28', 2000)], 1);
+  s.syncComprobantes([voucher('2026-10-28', 2000, { result: 'Comprobante inválido' })], 2);
   const rows = s.comprobantesBetween('2026-10-01', '2026-10-31');
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].valor, 3000);
-  assert.equal(rows[0].adLossy, false);
-  assert.equal(rows[0].phone, '573001234567');
+  assert.equal(rows.length, 2, 'the vanished row is kept');
+  assert.equal(rows.find((r) => r.date === '2026-10-27').gone, true);
+  const kept = rows.find((r) => r.date === '2026-10-28');
+  assert.equal(kept.gone, false);
+  assert.equal(kept.result, 'Comprobante inválido', 'a corrected row keeps its identity and takes the new value');
+  s.syncComprobantes([voucher('2026-10-27', 1000), voucher('2026-10-28', 2000)], 3);
+  assert.equal(s.comprobantesBetween('2026-10-01', '2026-10-31').filter((r) => r.gone).length, 0, 'a returning row is no longer flagged');
+});
+
+test('identical payments of the same person and second get distinct keys', () => {
+  const s = createStore();
+  s.syncComprobantes([voucher('2026-10-28', 1000), voucher('2026-10-28', 1000)], 1);
+  const keys = s.comprobantesBetween('2026-10-01', '2026-10-31').map((r) => r.key);
+  assert.equal(new Set(keys).size, 2);
+  s.syncComprobantes([voucher('2026-10-28', 1000), voucher('2026-10-28', 1000)], 2);
+  assert.equal(s.counts().comprobantes, 2);
+});
+
+test('stored and manual countries: the override wins, survives a re-sync and can be removed', () => {
+  const s = createStore();
+  s.syncComprobantes([voucher('2026-10-28', 1000)], 1);
+  const [{ key }] = s.comprobantesBetween('2026-10-01', '2026-10-31');
+  s.setComprobanteCountries([{ key, country: 'CO', source: 'telefono' }]);
+  assert.deepEqual(s.comprobantesBetween('2026-10-01', '2026-10-31').map((r) => [r.country, r.countrySource]), [['CO', 'telefono']]);
+  s.setCountryOverride(key, 'MX', 5);
+  s.syncComprobantes([voucher('2026-10-28', 1000)], 6);
+  assert.deepEqual(s.comprobantesBetween('2026-10-01', '2026-10-31').map((r) => [r.country, r.countrySource]), [['MX', 'manual']]);
+  s.setCountryOverride(key, '', 7);
+  assert.equal(s.comprobantesBetween('2026-10-01', '2026-10-31')[0].countrySource, 'telefono');
+});
+
+test('insights keep a country split, and a restated ad-day replaces its previous rows', () => {
+  const s = createStore();
+  s.upsertInsights([row('2026-10-28', 'A', 600, { country: 'CO' }), row('2026-10-28', 'A', 400, { country: 'MX' }), row('2026-10-28', 'B', 100)], 1);
+  assert.equal(s.insightsBetween('2026-10-28', '2026-10-28').length, 3);
+  s.upsertInsights([row('2026-10-28', 'A', 1200, { country: 'CO' })], 2);
+  const a = s.insightsBetween('2026-10-28', '2026-10-28').filter((r) => r.adId === 'A');
+  assert.deepEqual(a.map((r) => [r.country, r.gasto]), [['CO', 1200]], 'MX row of the same ad-day is gone, B untouched');
+  assert.equal(s.insightsBetween('2026-10-28', '2026-10-28').length, 2);
+});
+
+test('historyStats reports the stored span', () => {
+  const s = createStore();
+  s.upsertInsights([row('2026-10-01', 'A', 1), row('2026-10-03', 'A', 1), row('2026-10-03', 'B', 1)], 1);
+  s.syncComprobantes([voucher('2026-09-20', 1)], 1);
+  const h = s.historyStats();
+  assert.deepEqual([h.insightsFrom, h.insightsTo, h.insightDays, h.vouchersFrom, h.voucherRows], ['2026-10-01', '2026-10-03', 2, '2026-09-20', 1]);
+});
+
+test('an old database (no country, no keys) is migrated in place', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ads-migrate-'));
+  const file = path.join(dir, 'old.db');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE insights (date TEXT NOT NULL, ad_id TEXT NOT NULL, ad_name TEXT NOT NULL, campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL,
+      adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, gasto REAL NOT NULL, impressions INTEGER NOT NULL, clicks INTEGER NOT NULL,
+      mensajes INTEGER NOT NULL, synced_at INTEGER NOT NULL, PRIMARY KEY (date, ad_id));
+    CREATE TABLE comprobantes (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, registered TEXT NOT NULL, result TEXT NOT NULL, phone TEXT NOT NULL,
+      valor REAL NOT NULL, bank TEXT NOT NULL, flow TEXT NOT NULL, ad_id TEXT NOT NULL, ad_lossy INTEGER NOT NULL, ad_url TEXT NOT NULL, synced_at INTEGER NOT NULL);`);
+  old.prepare("INSERT INTO insights VALUES ('2026-10-28','A','a','c','CT01','s','S',500,1,1,1,1)").run();
+  const ins = old.prepare("INSERT INTO comprobantes (date, registered, result, phone, valor, bank, flow, ad_id, ad_lossy, ad_url, synced_at) VALUES ('2026-10-28','28/10/2026 10:00:00','Pago válido','573001234567',1000,'N','Bebidas','A',0,'',1)");
+  ins.run();
+  ins.run();
+  old.close();
+
+  const s = createStore(file);
+  assert.equal(s.insightsRebuilt, true);
+  assert.equal(s.insightsBetween('2026-10-28', '2026-10-28')[0].country, '');
+  const keys = s.comprobantesBetween('2026-10-01', '2026-10-31').map((r) => r.key);
+  assert.equal(new Set(keys).size, 2);
+  assert.ok(keys.every(Boolean));
+  s.syncComprobantes([voucher('2026-10-28', 1000, { registered: '28/10/2026 10:00:00' }), voucher('2026-10-28', 1000, { registered: '28/10/2026 10:00:00' })], 9);
+  assert.equal(s.counts().comprobantes, 2, 'migrated keys match the keys a fresh sync computes');
+  s.close();
 });
 
 test('kv stores JSON values and counts summarise the tables', () => {
