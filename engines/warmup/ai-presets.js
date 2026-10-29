@@ -61,6 +61,8 @@ export const PRESETS = {
         outUsd: 0.4,
         extraBody: { reasoning_effort: 'minimal' },
         tokenParam: 'max_completion_tokens',
+        // Reasoning models only accept the default temperature.
+        noTemperature: true,
       },
     ],
   },

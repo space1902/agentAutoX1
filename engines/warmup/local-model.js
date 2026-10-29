@@ -69,6 +69,8 @@ export async function generateUsableMessage({ generate, warn = console.warn }) {
       if (isUsableMessage(text)) return text;
       warn(`[local model] unusable message on attempt ${attempt}: ${JSON.stringify(text)}`);
     } catch (error) {
+      // A budget stop ends the run: retrying would only repeat the refusal.
+      if (error?.fatal) return null;
       warn(`[local model] failed on attempt ${attempt}: ${error?.message || error}`);
     }
   }
