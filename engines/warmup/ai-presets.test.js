@@ -14,7 +14,7 @@ import {
 
 test('presets expose the verified providers and no Anthropic entry', () => {
   assert.equal(PRICES_AS_OF, '2026-10-29');
-  assert.deepEqual(Object.keys(PRESETS), ['openrouter', 'deepseek', 'openai', 'gemini', 'mistral', 'local-openai', 'custom']);
+  assert.deepEqual(Object.keys(PRESETS), ['openrouter', 'mistral', 'deepseek', 'openai', 'gemini', 'local-openai', 'custom']);
   assert.equal(PRESETS.openrouter.baseUrl, 'https://openrouter.ai/api/v1');
   assert.equal(PRESETS.deepseek.baseUrl, 'https://api.deepseek.com');
   assert.equal(PRESETS.openai.baseUrl, 'https://api.openai.com/v1');
@@ -78,4 +78,10 @@ test('estimateDaily blends DeepSeek peak and off-peak hours', () => {
   const peak = estimateCost(flash, 4000 * 1400, 4000 * 70);
   const off = estimateCost({ inUsd: 0.15, outUsd: 0.6 }, 4000 * 1400, 4000 * 70);
   assert.ok(day.usdDay > off && day.usdDay < peak);
+});
+
+test('only OpenRouter and Mistral are marked as recommended, and they come first', () => {
+  const recommended = Object.entries(PRESETS).filter(([, preset]) => preset.recommended).map(([id]) => id);
+  assert.deepEqual(recommended, ['openrouter', 'mistral']);
+  assert.deepEqual(Object.keys(PRESETS).slice(0, 2), recommended);
 });

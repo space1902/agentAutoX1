@@ -15,6 +15,7 @@ const PEAK_RANGES_UTC = [
 export const PRESETS = {
   openrouter: {
     label: 'OpenRouter',
+    recommended: true,
     kind: 'openai-compatible',
     baseUrl: 'https://openrouter.ai/api/v1',
     keyHint: 'sk-or-…',
@@ -31,6 +32,14 @@ export const PRESETS = {
         extraBody: { reasoning: { effort: 'low' } },
       },
     ],
+  },
+  mistral: {
+    label: 'Mistral',
+    recommended: true,
+    kind: 'openai-compatible',
+    baseUrl: 'https://api.mistral.ai/v1',
+    keyHint: '',
+    models: [{ id: 'ministral-3b-2512', label: 'Ministral 3B', inUsd: 0.1, outUsd: 0.1 }],
   },
   deepseek: {
     label: 'DeepSeek',
@@ -80,13 +89,6 @@ export const PRESETS = {
         extraBody: { reasoning_effort: 'none' },
       },
     ],
-  },
-  mistral: {
-    label: 'Mistral',
-    kind: 'openai-compatible',
-    baseUrl: 'https://api.mistral.ai/v1',
-    keyHint: '',
-    models: [{ id: 'ministral-3b-2512', label: 'Ministral 3B', inUsd: 0.1, outUsd: 0.1 }],
   },
   // LM Studio, llama.cpp, Jan, LocalAI, vLLM... any local server that speaks /v1/chat/completions.
   'local-openai': {
