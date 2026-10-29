@@ -22,7 +22,7 @@ const blank = (date, adId, country = '') => ({ date, adId, country, gasto: 0, me
 // Settings of a country; the rate defaults to 1 while it is not set (flagged by the country table).
 export function countrySettings(config, country) {
   const c = config.countries?.[country];
-  return { currency: c?.currency ?? 'COP', rate: c?.rateToCop > 0 ? c.rateToCop : 1, rateSet: !c || c.currency === 'COP' || c.rateToCop > 0, feePct: c?.feePct ?? 0, costPerSale: c?.costPerSale ?? 0, taxPct: c?.taxPct ?? 0 };
+  return { currency: c?.currency ?? 'COP', rate: c?.rateToCop > 0 ? c.rateToCop : 1, rateSet: c ? c.currency === 'COP' || c.rateToCop > 0 : !country || country === 'CO', feePct: c?.feePct ?? 0, costPerSale: c?.costPerSale ?? 0, taxPct: c?.taxPct ?? 0 };
 }
 
 // Value of a payment in COP plus what it costs (fee and tax are % of that value; the cost is per sale).

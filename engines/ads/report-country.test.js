@@ -72,6 +72,15 @@ test('a non-COP country without a rate is flagged and not converted', () => {
   assert.equal(r.kpis.valor, 60000 + 500 + 300);
 });
 
+test('a country with no settings at all is flagged until a rate is set (only Colombia needs none)', () => {
+  const ec = [pay('A', '593987654321', 20000)];
+  const r = buildReport({ insights: [], comprobantes: ec, identities, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  assert.equal(r.countries.find((c) => c.country === 'EC').rateMissing, true);
+  assert.equal(r.countries.find((c) => c.country === 'EC').name, 'Ecuador');
+  const co = buildReport({ insights: [], comprobantes: [pay('A', '573001234567', 1)], identities, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  assert.equal(co.countries.find((c) => c.country === 'CO').rateMissing, false);
+});
+
 test('rows that left the sheet are still counted and flagged', () => {
   const r = run({ comprobantes: [pay('A', '573001234567', 1000, { gone: true })] });
   assert.equal(r.kpis.ventas, 1);

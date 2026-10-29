@@ -100,6 +100,8 @@ function migrate(db) {
     db.exec('COMMIT');
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS comprobantes_key ON comprobantes (key)');
+  // Meta reports "unknown" when it cannot place an impression: store that as no country.
+  db.exec("UPDATE insights SET country = '' WHERE country = 'unknown' AND NOT EXISTS (SELECT 1 FROM insights i2 WHERE i2.date = insights.date AND i2.ad_id = insights.ad_id AND i2.country = '')");
   return rebuilt;
 }
 
