@@ -70,6 +70,28 @@ export interface RegistryRow {
   groups: string[];
   source: NumberSource;
   isBot: boolean;
+  /** Where the phone came from: the config, or the linked WhatsApp session when the config has none. */
+  phoneSource: "config" | "session" | null;
+  /** Other testers (or "bot") that use this same number. */
+  duplicateOf: string[];
+}
+
+export interface TesterPhone {
+  id: string;
+  phone: string | null;
+  configPhone: string | null;
+  sessionPhone: string | null;
+  phoneSource: "config" | "session" | null;
+  linked: boolean;
+  mismatch: boolean;
+  duplicateOf: string[];
+}
+
+export interface DuplicateGroup {
+  key: string;
+  phone: string;
+  /** Tester ids, plus "bot" for the main bot number. */
+  members: string[];
 }
 
 export interface TesterWithoutPhone {
@@ -83,11 +105,17 @@ export interface Registry {
   rows: RegistryRow[];
   podsWithoutPhone: { name: string; instanceId: string; state: string }[];
   testersWithoutPhone: TesterWithoutPhone[];
+  testers: Record<string, TesterPhone>;
+  duplicates: DuplicateGroup[];
 }
 
 export interface ProfileTester {
   id: string;
   phone: string | null;
+  phoneSource: "config" | "session" | null;
+  sessionPhone: string | null;
+  mismatch: boolean;
+  duplicateOf: string[];
   linked: boolean;
   podName: string | null;
 }

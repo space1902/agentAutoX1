@@ -1,11 +1,14 @@
 import { AnimatePresence } from "framer-motion";
-import { ArrowLeft, ArrowRight, Check, Copy, Flame, Link2, Loader2, MessagesSquare, Pencil, Play, Plus, RefreshCw, Square, Trash2, Users } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, Copy, Flame, Link2, Loader2, MessagesSquare, Pencil, Play, Plus, RefreshCw, Square, Trash2, TriangleAlert, Users } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { HealthBadge, useLineHealth } from "../components/Health";
+import { DuplicateBanner } from "../components/DuplicateBanner";
 import LinkPodsModal from "../components/LinkPods";
 import { Modal, Warning } from "../components/Modal";
 import NumberPicker, { buildItems, initialSelection, toSelections } from "../components/NumberPicker";
 import { Banner, Card, Notice, Pill, SkeletonGrid, StatCard } from "../components/ui";
+import { Tooltip } from "../components/Tooltip";
+import { duplicateText, mismatchText, testerPillLabel } from "../lib/phone";
 import { api, errorText, type LinkTarget, type LogLine, type PairingCard, type ProfileView, type ProfilesData } from "../lib/api";
 
 interface Props {
@@ -99,8 +102,9 @@ export default function CalentadorBots({ running, profile, logs, pairing, onClea
 
   const profiles = data?.profiles ?? [];
   const registry = data?.registry;
-  const linked = registry ? registry.rows.filter((r) => r.testerId && r.linked).length + registry.testersWithoutPhone.filter((t) => t.linked).length : 0;
-  const testerTotal = registry ? registry.rows.filter((r) => r.testerId).length + registry.testersWithoutPhone.length : 0;
+  const testerInfos = registry ? Object.values(registry.testers) : [];
+  const linked = testerInfos.filter((t) => t.linked).length;
+  const testerTotal = testerInfos.length;
 
   const saved = (message: string) => {
     setDialog(null);
@@ -135,6 +139,7 @@ export default function CalentadorBots({ running, profile, logs, pairing, onClea
         <StatCard icon={MessagesSquare} label="Grupo por defecto" value={data?.defaultGroup ?? "–"} caption="si la instancia no define uno" />
       </section>
 
+      <DuplicateBanner groups={registry?.duplicates} />
       {error && <Notice>{error}</Notice>}
       {info && <Notice kind="ok">{info}</Notice>}
       {podsError && <Notice>No se pudo leer la lista de pods (los números de pods pueden faltar): {podsError}</Notice>}
@@ -158,13 +163,20 @@ export default function CalentadorBots({ running, profile, logs, pairing, onClea
                   <dd>{p.testers.length}</dd>
                 </dl>
                 <div className="chips">
-                  {p.testers.map((t) => (
-                    <span key={t.id} className={`chip ${t.linked ? "" : "unlinked"}`} title={t.linked ? "Sesión vinculada" : "Sin vincular: pedirá QR al iniciar"}>
-                      <i aria-hidden /> {t.phone ?? t.id}
-                      {t.podName ? ` · ${t.podName}` : " · Externo"}
-                      <HealthBadge health={health.lines[t.id]} compact />
-                    </span>
-                  ))}
+                  {p.testers.map((t) => {
+                    const warning = t.duplicateOf.length > 0 ? duplicateText(t.duplicateOf) : t.mismatch ? mismatchText(t.phone, t.sessionPhone) : null;
+                    return (
+                      <span key={t.id} className={`chip ${t.linked ? "" : "unlinked"} ${warning ? "warn" : ""}`} title={t.linked ? "Sesión vinculada" : "Sin vincular: pedirá QR al iniciar"}>
+                        <i aria-hidden /> {testerPillLabel(t)}
+                        {warning && (
+                          <Tooltip className="phone-warn" content={warning} label={warning} width={260}>
+                            <TriangleAlert size={13} aria-hidden />
+                          </Tooltip>
+                        )}
+                        <HealthBadge health={health.lines[t.id]} compact />
+                      </span>
+                    );
+                  })}
                 </div>
                 {isThis && pairing.map((c) => <PairingCodeCard key={c.id} card={c} />)}
                 <div className="row-actions">

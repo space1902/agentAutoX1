@@ -39,3 +39,35 @@ export function phoneConflict(rows: RegistryRow[], phone: string, ownInstanceId:
   }
   return null;
 }
+
+/** "3XX XXX XXXX" for Colombian lines (10 digits or 57 + 10); any other number is returned as typed. */
+export function formatPhone(phone: string | null | undefined): string {
+  const key = phoneKey(phone);
+  if (key.length === 10 && key.startsWith("3")) return `${key.slice(0, 3)} ${key.slice(3, 6)} ${key.slice(6)}`;
+  return phone ?? "";
+}
+
+const memberName = (id: string) => (id === "bot" ? "el bot principal" : id);
+
+/** Tooltip for a number that other testers (or the bot) also use. */
+export function duplicateText(others: string[]): string {
+  return `Mismo número que ${others.map(memberName).join(", ")}`;
+}
+
+/** Tooltip for a tester whose configured phone differs from the one of its linked session. */
+export function mismatchText(configPhone: string | null, sessionPhone: string | null): string {
+  return `El número configurado (${formatPhone(configPhone)}) no coincide con el de la sesión vinculada (${formatPhone(sessionPhone)}).`;
+}
+
+/** Label of a tester pill: `tester16 · pod2 · 304 233 9130`; "Externo" when the number has a phone but no pod. */
+export function testerPillLabel(t: { id: string; phone: string | null; podName: string | null }): string {
+  const parts = [t.id];
+  if (t.podName) parts.push(t.podName);
+  if (t.phone) {
+    parts.push(formatPhone(t.phone));
+    if (!t.podName) parts.push("Externo");
+  } else {
+    parts.push("sin número");
+  }
+  return parts.join(" · ");
+}

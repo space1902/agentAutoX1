@@ -1,7 +1,10 @@
-import { Hash, Layers, Link2, RefreshCw, Smartphone } from "lucide-react";
+import { Hash, Layers, Link2, RefreshCw, Smartphone, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { DuplicateBanner } from "../components/DuplicateBanner";
+import { Tooltip } from "../components/Tooltip";
 import { HealthBadge, useLineHealth } from "../components/Health";
 import { Banner, Card, Notice, Pill, Skeleton, StatCard, type PillTone } from "../components/ui";
+import { duplicateText, formatPhone, mismatchText } from "../lib/phone";
 import { api, errorText, type NumberSource, type Registry, type RegistryRow } from "../lib/api";
 
 type SourceFilter = "todos" | NumberSource;
@@ -54,6 +57,11 @@ export default function Numeros() {
   }, [load]);
 
   const rows = registry?.rows ?? [];
+  const warningOf = (r: RegistryRow): string | null => {
+    if (r.duplicateOf.length > 0) return duplicateText(r.duplicateOf);
+    const info = r.testerId ? registry?.testers[r.testerId] : undefined;
+    return info?.mismatch ? mismatchText(info.configPhone, info.sessionPhone) : null;
+  };
   const groups = useMemo(() => [...new Set(rows.flatMap((r) => r.groups))].sort(), [rows]);
 
   const visible = useMemo(() => {
@@ -87,6 +95,7 @@ export default function Numeros() {
         <StatCard icon={Link2} label="Vinculados" value={registry ? linkedCount : "–"} caption="con sesión de WhatsApp guardada" />
       </section>
 
+      <DuplicateBanner groups={registry?.duplicates} />
       {error && <Notice>{error}</Notice>}
       {podsError && <Notice>No se pudo leer la lista de pods (solo se muestran los testers): {podsError}</Notice>}
 
@@ -138,7 +147,16 @@ export default function Numeros() {
                 {visible.map((r) => (
                   <tr key={r.key}>
                     <td className="num">
-                      {r.phone} {r.isBot && <Pill tone="amber">Bot</Pill>}
+                      {formatPhone(r.phone)} {r.isBot && <Pill tone="amber">Bot</Pill>}
+                      {r.phoneSource === "session" && <span className="muted"> · de la sesión</span>}
+                      {warningOf(r) && (
+                        <>
+                          {" "}
+                          <Tooltip className="phone-warn" content={warningOf(r)!} label={warningOf(r)!} width={260}>
+                            <TriangleAlert size={14} aria-hidden />
+                          </Tooltip>
+                        </>
+                      )}
                     </td>
                     <td>
                       <Pill tone={SOURCE_TONE[r.source]}>{r.source}</Pill>
