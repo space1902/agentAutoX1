@@ -3,6 +3,7 @@
 import {
   exitCleanlyOnCtrlC,
   isEntryPoint,
+  DATA_DIR,
   loadConfig,
   randomBetween,
   resolveGroupId,
@@ -21,11 +22,8 @@ import {
   shouldSendAudio,
   synthesizeVoiceNote,
 } from './voice.js';
-import {
-  generateLocal,
-  generateUsableMessage,
-  resolveLocalModel,
-} from './local-model.js';
+import { createAi } from './ai-provider.js';
+import { generateUsableMessage } from './local-model.js';
 
 const DEFAULT_BOT = {
   sessionId: 'bot',
@@ -69,8 +67,8 @@ const SPOKEN_INSTRUCTION =
   'You are about to record this as a WhatsApp voice note: write exactly what you would say out loud, ' +
   'in natural spoken language, 6 to 35 words, with no emojis, lists or markdown.';
 
-// Returns null when the local model gives nothing sendable; the bot then stays quiet.
-async function generateReply(localModel, bot, systemPrompt, history, spoken = false) {
+// Returns null when the AI gives nothing sendable; the bot then stays quiet.
+async function generateReply(ai, bot, systemPrompt, history, spoken = false) {
   const prompt =
     `Latest group messages:\n${history.join('\n')}\n\n` +
     `Write your next message as ${bot.displayName}.` +
@@ -78,9 +76,7 @@ async function generateReply(localModel, bot, systemPrompt, history, spoken = fa
 
   return generateUsableMessage({
     generate: () =>
-      generateLocal({
-        url: localModel.url,
-        model: localModel.model,
+      ai.generate({
         system: systemPrompt,
         prompt,
         maxTokens: 300,
@@ -93,13 +89,13 @@ async function generateReply(localModel, bot, systemPrompt, history, spoken = fa
 export async function startBotSession({ groupName: groupNameOption = null } = {}) {
   const { config, bot } = loadBotConfig();
   const groupName = String(groupNameOption ?? '').trim() || config.groupName;
-  const localModel = resolveLocalModel(config);
+  const ai = createAi({ config, dataDir: DATA_DIR });
   const systemPrompt = buildSystemPrompt(bot);
   const client = await startClient(bot.sessionId);
   const groupId = await resolveGroupId(client, config, { groupName });
 
   console.log(
-    `[bot] listening in "${groupName}" with ${localModel.model} (local, Ollama; no paid API)`,
+    `[bot] listening in "${groupName}" with ${ai.label}`,
   );
   console.log(`[voice] ${bot.sessionId}: ${bot.voice}, audio chance ${Math.round(bot.audioChance * 100)}%`);
 
@@ -133,7 +129,7 @@ export async function startBotSession({ groupName: groupNameOption = null } = {}
 
         try {
           const wantsAudio = shouldSendAudio(bot.audioChance);
-          const reply = await generateReply(localModel, bot, systemPrompt, history, wantsAudio);
+          const reply = await generateReply(ai, bot, systemPrompt, history, wantsAudio);
           if (!reply) {
             console.warn('[bot] local model gave no usable reply; staying quiet this turn');
             continue;

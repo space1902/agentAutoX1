@@ -2,12 +2,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { createAi } from './ai-provider.js';
+import { generateUsableMessage } from './local-model.js';
 import {
-  generateLocal,
-  generateUsableMessage,
-  resolveLocalModel,
-} from './local-model.js';
-import {
+  DATA_DIR,
   RESULTS_DIR,
   digitsOnly,
   exitCleanlyOnCtrlC,
@@ -326,9 +324,9 @@ function buildTesterPrompt(session, persona, topic, history, spoken = false) {
   ].join('\n');
 }
 
-// Returns null when the local model gives nothing sendable; the turn is then skipped.
+// Returns null when the AI gives nothing sendable; the turn is then skipped.
 async function generateTesterMessage(
-  localModel,
+  ai,
   session,
   persona,
   topic,
@@ -342,9 +340,7 @@ async function generateTesterMessage(
 
   return generateUsableMessage({
     generate: () =>
-      generateLocal({
-        url: localModel.url,
-        model: localModel.model,
+      ai.generate({
         system,
         prompt,
         maxTokens: MAX_TOKENS,
@@ -377,7 +373,7 @@ export async function runTests({
   // Voices are assigned over every configured tester so a tester keeps its voice in any subset.
   const allTesterIds = testerIds(config.testers);
   if (onlyIds) config.testers = selectTesters(config.testers, onlyIds);
-  const localModel = resolveLocalModel(config);
+  const ai = createAi({ config, dataDir: DATA_DIR });
   const sessions = [];
 
   try {
@@ -456,7 +452,7 @@ export async function runTests({
     const log = createCsvLog();
 
     console.log(`\nGroup found: ${groupName}`);
-    console.log(`Model: ${localModel.model} (local, Ollama; no paid API)`);
+    console.log(`Model: ${ai.label}`);
     console.log(`Testers: ${sessions.map((s) => s.id).join(', ')}`);
     console.log(`Results: ${log.file}`);
 
@@ -735,7 +731,7 @@ export async function runTests({
         const wantsAudio = shouldSendAudio(session.audio.chance);
 
         const sentText = await generateTesterMessage(
-          localModel,
+          ai,
           session,
           persona,
           topic,
@@ -744,7 +740,7 @@ export async function runTests({
         );
 
         if (!sentText) {
-          throw new Error('The local model gave no usable message; skipping this turn.');
+          throw new Error('The AI gave no usable message; skipping this turn.');
         }
 
         const sentAt = Date.now();

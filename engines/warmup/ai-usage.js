@@ -52,7 +52,13 @@ export class UsageLedger {
     this.data = readLedger(dataDir);
   }
 
+  // The bot and every tester share the file inside one process: always work on the latest copy.
+  refresh() {
+    this.data = readLedger(this.dataDir);
+  }
+
   record({ provider, model, promptTokens = 0, completionTokens = 0, usd = 0 }) {
+    this.refresh();
     const date = localDateKey(this.now());
     const day = (this.data[date] ??= {});
     const entry = (day[`${provider}/${model}`] ??= { calls: 0, promptTokens: 0, completionTokens: 0, usd: 0 });
@@ -65,6 +71,7 @@ export class UsageLedger {
   }
 
   todayUsd() {
+    this.refresh();
     return dayTotals(this.data[localDateKey(this.now())]).usd;
   }
 

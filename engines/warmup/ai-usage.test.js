@@ -74,3 +74,14 @@ test('old days are pruned after 60 days', () => {
   ledger.record({ provider: 'p', model: 'm', promptTokens: 1, completionTokens: 1, usd: 1 });
   assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(file, 'utf8'))), ['2026-10-29']);
 });
+
+test('two ledgers on the same folder (bot and testers) do not overwrite each other', () => {
+  const dir = tempDir();
+  const now = () => new Date(2026, 9, 29, 12);
+  const first = new UsageLedger(dir, { now });
+  const second = new UsageLedger(dir, { now });
+  first.record({ provider: 'p', model: 'm', promptTokens: 1, completionTokens: 1, usd: 1 });
+  second.record({ provider: 'p', model: 'm', promptTokens: 1, completionTokens: 1, usd: 2 });
+  assert.equal(first.todayUsd(), 3);
+  assert.equal(second.todayUsd(), 3);
+});
