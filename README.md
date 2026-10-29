@@ -182,3 +182,14 @@ The warm-up writes its messages with a **local model** (default, unchanged: Olla
 - **Live usage**: `/api/ps` (share on GPU vs CPU), VRAM from `nvidia-smi`, system RAM; "Probar" runs 5 sample messages and reports latency, tokens and estimated cost at 4,000 messages/day.
 
 Engine CLI: `node ai-cli.js <presets|config-get|config-save|ai-usage|ai-test|local-detect|local-resources|local-delete|local-pull> --stdin`.
+
+## Anuncios (ads) section
+
+Meta spend (live, Marketing API v26.0) joined with valid payments from the "Comprobantes" Google Sheet.
+
+- Engine: `engines/ads/` (Node >= 22.13, `node:sqlite`, tests with `npm test`). `ads-cli.js` commands: `sync --from --to`, `report --from --to [--group ct|campaign|ad]`, `status`, `test-token`, `config-get`, `config-set`.
+- Data: `<data dir>/ads/ads.db` (daily insights per ad, ad metadata with `first_spend_date`, budget history, payments cache) and `<data dir>/ads/config.json` (atomic write + backups in `ads/backups/`).
+- "Day 1" of an ad is its first day with spend > 0, not `created_time`. The first time an older ad is seen, sync looks back to its creation date once.
+- The Meta token lives only in the Windows Credential Manager (service `agentAutoX1`, entry `meta-token`) and reaches the engine through `AGENTAUTO_META_TOKEN`. Import it from the meta-ads-monitor `.env` or paste it in the section's settings.
+- Join rules (ported from the Apps Script): key = `date|adId`; Resultado = Valor - Gasto, ROAS = Valor / Gasto, Costo por mensaje = Gasto / Mensajes, Ticket = Valor / Ventas, % conversión = Ventas / Mensajes, Costo por venta = Gasto / Ventas (0 when the divisor is 0).
+- Suggested action: spend < 15000 Esperar; ROAS >= 3 and sales >= 3 Escalar y duplicar; >= 2 Escalar; >= 1.3 Mantener; >= 1 Vigilar; otherwise Apagar (all configurable).
