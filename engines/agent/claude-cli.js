@@ -1,0 +1,105 @@
+// Everything about launching the locally installed Claude Code CLI headless with the USER'S SUBSCRIPTION:
+// finding the binary, a child environment that can never fall back to a paid API key, and the isolated argument list.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+import { SERVER_NAME } from './stream-parser.js';
+
+// Variables that would switch Claude Code to a paid API / another provider, or make it think it is nested inside
+// another Claude Code session. They are removed from the child env no matter how the app was started.
+const KEEP = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_CONFIG_DIR']);
+const STRIP = [/^ANTHROPIC_/i, /^CLAUDE_CODE_/i, /^CLAUDECODE$/i, /^CLAUDE_PID$/i, /^CLAUDE_EFFORT$/i, /^AI_AGENT$/i, /^AWS_BEARER_TOKEN_BEDROCK$/i, /^OPENAI_API_KEY$/i];
+
+export function sanitizeEnv(env = process.env) {
+  const out = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (!KEEP.has(key.toUpperCase()) && STRIP.some((re) => re.test(key))) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+// Env of the child: sanitized, plus switches that stop Claude Code from loading ANY CLAUDE.md / auto-memory
+// (verified live: --setting-sources alone still let the user-level CLAUDE.md through). The rules travel in the
+// appended system prompt instead, so nothing of the user's own Claude Code persona reaches the Analista.
+export function childEnv(env = process.env) {
+  return { ...sanitizeEnv(env), CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' };
+}
+
+const exists = (file) => {
+  try {
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Finds the Claude Code executable. Order: explicit override, PATH (claude.exe before the npm shim), then the usual
+ * install folders. Returns { command, prefixArgs } or null. An npm `.cmd` shim is resolved to the package it wraps,
+ * because Node cannot spawn `.cmd` files directly.
+ */
+export function locateClaude({ override = '', env = process.env, platform = process.platform, home = os.homedir(), fileExists = exists } = {}) {
+  const win = platform === 'win32';
+  const candidates = [];
+  if (override && override.trim()) candidates.push(override.trim());
+  const pathDirs = String(env.PATH ?? env.Path ?? '').split(path.delimiter).filter(Boolean);
+  const names = win ? ['claude.exe', 'claude.cmd'] : ['claude'];
+  for (const dir of pathDirs) for (const name of names) candidates.push(path.join(dir, name));
+  if (win) {
+    candidates.push(path.join(home, '.local', 'bin', 'claude.exe'));
+    if (env.APPDATA) candidates.push(path.join(env.APPDATA, 'npm', 'claude.cmd'));
+    if (env.LOCALAPPDATA) candidates.push(path.join(env.LOCALAPPDATA, 'Programs', 'claude', 'claude.exe'));
+  } else {
+    candidates.push(path.join(home, '.local', 'bin', 'claude'), '/usr/local/bin/claude');
+  }
+  for (const file of candidates) {
+    if (!fileExists(file)) continue;
+    if (/\.cmd$/i.test(file)) {
+      const pkg = path.join(path.dirname(file), 'node_modules', '@anthropic-ai', 'claude-code');
+      const native = path.join(pkg, 'bin', 'claude.exe');
+      const js = path.join(pkg, 'cli.js');
+      if (fileExists(native)) return { command: native, prefixArgs: [], path: native };
+      if (fileExists(js)) return { command: process.execPath, prefixArgs: [js], path: js };
+      continue;
+    }
+    if (/\.(js|mjs|cjs)$/i.test(file)) return { command: process.execPath, prefixArgs: [file], path: file };
+    return { command: file, prefixArgs: [], path: file };
+  }
+  return null;
+}
+
+// Built-in tools the agent must never have, even if a setting file tried to allow them.
+export const DISALLOWED_BUILTINS = ['Bash', 'PowerShell', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Read', 'Glob', 'Grep', 'Task', 'Agent', 'TodoWrite', 'KillShell', 'BashOutput', 'SlashCommand', 'Skill'];
+
+export const mcpToolName = (tool) => `mcp__${SERVER_NAME}__${tool}`;
+
+/**
+ * Argument list for one headless turn. The prompt travels through stdin (no quoting or length problems).
+ * Isolation: only OUR MCP server (--strict-mcp-config), only the allowlisted tools (--tools + --allowedTools, anything
+ * else is denied without asking), no user/local settings or skills, no persisted system prompt.
+ */
+export function buildClaudeArgs({ mcpConfigFile, toolNames, web, model, resume, appendSystemPrompt }) {
+  const allowed = [...toolNames.map(mcpToolName), ...(web ? ['WebSearch', 'WebFetch'] : [])];
+  const args = [
+    '-p',
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+    '--mcp-config', mcpConfigFile,
+    '--strict-mcp-config',
+    '--tools', web ? 'WebSearch,WebFetch' : '',
+    '--allowedTools', allowed.join(','),
+    '--disallowedTools', DISALLOWED_BUILTINS.join(','),
+    '--permission-mode', 'dontAsk',
+    '--setting-sources', 'project',
+    '--disable-slash-commands',
+    '--system-prompt-snapshot', 'off',
+    '--append-system-prompt', appendSystemPrompt,
+  ];
+  if (model) args.push('--model', model);
+  if (resume) args.push('--resume', resume);
+  return args;
+}

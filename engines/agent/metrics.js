@@ -15,6 +15,20 @@ const MAX_ROWS = 60;
 
 export class MetricsError extends Error {}
 
+// Today's date in the ad account's timezone (cheap: reads one key of ads.db).
+export function accountToday(dataDir, now = Date.now()) {
+  try {
+    const store = openStoreReadOnly(dataDir);
+    try {
+      return localParts(now, store.getKv('account')?.timezone || DEFAULT_TIMEZONE).date;
+    } finally {
+      store.close();
+    }
+  } catch {
+    return localParts(now, DEFAULT_TIMEZONE).date;
+  }
+}
+
 export function loadDataset(dataDir, now = Date.now()) {
   const store = openStoreReadOnly(dataDir);
   try {

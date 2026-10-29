@@ -5,6 +5,9 @@ import { loadDataset, METRIC_KINDS, MetricsError, runMetric } from './metrics.js
 import { adsDbPath } from './paths.js';
 import { runQuery } from './query-runner.js';
 
+export const BASE_TOOL_NAMES = Object.freeze(['list_views', 'query_sql', 'metrics', 'get_lessons']);
+export const LEARNING_TOOL_NAMES = Object.freeze(['record_recommendation', 'propose_lesson']);
+
 const ISO = { type: 'string', description: 'Fecha AAAA-MM-DD.' };
 
 export function createTools(ctx) {

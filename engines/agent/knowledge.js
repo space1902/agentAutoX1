@@ -70,7 +70,8 @@ export function workspaceClaudeMd({ web, learning }) {
 
 // Per-turn additions (dynamic): date and certified lessons. Lessons are data the user approved, listed as plain facts.
 export function systemPromptAppend({ today, lessons = [], web, learning }) {
-  const parts = [`Fecha de hoy en la cuenta: ${today}.`, rulesText({ web, learning })];
+  const parts = [`Fecha de hoy en la cuenta: ${today}.`, rulesText({ web, learning }), `GLOSARIO DEL NEGOCIO
+${glossaryText()}`];
   if (learning && lessons.length) {
     parts.push(`LECCIONES CERTIFICADAS por el usuario (hechos aprendidos de resultados reales; tenlos en cuenta):\n${lessons.map((l, i) => `${i + 1}. ${l.text}`).join('\n')}`);
   }
