@@ -80,3 +80,8 @@ export async function fetchAds(api, accountId) {
   return rows.map(parseAdRow).filter((r) => r.adId);
 }
 
+
+// Account activity log (budget edits). Needs the same ads_read permission; failures are handled by the caller.
+export async function fetchActivities(api, accountId, sinceDate) {
+  return api.getAll(`/${accountId}/activities`, { fields: 'event_type,event_time,object_id,object_name,extra_data', since: sinceDate, limit: 500 });
+}

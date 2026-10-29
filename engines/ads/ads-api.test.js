@@ -112,3 +112,16 @@ test('dates and commands are validated', async () => {
   await assert.rejects(runAdsCommand('report', { from: '2026-10-01', to: '2026-10-02', group: 'x' }, c), /agrupaci/i);
   await assert.rejects(runAdsCommand('rm -rf', {}, c), /comando/i);
 });
+
+test('tick, decisions and decision-status work through the command layer', async () => {
+  const c = ctx();
+  const tick = await runAdsCommand('tick', {}, c);
+  assert.equal(tick.snapshot, true);
+  assert.deepEqual(tick.created, []);
+  const list = await runAdsCommand('decisions', {}, c);
+  assert.deepEqual(list.decisions, []);
+  assert.equal(list.lifecycle.testNotifyDay, 4);
+  await assert.rejects(runAdsCommand('decision-status', { id: '1', status: 'done' }, c), /No encuentro/);
+  await assert.rejects(runAdsCommand('decision-status', { id: 'x', status: 'done' }, c), AdsError);
+  await assert.rejects(runAdsCommand('decision-status', { id: '1', status: 'borrar' }, c), AdsError);
+});

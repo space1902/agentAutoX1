@@ -91,3 +91,29 @@ test('openStoreAt creates <data dir>/ads/ads.db and reopens it', () => {
   assert.equal(b.insightsBetween('2026-10-28', '2026-10-28')[0].gasto, 10);
   b.close();
 });
+
+test('decisions are unique by key, keep their payload and can change status', () => {
+  const s = createStore();
+  const d = { key: 'test:A:2026-10-25:d4', kind: 'test', entityType: 'ad', entityId: 'A', label: 'Ad A', dayN: 4, dueDate: '2026-10-28', late: false, verdict: { label: 'Escalar' }, reason: 'x' };
+  const id = s.insertDecision(d, 100);
+  assert.ok(id > 0);
+  assert.equal(s.insertDecision(d, 200), null);
+  assert.deepEqual([...s.decisionKeys()], [d.key]);
+  assert.equal(s.setDecisionStatus(id, 'done', 300), true);
+  assert.equal(s.setDecisionStatus(999, 'done', 300), false);
+  const [stored] = s.decisions();
+  assert.equal(stored.status, 'done');
+  assert.equal(stored.verdict.label, 'Escalar');
+  assert.equal(stored.createdAt, 100);
+});
+
+test('budget events and the WhatsApp outbox round trip', () => {
+  const s = createStore();
+  const e = { entityType: 'adset', entityId: 's1', time: 5, date: '2026-10-27', oldBudget: 1, newBudget: 2 };
+  s.upsertBudgetEvents([e, e]);
+  assert.deepEqual(s.budgetEvents(), [e]);
+  s.enqueueWhatsapp('hola', 'decision', 10);
+  assert.equal(s.pendingWhatsapp().length, 1);
+  s.markWhatsappSent(s.pendingWhatsapp()[0].id, 20);
+  assert.equal(s.pendingWhatsapp().length, 0);
+});

@@ -25,6 +25,23 @@ export const DEFAULT_CONFIG = Object.freeze({
     postBudgetDays: 3,
     postBudgetNotifyDay: 2,
     postBudgetNotifyAt: '20:00',
+    // Phase B (daily decisions).
+    testEnabled: true,
+    budgetEnabled: true,
+    // Days before the budget change used as the comparison baseline.
+    windowDays: 3,
+    minRoasToScale: 2,
+    maxCpaWorsenPct: 25,
+    minSales: 2,
+    lowerCpaWorsenPct: 50,
+    // Suggested next increase (capped by maxRaisePct, the monitor's budgetChangeMaxPct).
+    raisePct: 20,
+    maxRaisePct: 20,
+    // A decision missed because the app was closed is still issued up to this many days late.
+    lateDays: 2,
+    notifyDesktop: true,
+    notifyWhatsapp: false,
+    snapshotMinutes: 30,
   }),
 });
 
@@ -85,6 +102,12 @@ export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
   const life = p.lifecycle ?? {};
   for (const key of ['testDays', 'testNotifyDay', 'postBudgetDays', 'postBudgetNotifyDay']) {
     if (life[key] !== undefined) out.lifecycle[key] = wholeDays(life[key], key);
+  }
+  for (const key of ['testEnabled', 'budgetEnabled', 'notifyDesktop', 'notifyWhatsapp']) {
+    if (life[key] !== undefined) out.lifecycle[key] = Boolean(life[key]);
+  }
+  for (const key of ['windowDays', 'minRoasToScale', 'maxCpaWorsenPct', 'minSales', 'lowerCpaWorsenPct', 'raisePct', 'maxRaisePct', 'lateDays', 'snapshotMinutes']) {
+    if (life[key] !== undefined) out.lifecycle[key] = nonNegative(life[key], key);
   }
   for (const key of ['testNotifyAt', 'postBudgetNotifyAt']) {
     if (life[key] !== undefined) out.lifecycle[key] = hhmm(life[key], key);

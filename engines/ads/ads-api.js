@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG, ConfigError, adsDir, loadConfig, saveConfig } from './c
 import { MetaApi, friendlyMetaError } from './meta-api.js';
 import { fetchAccount } from './meta-data.js';
 import { buildReport } from './report.js';
+import { runTick } from './tick.js';
 import { openStoreAt } from './store.js';
 import { DEFAULT_TIMEZONE, redact, runSync } from './sync.js';
 import { daysBetween, isIsoDate, localParts } from './time.js';
@@ -11,7 +12,8 @@ import { daysBetween, isIsoDate, localParts } from './time.js';
 export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
 const GROUPS = ['ct', 'campaign', 'ad'];
-const COMMANDS = ['sync', 'report', 'status', 'test-token', 'config-get', 'config-set'];
+const COMMANDS = ['sync', 'report', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status'];
+const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
 export class AdsError extends Error {}
 
@@ -35,13 +37,6 @@ export function parseArgs(argv) {
 function checkRange({ from, to }) {
   if (!isIsoDate(from) || !isIsoDate(to)) throw new AdsError('Las fechas deben tener el formato AAAA-MM-DD.');
   if (from > to || daysBetween(from, to) > MAX_RANGE_DAYS) throw new AdsError(`El rango de fechas no es válido (máximo ${MAX_RANGE_DAYS} días).`);
-}
-
-// Day 1 of an ad = first day with spend; derived from the stored daily insights so it is always current.
-function withFirstSpend(ads, first) {
-  const out = { ...ads };
-  for (const [id, date] of Object.entries(first)) out[id] = { ...(out[id] ?? {}), firstSpendDate: date };
-  return out;
 }
 
 const accountTimezone = (store) => store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
@@ -86,6 +81,17 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       return await runSync({ store, config, token, from: args.from, to: args.to, fetchImpl, now });
     }
 
+    if (command === 'tick') return await runTick({ store, config, token, fetchImpl, now, force: args.force === true || args.force === 'true' });
+    if (command === 'decisions') {
+      return { decisions: store.decisions(), activitiesOk: store.getKv('activitiesOk'), lastSnapshot: store.getKv('lastSnapshot'), lifecycle: config.lifecycle };
+    }
+    if (command === 'decision-status') {
+      const id = Number(args.id);
+      if (!Number.isInteger(id) || id <= 0 || !DECISION_STATUSES.includes(args.status)) throw new AdsError('La decisión o el estado no son válidos.');
+      if (!store.setDecisionStatus(id, args.status, now())) throw new AdsError('No encuentro esa decisión.');
+      return { id, status: args.status };
+    }
+
     const timezone = accountTimezone(store);
     const today = localParts(now(), timezone).date;
     if (command === 'status') {
@@ -107,7 +113,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       insights: store.insightsBetween(args.from, args.to),
       comprobantes: store.comprobantesBetween(args.from, args.to),
       identities: store.identities(),
-      ads: withFirstSpend(store.adsMap(), store.firstSpendMap()),
+      ads: store.adsWithFirstSpend(),
       config,
       from: args.from,
       to: args.to,

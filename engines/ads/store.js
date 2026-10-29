@@ -31,6 +31,22 @@ CREATE TABLE IF NOT EXISTS comprobantes (
   ad_url TEXT NOT NULL, synced_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS comprobantes_date ON comprobantes (date);
+-- Exact budget changes read from the account activity log (when Meta exposes it).
+CREATE TABLE IF NOT EXISTS budget_events (
+  entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, time INTEGER NOT NULL, date TEXT NOT NULL,
+  old_budget REAL NOT NULL, new_budget REAL NOT NULL, PRIMARY KEY (entity_type, entity_id, time, new_budget)
+);
+-- Issued decisions. The key makes each one unique: (kind, entity, window start, day).
+CREATE TABLE IF NOT EXISTS decisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL,
+  label TEXT NOT NULL, day_n INTEGER NOT NULL, due_date TEXT NOT NULL, late INTEGER NOT NULL, payload TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, notified_at INTEGER, updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_created ON decisions (created_at);
+-- Messages waiting for the WhatsApp channel (sent by the alerts monitor when it is connected).
+CREATE TABLE IF NOT EXISTS wa_outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, source TEXT NOT NULL, created_at INTEGER NOT NULL, sent_at INTEGER
+);
 `;
 
 export function createStore(file = ':memory:') {
@@ -101,6 +117,12 @@ export function createStore(file = ':memory:') {
       const rows = q('SELECT ad_id, MIN(date) AS d FROM insights WHERE gasto > 0 GROUP BY ad_id').all();
       return Object.fromEntries(rows.map((r) => [r.ad_id, r.d]));
     },
+    // Ad metadata plus `firstSpendDate` (day 1), also for ads missing from the ads table.
+    adsWithFirstSpend() {
+      const out = { ...this.adsMap() };
+      for (const [id, date] of Object.entries(this.firstSpendMap())) out[id] = { ...(out[id] ?? {}), firstSpendDate: date };
+      return out;
+    },
     adsMap() {
       const rows = q('SELECT * FROM ads').all();
       return Object.fromEntries(
@@ -145,6 +167,53 @@ export function createStore(file = ':memory:') {
         registered: r.registered, date: r.date, result: r.result, phone: r.phone, valor: r.valor, bank: r.bank, flow: r.flow,
         adId: r.ad_id, adLossy: r.ad_lossy === 1, adUrl: r.ad_url,
       })),
+
+    upsertBudgetEvents(events) {
+      const stmt = q('INSERT OR IGNORE INTO budget_events (entity_type, entity_id, time, date, old_budget, new_budget) VALUES (?, ?, ?, ?, ?, ?)');
+      tx(() => {
+        for (const e of events) stmt.run(e.entityType, e.entityId, e.time, e.date, e.oldBudget, e.newBudget);
+      });
+    },
+    budgetEvents: () =>
+      q('SELECT * FROM budget_events ORDER BY time').all().map((r) => ({
+        entityType: r.entity_type, entityId: r.entity_id, time: r.time, date: r.date, oldBudget: r.old_budget, newBudget: r.new_budget,
+      })),
+    // { "adset|s1": [rows in order] }
+    budgetHistories() {
+      const out = {};
+      for (const r of q('SELECT * FROM budget_history ORDER BY id').all()) {
+        (out[`${r.entity_type}|${r.entity_id}`] ??= []).push({ date: r.date, dailyBudget: r.daily_budget, lifetimeBudget: r.lifetime_budget, firstSeen: r.first_seen });
+      }
+      return out;
+    },
+
+    // Returns the stored decision (with id) or null when the key already exists.
+    insertDecision(d, now) {
+      const res = q('INSERT OR IGNORE INTO decisions (key, kind, entity_type, entity_id, label, day_n, due_date, late, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(d.key, d.kind, d.entityType, d.entityId, d.label, d.dayN, d.dueDate, d.late ? 1 : 0, JSON.stringify(d), now, now);
+      return res.changes ? Number(res.lastInsertRowid) : null;
+    },
+    decisionKeys: () => new Set(q('SELECT key FROM decisions').all().map((r) => r.key)),
+    decisions(limit = 300) {
+      return q('SELECT * FROM decisions ORDER BY created_at DESC, id DESC LIMIT ?').all(limit).map((r) => ({
+        ...JSON.parse(r.payload), id: r.id, status: r.status, createdAt: r.created_at, notifiedAt: r.notified_at, updatedAt: r.updated_at,
+      }));
+    },
+    setDecisionStatus(id, status, now) {
+      return Number(q('UPDATE decisions SET status = ?, updated_at = ? WHERE id = ?').run(status, now, id).changes) > 0;
+    },
+    markNotified(ids, now) {
+      const stmt = q('UPDATE decisions SET notified_at = ? WHERE id = ?');
+      tx(() => ids.forEach((id) => stmt.run(now, id)));
+    },
+
+    enqueueWhatsapp(text, source, now) {
+      q('INSERT INTO wa_outbox (text, source, created_at) VALUES (?, ?, ?)').run(text, source, now);
+    },
+    pendingWhatsapp: () => q('SELECT * FROM wa_outbox WHERE sent_at IS NULL ORDER BY id').all(),
+    markWhatsappSent(id, now) {
+      q('UPDATE wa_outbox SET sent_at = ? WHERE id = ?').run(now, id);
+    },
 
     counts: () => ({
       insights: q('SELECT COUNT(*) n FROM insights').get().n,
