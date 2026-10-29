@@ -229,9 +229,7 @@ test('runPull writes progress lines and a final done line', async () => {
     ok: true,
     body: new ReadableStream({
       start(controller) {
-        controller.enqueue(encoder.encode('{"status":"pulling a","total":200,"completed":100}
-{"status":"success"}
-'));
+        controller.enqueue(encoder.encode('{"status":"pulling a","total":200,"completed":100}\n{"status":"success"}\n'));
         controller.close();
       },
     }),
