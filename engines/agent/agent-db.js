@@ -26,7 +26,39 @@ CREATE TABLE IF NOT EXISTS query_log (
   status TEXT NOT NULL, layer TEXT, reason TEXT, rows INTEGER, ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS query_log_ts ON query_log (ts);
+
+-- Learning from real outcomes. baseline_json is computed by code at record time, never by the model.
+CREATE TABLE IF NOT EXISTS recommendations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, rec_date TEXT NOT NULL, session_id TEXT, message_id INTEGER,
+  entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, entity_label TEXT NOT NULL DEFAULT '', action TEXT NOT NULL, params_json TEXT NOT NULL DEFAULT '{}',
+  rationale TEXT NOT NULL DEFAULT '', baseline_json TEXT NOT NULL, eval_after_days INTEGER NOT NULL DEFAULT 3,
+  status TEXT NOT NULL DEFAULT 'pending', followed TEXT NOT NULL DEFAULT 'unknown'
+);
+CREATE INDEX IF NOT EXISTS recommendations_status ON recommendations (status, rec_date);
+CREATE TABLE IF NOT EXISTS outcomes (
+  rec_id INTEGER PRIMARY KEY, evaluated_at INTEGER NOT NULL, after_json TEXT NOT NULL, label TEXT NOT NULL, explanation TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lessons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, text TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'general', kind TEXT NOT NULL DEFAULT 'rule',
+  source TEXT NOT NULL DEFAULT 'distiller', evidence_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'candidate', weight REAL NOT NULL DEFAULT 1,
+  created INTEGER NOT NULL, updated INTEGER NOT NULL, certified_at INTEGER, shown INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS signals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, session_id TEXT, message_id INTEGER, kind TEXT NOT NULL, weight REAL NOT NULL, note TEXT
+);
+CREATE INDEX IF NOT EXISTS signals_ts ON signals (ts);
 `;
+
+const recRow = (r) => ({
+  id: r.id, ts: r.ts, recDate: r.rec_date, sessionId: r.session_id, messageId: r.message_id, entityType: r.entity_type, entityId: r.entity_id, entityLabel: r.entity_label,
+  action: r.action, params: JSON.parse(r.params_json), rationale: r.rationale, baseline: JSON.parse(r.baseline_json), evalAfterDays: r.eval_after_days, status: r.status,
+  followed: r.followed, outcome: r.label ? { evaluatedAt: r.evaluated_at, after: JSON.parse(r.after_json), label: r.label, explanation: r.explanation } : null,
+});
+
+const lessonRow = (r) => ({
+  id: r.id, key: r.key, text: r.text, scope: r.scope, kind: r.kind, source: r.source, evidence: JSON.parse(r.evidence_json), status: r.status, weight: r.weight,
+  created: r.created, updated: r.updated, certifiedAt: r.certified_at, shown: r.shown === 1,
+});
 
 const MAX_SOURCE_CHARS = 120_000;
 
@@ -119,6 +151,76 @@ export function createAgentStore(file = ':memory:', { now = Date.now } = {}) {
     attachSources(sessionId, messageId) {
       q('UPDATE turn_sources SET message_id = ? WHERE session_id = ? AND message_id IS NULL').run(messageId, sessionId);
     },
+
+    // ---- recommendations / outcomes
+    addRecommendation(r) {
+      const res = q(`INSERT INTO recommendations (ts, rec_date, session_id, message_id, entity_type, entity_id, entity_label, action, params_json, rationale, baseline_json, eval_after_days)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        now(), r.recDate, r.sessionId ?? null, r.messageId ?? null, r.entityType, r.entityId, r.entityLabel ?? '', r.action, JSON.stringify(r.params ?? {}),
+        r.rationale ?? '', JSON.stringify(r.baseline), r.evalAfterDays,
+      );
+      return Number(res.lastInsertRowid);
+    },
+    findPendingRecommendation: (sessionId, entityType, entityId, action, recDate) => {
+      const r = q("SELECT id FROM recommendations WHERE session_id IS ? AND entity_type = ? AND entity_id = ? AND action = ? AND rec_date = ? AND status = 'pending'").get(sessionId ?? null, entityType, entityId, action, recDate);
+      return r ? r.id : null;
+    },
+    attachRecommendations(sessionId, messageId) {
+      q('UPDATE recommendations SET message_id = ? WHERE session_id = ? AND message_id IS NULL').run(messageId, sessionId);
+    },
+    recommendations: (limit = 200) =>
+      q('SELECT r.*, o.evaluated_at, o.after_json, o.label, o.explanation FROM recommendations r LEFT JOIN outcomes o ON o.rec_id = r.id ORDER BY r.id DESC LIMIT ?').all(limit).map(recRow),
+    pendingRecommendations: () => q("SELECT * FROM recommendations WHERE status = 'pending' ORDER BY id").all().map((r) => recRow({ ...r })),
+    saveOutcome({ recId, afterJson, label, explanation, followed }) {
+      tx(() => {
+        q('INSERT INTO outcomes (rec_id, evaluated_at, after_json, label, explanation) VALUES (?, ?, ?, ?, ?) ON CONFLICT(rec_id) DO UPDATE SET evaluated_at = excluded.evaluated_at, after_json = excluded.after_json, label = excluded.label, explanation = excluded.explanation')
+          .run(recId, now(), JSON.stringify(afterJson), label, explanation);
+        q("UPDATE recommendations SET status = 'evaluated', followed = ? WHERE id = ?").run(followed, recId);
+      });
+    },
+    labeledOutcomes: () =>
+      q('SELECT r.*, o.evaluated_at, o.after_json, o.label, o.explanation FROM recommendations r JOIN outcomes o ON o.rec_id = r.id ORDER BY r.id').all().map(recRow),
+
+    // ---- lessons
+    lessons: (status) =>
+      q(`SELECT * FROM lessons ${status ? 'WHERE status = ?' : ''} ORDER BY CASE status WHEN 'candidate' THEN 0 WHEN 'certified' THEN 1 ELSE 2 END, weight DESC, id DESC`).all(...(status ? [status] : [])).map(lessonRow),
+    getLesson(id) {
+      const r = q('SELECT * FROM lessons WHERE id = ?').get(id);
+      return r ? lessonRow(r) : null;
+    },
+    getLessonByKey(key) {
+      const r = q('SELECT * FROM lessons WHERE key = ?').get(key);
+      return r ? lessonRow(r) : null;
+    },
+    insertLesson(l) {
+      const t = now();
+      const res = q('INSERT INTO lessons (key, text, scope, kind, source, evidence_json, status, weight, created, updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(l.key, l.text, l.scope ?? 'general', l.kind ?? 'rule', l.source ?? 'distiller', JSON.stringify(l.evidence ?? {}), 'candidate', l.weight ?? 1, t, t);
+      return Number(res.lastInsertRowid);
+    },
+    updateLesson(id, patch) {
+      const cur = store.getLesson(id);
+      if (!cur) return false;
+      const next = { ...cur, ...patch };
+      q('UPDATE lessons SET text = ?, evidence_json = ?, weight = ?, status = ?, certified_at = ?, shown = ?, updated = ? WHERE id = ?')
+        .run(next.text, JSON.stringify(next.evidence), next.weight, next.status, next.certifiedAt ?? null, next.shown ? 1 : 0, now(), id);
+      return true;
+    },
+    unshownCandidates: () => q("SELECT * FROM lessons WHERE status = 'candidate' AND shown = 0 ORDER BY id").all().map(lessonRow),
+    markShown(ids) {
+      const stmt = q('UPDATE lessons SET shown = 1 WHERE id = ?');
+      tx(() => ids.forEach((id) => stmt.run(id)));
+    },
+
+    // ---- signals
+    addSignal({ sessionId = null, messageId = null, kind, weight, note = null }) {
+      q('INSERT INTO signals (ts, session_id, message_id, kind, weight, note) VALUES (?, ?, ?, ?, ?, ?)').run(now(), sessionId, messageId, kind, weight, note);
+    },
+    removeSignals(messageId, kinds) {
+      q(`DELETE FROM signals WHERE message_id = ? AND kind IN (${kinds.map(() => '?').join(',')})`).run(messageId, ...kinds);
+    },
+    signals: (since = 0) =>
+      q('SELECT * FROM signals WHERE ts >= ? ORDER BY id').all(since).map((r) => ({ id: r.id, ts: r.ts, sessionId: r.session_id, messageId: r.message_id, kind: r.kind, weight: r.weight, note: r.note })),
 
     logQuery({ sessionId = null, question = null, purpose = null, sql, status, layer = null, reason = null, rows = null, ms = null }) {
       q('INSERT INTO query_log (ts, session_id, question, purpose, sql, status, layer, reason, rows, ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(

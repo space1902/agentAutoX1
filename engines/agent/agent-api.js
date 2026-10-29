@@ -5,12 +5,13 @@ import { openAgentStore } from './agent-db.js';
 import { locateClaude } from './claude-cli.js';
 import { adsDbPath, agentDbPath, workspaceDir } from './paths.js';
 import { loadSettings, saveSettings, SettingsError } from './settings.js';
+import { editLesson, learningSummary, makeHooks, recordFeedback, runLearningCycle, setLessonStatus } from './learning.js';
 import { runTurn } from './turn.js';
 
 export class AgentError extends Error {}
 
 export const STREAMING = ['turn'];
-const COMMANDS = ['status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries'];
+const COMMANDS = ['status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations'];
 
 const need = (cond, message) => {
   if (!cond) throw new AgentError(message);
@@ -20,7 +21,8 @@ export async function runStreaming(command, payload, { dataDir, emit, registerCa
   if (command === 'turn') {
     need(typeof payload.text === 'string' && payload.text.trim(), 'Escribe una pregunta.');
     need(payload.text.length <= 8000, 'La pregunta es demasiado larga (máximo 8000 caracteres).');
-    return runTurn({ dataDir, sessionId: payload.sessionId || undefined, text: payload.text, emit, registerCancel, hooks });
+    const learning = loadSettings(dataDir).learning;
+    return runTurn({ dataDir, sessionId: payload.sessionId || undefined, text: payload.text, emit, registerCancel, hooks: hooks ?? (learning ? makeHooks() : {}) });
   }
   throw new AgentError(`Comando del Analista no permitido: ${command}.`);
 }
@@ -64,6 +66,31 @@ export async function runCommand(command, payload, { dataDir }) {
     if (command === 'messages') {
       need(store.getSession(payload.sessionId), 'No encuentro ese chat.');
       return { messages: store.messages(payload.sessionId) };
+    }
+    if (command === 'lessons') return { lessons: store.lessons() };
+    if (command === 'learning-get') {
+      const ids = Array.isArray(payload.ids) ? payload.ids.map(Number) : null;
+      return { summary: learningSummary(store), lessons: store.lessons().filter((l) => !ids || ids.includes(l.id)) };
+    }
+    if (command === 'lesson-set') {
+      const res = setLessonStatus(store, Number(payload.id), String(payload.action));
+      need(!res.error, res.error);
+      return res;
+    }
+    if (command === 'lesson-edit') {
+      const res = editLesson(store, Number(payload.id), payload.text);
+      need(!res.error, res.error);
+      return res;
+    }
+    if (command === 'feedback') {
+      const res = recordFeedback(store, { messageId: Number(payload.messageId), kind: String(payload.kind), comment: payload.comment });
+      need(!res.error, res.error);
+      return res;
+    }
+    if (command === 'recommendations') return { recommendations: store.recommendations(Number(payload.limit) || 200) };
+    if (command === 'learning-run') {
+      need(loadSettings(dataDir).learning, 'El aprendizaje está desactivado en los ajustes.');
+      return runLearningCycle({ dataDir, store, force: true });
     }
     if (command === 'queries') return { queries: store.recentQueries(Math.min(Number(payload.limit) || 50, 200)) };
   } finally {

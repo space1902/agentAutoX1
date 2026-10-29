@@ -112,7 +112,17 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       return await runSync({ store, config, token, from: args.from, to: args.to, fetchImpl, now });
     }
 
-    if (command === 'tick') return await runTick({ store, config, token, fetchImpl, now, force: args.force === true || args.force === 'true' });
+    if (command === 'tick') {
+      const result = await runTick({ store, config, token, fetchImpl, now, force: args.force === true || args.force === 'true' });
+      // The Analista measures the real outcome of its recommendations once a day. It never blocks or breaks the tick.
+      try {
+        const { runDailyLearning } = await import('../agent/learning-daily.js');
+        result.learning = runDailyLearning({ dataDir, now: now() });
+      } catch (error) {
+        result.learning = { error: String(error?.message ?? error) };
+      }
+      return result;
+    }
     if (command === 'decisions') {
       return { decisions: store.decisions(), activitiesOk: store.getKv('activitiesOk'), lastSnapshot: store.getKv('lastSnapshot'), lifecycle: config.lifecycle };
     }

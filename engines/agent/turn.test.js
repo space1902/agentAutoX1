@@ -144,3 +144,27 @@ test('a missing Claude Code gives actionable guidance', async () => {
     t.done();
   }
 });
+
+test('with learning on, only certified lessons reach the prompt and the turn reports new candidates', async () => {
+  const t = setup('ok');
+  try {
+    const { makeHooks } = await import('./learning.js');
+    const store = openAgentStore(t.fx.dataDir);
+    const certified = store.insertLesson({ key: 'k1', text: 'Subir el presupuesto más de 20 % falló 3 de 4 veces.', evidence: { support: 4 } });
+    store.insertLesson({ key: 'k2', text: 'Candidata que no debe aparecer 9 de 9.', evidence: { support: 9 } });
+    store.updateLesson(certified, { status: 'certified', certifiedAt: 1 });
+    store.markShown([certified]);
+    const res = await runTurn({ dataDir: t.fx.dataDir, text: 'hola', emit: t.emit, claude, now: () => t.fx.now, store, hooks: makeHooks() });
+    const dump = JSON.parse(fs.readFileSync(t.dump, 'utf8'));
+    const appended = dump.argv[dump.argv.indexOf('--append-system-prompt') + 1];
+    assert.match(appended, /Subir el presupuesto más de 20 % falló 3 de 4 veces/);
+    assert.doesNotMatch(appended, /Candidata que no debe aparecer/);
+    assert.match(appended, /record_recommendation/);
+    assert.equal(t.events.find((e) => e.type === 'done').newCandidates, 1);
+    assert.ok(dump.argv.some((a) => a.includes('mcp__analista__record_recommendation')));
+    assert.equal(res.ok, true);
+    store.close();
+  } finally {
+    t.done();
+  }
+});
