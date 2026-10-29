@@ -129,6 +129,10 @@ The window is 14 days. Not linked = 0 and red. Otherwise the score is the sum of
 Light: green from 70, yellow from 40, red below. A logout (`logged_out_relink`) or `auth_failure` in the last 72 h forces red.
 These are community heuristics, not official WhatsApp numbers. Hover a badge in Números or on a profile card for the breakdown.
 
+### Phone of each linked session
+
+When a tester has no `phone` in `config.json`, the registry reads it from its session (`.baileys_auth/<id>/creds.json`, only the digits of `me.id`) and shows it as the effective phone. `config.json` is never written for this. If the configured phone and the session phone differ, the tester is flagged as a mismatch. Two or more testers (or a tester and the bot) with the same number are reported in `registry.duplicates` and shown with an amber warning in Calentador Bots and Números.
+
 ### Auto revisión de números en los pods (keep-alive)
 
 MultiWhatsApp header switch (Sí/No, OFF by default, saved in the app settings). When ON, a Rust scheduler records the last time

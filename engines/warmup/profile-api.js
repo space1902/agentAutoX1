@@ -13,6 +13,7 @@ import {
   SelectionError,
   addProfile,
   hasSavedSession,
+  readSessionPhone,
   loadProfiles,
   profileGroupName,
   removeProfile,
@@ -140,8 +141,7 @@ export function resolveSelections(config, profiles, selections) {
   return { ids, created, phones };
 }
 
-function decorateProfile(name, profile, config, pods, hasSession) {
-  const entries = new Map(testerIds(config.testers).map((id) => [id, testerEntry(config, id)]));
+function decorateProfile(name, profile, config, pods, hasSession, registry) {
   const podByKey = new Map(pods.filter((p) => phoneKey(p.phone)).map((p) => [phoneKey(p.phone), p.name]));
   return {
     name,
@@ -149,9 +149,18 @@ function decorateProfile(name, profile, config, pods, hasSession) {
     effectiveGroup: profileGroupName(profile, config) || null,
     createdAt: profile?.createdAt ?? null,
     testers: (profile?.testers ?? []).map((id) => {
-      const entry = entries.get(id);
-      const phone = typeof entry === 'object' && entry ? clean(entry.phone) || null : null;
-      return { id, phone, linked: hasSession(id), podName: phone ? (podByKey.get(phoneKey(phone)) ?? null) : null };
+      const info = registry.testers[id];
+      const phone = info?.phone ?? null;
+      return {
+        id,
+        phone,
+        phoneSource: info?.phoneSource ?? null,
+        sessionPhone: info?.sessionPhone ?? null,
+        mismatch: info?.mismatch ?? false,
+        duplicateOf: info?.duplicateOf ?? [],
+        linked: hasSession(id),
+        podName: phone ? (podByKey.get(phoneKey(phone)) ?? null) : null,
+      };
     }),
   };
 }
@@ -216,11 +225,12 @@ const COMMANDS = {
     const profiles = loadProfiles(profilesFile);
     const pods = payload.pods ?? [];
     const hasSession = (id) => hasSavedSession(authDir, id);
+    const registry = buildRegistry({ config, profiles, pods, hasSession, sessionPhoneOf: (id) => readSessionPhone(authDir, id) });
     return {
       defaultGroup: clean(config.groupName) || null,
       botNumber: clean(config.botNumber) || null,
-      profiles: Object.entries(profiles).map(([name, profile]) => decorateProfile(name, profile, config, pods, hasSession)),
-      registry: buildRegistry({ config, profiles, pods, hasSession }),
+      profiles: Object.entries(profiles).map(([name, profile]) => decorateProfile(name, profile, config, pods, hasSession, registry)),
+      registry,
     };
   },
 
@@ -232,6 +242,7 @@ const COMMANDS = {
       profiles: loadProfiles(profilesFile),
       pods: payload.pods ?? [],
       hasSession: (id) => hasSavedSession(authDir, id),
+      sessionPhoneOf: (id) => readSessionPhone(authDir, id),
     });
   },
 

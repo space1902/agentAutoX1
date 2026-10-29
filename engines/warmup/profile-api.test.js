@@ -50,7 +50,18 @@ test('list returns profiles with decorated testers and the registry', () => {
   assert.equal(out.defaultGroup, 'Calentamiento');
   const uno = out.profiles.find((p) => p.name === 'uno');
   assert.equal(uno.groupName, 'Grupo A');
-  assert.deepEqual(uno.testers, [{ id: 'tester2', phone: '573042370764', linked: true, podName: 'pod1' }]);
+  assert.deepEqual(uno.testers, [
+    {
+      id: 'tester2',
+      phone: '573042370764',
+      phoneSource: 'config',
+      sessionPhone: null,
+      mismatch: false,
+      duplicateOf: [],
+      linked: true,
+      podName: 'pod1',
+    },
+  ]);
   assert.equal(out.registry.rows.length, 3);
   assert.equal(out.botNumber, '573167585233');
   t.cleanup();
@@ -221,5 +232,38 @@ test('line-health works with no results folder at all', () => {
   const out = runCommand('line-health', {}, t.ctx);
   assert.equal(out.lines.tester2.stats.sent, 0);
   assert.equal(out.lines.tester2.stats.days, 0);
+  t.cleanup();
+});
+
+test('list shows the session phone, flags duplicates and mismatches, and never writes config.json', () => {
+  const t = setup({
+    config: {
+      groupName: 'G',
+      botNumber: '573167585233',
+      testers: ['tester1', 'tester2', { id: 'tester3', phone: '573001112233' }],
+    },
+    profiles: { uno: { testers: ['tester1', 'tester2', 'tester3'] } },
+  });
+  const linkAs = (id, meId) => {
+    fs.mkdirSync(path.join(t.dir, '.baileys_auth', id), { recursive: true });
+    fs.writeFileSync(path.join(t.dir, '.baileys_auth', id, 'creds.json'), JSON.stringify({ me: { id: meId }, noiseKey: 'secret' }));
+  };
+  linkAs('tester1', '573162135114:12@s.whatsapp.net');
+  linkAs('tester2', '573162135114:7@s.whatsapp.net');
+  linkAs('tester3', '573009998877:3@s.whatsapp.net');
+  const before = fs.readFileSync(path.join(t.dir, 'config.json'), 'utf8');
+
+  const out = runCommand('list', { pods }, t.ctx);
+  const [a, b, c] = out.profiles[0].testers;
+  assert.equal(a.phone, '573162135114');
+  assert.equal(a.phoneSource, 'session');
+  assert.deepEqual(a.duplicateOf, ['tester2']);
+  assert.deepEqual(b.duplicateOf, ['tester1']);
+  assert.equal(c.phone, '573001112233');
+  assert.equal(c.mismatch, true);
+  assert.equal(c.sessionPhone, '573009998877');
+  assert.equal(out.registry.duplicates.length, 1);
+  assert.equal(JSON.stringify(out).includes('secret'), false);
+  assert.equal(fs.readFileSync(path.join(t.dir, 'config.json'), 'utf8'), before);
   t.cleanup();
 });

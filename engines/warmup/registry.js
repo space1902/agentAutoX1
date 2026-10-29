@@ -19,11 +19,12 @@ const testerEntries = (config) =>
     .map((entry) => (typeof entry === 'string' ? { id: entry } : entry))
     .filter((entry) => entry && typeof entry.id === 'string' && entry.id.trim() !== '');
 
-export function buildRegistry({ config, profiles = {}, pods = [], hasSession = () => false }) {
+export function buildRegistry({ config, profiles = {}, pods = [], hasSession = () => false, sessionPhoneOf = () => null }) {
   const rows = new Map();
   const bots = new Set(botKeys(config));
   const podsWithoutPhone = [];
   const testersWithoutPhone = [];
+  const testers = {};
 
   // Profiles (and their groups) that use a tester.
   const usage = (id) => {
@@ -51,6 +52,8 @@ export function buildRegistry({ config, profiles = {}, pods = [], hasSession = (
         groups: [],
         source: 'externo',
         isBot: bots.has(key),
+        phoneSource: null,
+        duplicateOf: [],
       });
     }
     return rows.get(key);
@@ -70,19 +73,56 @@ export function buildRegistry({ config, profiles = {}, pods = [], hasSession = (
     }
   }
 
-  for (const tester of testerEntries(config)) {
-    if (!phoneKey(tester.phone)) {
-      testersWithoutPhone.push({ id: tester.id, linked: Boolean(hasSession(tester.id)), ...usage(tester.id) });
+  // Effective phone of a tester: the configured one, else the one of its linked session.
+  const infos = testerEntries(config).map((tester) => {
+    const configPhone = phoneKey(tester.phone) ? String(tester.phone) : null;
+    const sessionPhone = phoneKey(sessionPhoneOf(tester.id)) ? String(sessionPhoneOf(tester.id)) : null;
+    const phone = configPhone ?? sessionPhone;
+    return {
+      id: tester.id,
+      phone,
+      configPhone,
+      sessionPhone,
+      phoneSource: configPhone ? 'config' : sessionPhone ? 'session' : null,
+      linked: Boolean(hasSession(tester.id)),
+      mismatch: Boolean(configPhone && sessionPhone && phoneKey(configPhone) !== phoneKey(sessionPhone)),
+      duplicateOf: [],
+    };
+  });
+
+  // Anyone (testers and the bot) grouped by normalised number, to flag repeated lines.
+  const botPhone = botKeys(config)[0] ?? phoneKey(sessionPhoneOf('bot'));
+  const groups = new Map();
+  const addMember = (key, phone, member) => {
+    if (!key) return;
+    if (!groups.has(key)) groups.set(key, { key, phone, members: [] });
+    groups.get(key).members.push(member);
+  };
+  if (botPhone) addMember(botPhone, config?.botNumber ? String(config.botNumber) : `57${botPhone}`, 'bot');
+  for (const info of infos) addMember(phoneKey(info.phone), info.phone, info.id);
+  const duplicates = [...groups.values()].filter((g) => g.members.length > 1).sort((a, b) => a.key.localeCompare(b.key));
+  for (const group of duplicates) {
+    for (const info of infos) {
+      if (group.members.includes(info.id)) info.duplicateOf = group.members.filter((m) => m !== info.id);
+    }
+  }
+  for (const info of infos) testers[info.id] = info;
+
+  for (const info of infos) {
+    if (!info.phone) {
+      testersWithoutPhone.push({ id: info.id, linked: Boolean(hasSession(info.id)), ...usage(info.id) });
       continue;
     }
-    const row = ensure(tester.phone);
-    if (row.testerId) continue; // duplicated phone in config: the first tester wins
-    row.testerId = tester.id;
-    row.linked = Boolean(hasSession(tester.id));
+    const row = ensure(info.phone);
+    if (row.testerId) continue; // duplicated phone: the first tester wins the row; the rest show in duplicateOf
+    row.testerId = info.id;
+    row.linked = Boolean(hasSession(info.id));
+    row.phoneSource = info.phoneSource;
+    row.duplicateOf = info.duplicateOf;
     if (row.pod) row.source = 'pod';
-    Object.assign(row, usage(tester.id));
+    Object.assign(row, usage(info.id));
   }
 
   const sorted = [...rows.values()].sort((a, b) => a.key.localeCompare(b.key));
-  return { rows: sorted, podsWithoutPhone, testersWithoutPhone };
+  return { rows: sorted, podsWithoutPhone, testersWithoutPhone, testers, duplicates };
 }

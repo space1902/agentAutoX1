@@ -87,3 +87,73 @@ test('testers without a phone still report their session, profiles and groups', 
   });
   assert.deepEqual(out.testersWithoutPhone[0], { id: 'tester1', linked: true, profiles: ['tres'], groups: ['Calentamiento'] });
 });
+
+test('a tester without a configured phone takes the one from its linked session', () => {
+  const sessionPhones = { tester1: '573162135114' };
+  const { rows, testers, testersWithoutPhone } = buildRegistry({
+    config,
+    profiles,
+    pods,
+    hasSession: () => true,
+    sessionPhoneOf: (id) => sessionPhones[id] ?? null,
+  });
+  const row = rows.find((r) => r.key === '3162135114');
+  assert.equal(row.testerId, 'tester1');
+  assert.equal(row.phoneSource, 'session');
+  assert.deepEqual(testers.tester1, {
+    id: 'tester1',
+    phone: '573162135114',
+    configPhone: null,
+    sessionPhone: '573162135114',
+    phoneSource: 'session',
+    linked: true,
+    mismatch: false,
+    duplicateOf: [],
+  });
+  assert.equal(testersWithoutPhone.some((t) => t.id === 'tester1'), false);
+});
+
+test('config phone wins over the session phone and a difference is flagged as mismatch', () => {
+  const { testers } = buildRegistry({
+    config,
+    pods,
+    sessionPhoneOf: (id) => (id === 'tester3' ? '573009998877' : id === 'tester2' ? '573042370764' : null),
+  });
+  assert.equal(testers.tester3.phone, '573001112233');
+  assert.equal(testers.tester3.phoneSource, 'config');
+  assert.equal(testers.tester3.sessionPhone, '573009998877');
+  assert.equal(testers.tester3.mismatch, true);
+  assert.equal(testers.tester2.mismatch, false); // 10 vs 12 digits is the same line
+});
+
+test('testers sharing a number are reported as duplicates of each other', () => {
+  const sessionPhones = { tester1: '573162135114', tester2: '573162135114' };
+  const dupConfig = { ...config, testers: ['tester1', 'tester2', { id: 'tester3', phone: '3162135114' }] };
+  const { testers, duplicates, rows } = buildRegistry({
+    config: dupConfig,
+    sessionPhoneOf: (id) => sessionPhones[id] ?? null,
+  });
+  assert.deepEqual(testers.tester1.duplicateOf, ['tester2', 'tester3']);
+  assert.deepEqual(testers.tester2.duplicateOf, ['tester1', 'tester3']);
+  assert.deepEqual(duplicates, [{ key: '3162135114', phone: '573162135114', members: ['tester1', 'tester2', 'tester3'] }]);
+  assert.deepEqual(rows.find((r) => r.key === '3162135114').duplicateOf, ['tester2', 'tester3']);
+});
+
+test('a tester using the bot number is a duplicate of the bot', () => {
+  const botConfig = { botNumber: '573167585233', testers: [{ id: 'tester1', phone: '3167585233' }, 'tester2'] };
+  const { testers, duplicates } = buildRegistry({ config: botConfig, sessionPhoneOf: () => null });
+  assert.deepEqual(testers.tester1.duplicateOf, ['bot']);
+  assert.deepEqual(duplicates[0].members, ['bot', 'tester1']);
+  assert.deepEqual(testers.tester2.duplicateOf, []);
+});
+
+test('the bot session phone is used when the config has no bot number', () => {
+  const botConfig = { testers: [{ id: 'tester1', phone: '3167585233' }] };
+  const { testers } = buildRegistry({ config: botConfig, sessionPhoneOf: (id) => (id === 'bot' ? '573167585233' : null) });
+  assert.deepEqual(testers.tester1.duplicateOf, ['bot']);
+});
+
+test('distinct numbers produce no duplicates', () => {
+  const { duplicates } = buildRegistry({ config, pods, sessionPhoneOf: () => null });
+  assert.deepEqual(duplicates, []);
+});

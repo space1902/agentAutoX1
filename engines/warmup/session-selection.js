@@ -125,6 +125,18 @@ export function hasSavedSession(authRoot, id, readFile = fs.readFileSync) {
   }
 }
 
+// Phone of the linked account: the digits of `me.id` ("573162135114:12@s.whatsapp.net" -> "573162135114").
+// Only that field is read; nothing else from creds.json leaves this function. Null when unlinked or unreadable.
+export function readSessionPhone(authRoot, id, readFile = fs.readFileSync) {
+  try {
+    const creds = JSON.parse(readFile(path.join(authRoot, id, 'creds.json'), 'utf8'));
+    const match = /^(\d{7,15})(?::\d+)?@s\.whatsapp\.net$/.exec(String(creds?.me?.id ?? ''));
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 export function describeSelection(ids, hasCreds) {
   const { linked, pending } = splitByCreds(ids, hasCreds);
   const lines = [`Se usarán ${ids.length} número(s) de WhatsApp, en este orden: ${quoteList(ids)}.`];

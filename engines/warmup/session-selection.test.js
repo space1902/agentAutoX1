@@ -10,6 +10,7 @@ import {
   describeProfileList,
   describeSelection,
   hasSavedSession,
+  readSessionPhone,
   loadProfiles,
   parseCount,
   parsePerfilArgs,
@@ -242,4 +243,27 @@ test('describeProfileList shows the group of a profile when it has one', () => {
   const lines = describeProfileList(profiles, () => true);
   assert.ok(lines.some((line) => /Mi grupo/.test(line)));
   assert.equal(lines.filter((line) => /grupo/i.test(line)).length, 1);
+});
+
+test('readSessionPhone returns only the digits of me.id and never throws', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sessphone-'));
+  try {
+    const write = (id, body) => {
+      fs.mkdirSync(path.join(root, id), { recursive: true });
+      fs.writeFileSync(path.join(root, id, 'creds.json'), typeof body === 'string' ? body : JSON.stringify(body));
+    };
+    write('device', { me: { id: '573162135114:12@s.whatsapp.net' }, noiseKey: 'secret' });
+    write('plain', { me: { id: '573001112233@s.whatsapp.net' } });
+    write('lid', { me: { id: 'abc@lid' } });
+    write('empty', { me: {} });
+    write('broken', '{not json');
+    assert.equal(readSessionPhone(root, 'device'), '573162135114');
+    assert.equal(readSessionPhone(root, 'plain'), '573001112233');
+    assert.equal(readSessionPhone(root, 'lid'), null);
+    assert.equal(readSessionPhone(root, 'empty'), null);
+    assert.equal(readSessionPhone(root, 'broken'), null);
+    assert.equal(readSessionPhone(root, 'missing'), null);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
