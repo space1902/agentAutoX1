@@ -57,7 +57,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
   const [live, setLive] = useState<Live | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<AnalistaStatus | null>(null);
-  const [candidates, setCandidates] = useState(0);
+  const [candidateIds, setCandidateIds] = useState<number[]>([]);
   const bottom = useRef<HTMLDivElement>(null);
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeId;
@@ -72,7 +72,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
 
   const openSession = useCallback(async (id: string | null) => {
     setActiveId(id);
-    setCandidates(0);
+    setCandidateIds([]);
     if (!id) return setMessages([]);
     try {
       setMessages((await analista.messages(id)).messages);
@@ -110,7 +110,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
             setLive((l) => (l ? { ...l, steps: l.steps.map((s) => (s.id === ev.id ? { ...s, ok: ev.ok, summary: ev.summary } : s)) } : l));
             break;
           case "done":
-            setCandidates(ev.newCandidates ?? 0);
+            setCandidateIds(ev.candidateIds ?? []);
             setLive(null);
             setRunning(false);
             void openSession(ev.sessionId).then(() => void loadSessions());
@@ -148,7 +148,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
     if (!body || running) return;
     setError(null);
     setInput("");
-    setCandidates(0);
+    setCandidateIds([]);
     setMessages((m) => [...m, { id: -Date.now(), sessionId: activeRef.current ?? "", role: "user", text: body, ts: Date.now(), meta: {} }]);
     setRunning(true);
     setLive({ text: "", steps: [] });
@@ -238,7 +238,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
                   {m.meta.cancelled && <p className="an-warn">Respuesta cancelada.</p>}
                   <UsageFooter meta={m.meta} />
                   {learning && !m.meta.cancelled && (
-                    <MessageActions message={m} showCandidates={m.id === lastAssistant?.id ? candidates : 0} onChanged={onLearningChange} onRated={(rating) => setMessages((all) => all.map((x) => (x.id === m.id ? { ...x, meta: { ...x.meta, rating } } : x)))} />
+                    <MessageActions message={m} candidateIds={m.id === lastAssistant?.id ? candidateIds : []} onChanged={onLearningChange} onRated={(rating) => setMessages((all) => all.map((x) => (x.id === m.id ? { ...x, meta: { ...x.meta, rating } } : x)))} />
                   )}
                 </>
               )}

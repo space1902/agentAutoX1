@@ -17,7 +17,7 @@ use std::process::Stdio;
 /// Commands answered with one `{ ok, data }` line.
 const ONE_SHOT: &[&str] = &[
     "status", "sessions", "session-new", "session-rename", "session-delete", "messages", "settings-get", "settings-set", "queries",
-    "lessons", "lesson-set", "lesson-edit", "learning-get", "feedback", "recommendations", "eval-bank", "eval-runs", "eval-run-detail",
+    "lessons", "lesson-set", "lesson-edit", "learning-get", "learning-run", "feedback", "recommendations", "eval-bank", "eval-runs", "eval-run-detail",
 ];
 /// Commands that stream JSON events until they finish.
 const STREAMING: &[&str] = &["turn", "eval-run"];

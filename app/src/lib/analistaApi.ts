@@ -46,6 +46,8 @@ export interface MessageMeta {
   cancelled?: boolean;
   /** Learning: 1 = thumbs up, -1 = thumbs down / marked wrong. */
   rating?: 1 | -1;
+  /** Comment typed with "Esto está mal". */
+  comment?: string;
 }
 
 export interface AgentMessage {
@@ -82,9 +84,62 @@ export type TurnEvent =
   | { type: "step_done"; id: string; tool: string; ok: boolean; summary: string }
   | { type: "plan"; status: string | null; fiveHour: number | null; resetsAt: number | null }
   | { type: "result"; ok: boolean; text: string; durationMs: number; turns: number; usage: Usage }
-  | { type: "done"; sessionId: string; messageId: number; text: string; meta: MessageMeta; newCandidates?: number }
+  | { type: "done"; sessionId: string; messageId: number; text: string; meta: MessageMeta; newCandidates?: number; candidateIds?: number[] }
   | { type: "cancelled"; sessionId: string; messageId: number }
   | { type: "error"; sessionId: string | null; error: string };
+
+export type LessonStatus = "candidate" | "certified" | "rejected";
+
+export interface Lesson {
+  id: number;
+  key: string;
+  text: string;
+  scope: string;
+  kind: "rule" | "preference" | "agent";
+  source: "distiller" | "agent" | "user";
+  evidence: { support?: number; acierto?: number; fallo?: number; nota?: string };
+  status: LessonStatus;
+  weight: number;
+  created: number;
+  certifiedAt: number | null;
+}
+
+export interface LearningSummary {
+  lessons: Record<LessonStatus, number>;
+  outcomes: Record<"acierto" | "fallo" | "neutral" | "sin_datos", number>;
+  pending: number;
+  signals: { total: number; count: number; byKind: Record<string, { count: number; sum: number }> };
+}
+
+export interface RecMetrics {
+  from?: string;
+  to?: string;
+  days?: number;
+  gasto?: number;
+  ventas?: number;
+  valor?: number;
+  roas?: number;
+  costoVenta?: number | null;
+  gastoDia?: number;
+  ventasDia?: number;
+}
+
+export interface Recommendation {
+  id: number;
+  recDate: string;
+  sessionId: string | null;
+  entityType: "ct" | "ad" | "adset" | "campaign";
+  entityId: string;
+  entityLabel: string;
+  action: string;
+  params: { pct?: number };
+  rationale: string;
+  baseline: RecMetrics;
+  evalAfterDays: number;
+  status: "pending" | "evaluated" | "expired";
+  followed: "unknown" | "yes" | "no";
+  outcome: { evaluatedAt: number; after: RecMetrics; label: "acierto" | "fallo" | "neutral" | "sin_datos"; explanation: string } | null;
+}
 
 export interface ProcStatus {
   running: boolean;
@@ -102,6 +157,12 @@ export const analista = {
   renameSession: (sessionId: string, title: string) => call("session-rename", { sessionId, title }),
   deleteSession: (sessionId: string) => call("session-delete", { sessionId }),
   messages: (sessionId: string) => call<{ messages: AgentMessage[] }>("messages", { sessionId }),
+  lessons: (ids?: number[]) => call<{ summary: LearningSummary; lessons: Lesson[] }>("learning-get", ids ? { ids } : {}),
+  setLesson: (id: number, action: "certify" | "reject" | "revoke" | "restore") => call<{ lesson: Lesson }>("lesson-set", { id, action }),
+  editLesson: (id: number, text: string) => call<{ lesson: Lesson }>("lesson-edit", { id, text }),
+  feedback: (messageId: number, kind: "up" | "down" | "wrong", comment?: string) => call<{ rating: number }>("feedback", { messageId, kind, comment }),
+  recommendations: () => call<{ recommendations: Recommendation[] }>("recommendations"),
+  measureNow: () => call<{ evaluated: number; candidates: number }>("learning-run"),
   settings: () => call<{ settings: AnalistaSettings }>("settings-get"),
   saveSettings: (partial: Partial<AnalistaSettings>) => call<{ settings: AnalistaSettings }>("settings-set", partial),
   start: (command: "turn" | "eval-run", payload: Record<string, unknown>) => invoke<number>("analista_start", { command, payload }),
