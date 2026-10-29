@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { Banknote, Bell, Coins, MessageCircle, Percent, RefreshCw, Settings2, Target, TrendingUp, Wallet } from "lucide-react";
+import { Banknote, Bell, Coins, MessageCircle, Percent, RefreshCw, Target, TrendingUp, Wallet } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import AdsChart from "../components/ads/AdsChart";
 import AdsSettings from "../components/ads/AdsSettings";
@@ -40,7 +40,7 @@ const GROUPS: { id: Group; label: string }[] = [
   { id: "campaign", label: "Campaña" },
   { id: "ad", label: "Anuncio" },
 ];
-type Tab = "resumen" | "decisiones" | "alertas";
+type Tab = "resumen" | "decisiones" | "alertas" | "configuracion";
 
 /** Opening the section only syncs when the last sync is older than this. */
 const STALE_MS = 5 * 60_000;
@@ -64,7 +64,6 @@ export default function Anuncios() {
   const [tokenPresent, setTokenPresent] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [problems, setProblems] = useState<string[]>([]);
   const [now, setNow] = useState(Date.now());
   const [tab, setTab] = useState<Tab>("resumen");
@@ -143,7 +142,6 @@ export default function Anuncios() {
       setLoaded(true);
       const { range: r, rangeValid: ok } = latest.current;
       if (s?.tokenPresent && ok && (!s.lastSync.meta || Date.now() - s.lastSync.meta > STALE_MS)) void doSync(r.from, r.to);
-      else if (s && !s.tokenPresent) setShowSettings(true);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -210,11 +208,7 @@ export default function Anuncios() {
 
   return (
     <div className="page">
-      <Banner title="Anuncios" subtitle="Gasto de Meta contra pagos válidos de la hoja: ROAS, costo por venta y qué hacer con cada anuncio.">
-        <button className="btn secondary" onClick={() => setShowSettings((v) => !v)} aria-expanded={showSettings}>
-          <Settings2 size={16} aria-hidden /> Configuración
-        </button>
-      </Banner>
+      <Banner title="Anuncios" subtitle="Gasto de Meta contra pagos válidos de la hoja: ROAS, costo por venta y qué hacer con cada anuncio." />
 
       {banner && (
         <Notice kind="ok">
@@ -226,11 +220,29 @@ export default function Anuncios() {
       {problems.map((p) => (
         <Notice key={p}>{p}</Notice>
       ))}
-      {!tokenPresent && !showSettings && (
-        <Notice>Falta el token de Meta. Abre «Configuración» para importarlo desde meta-ads-monitor o pegarlo.</Notice>
+      {!tokenPresent && tab !== "configuracion" && (
+        <Notice>
+          Falta el token de Meta.{" "}
+          <button className="btn ghost sm" onClick={() => setTab("configuracion")}>Ir a Configuración</button>
+        </Notice>
       )}
 
-      {showSettings && config && (
+      <div className="ia-tabs ads-tabs" role="tablist" aria-label="Secciones de Anuncios">
+        <button role="tab" aria-selected={tab === "resumen"} className={`ia-tab ${tab === "resumen" ? "active" : ""}`} onClick={() => setTab("resumen")}>Resumen</button>
+        <button role="tab" aria-selected={tab === "decisiones"} className={`ia-tab ${tab === "decisiones" ? "active" : ""}`} onClick={() => setTab("decisiones")}>
+          Decisiones{pendingCount > 0 ? ` (${pendingCount})` : ""}
+        </button>
+        <button role="tab" aria-selected={tab === "alertas"} className={`ia-tab ${tab === "alertas" ? "active" : ""}`} onClick={() => setTab("alertas")}>Alertas</button>
+        <button role="tab" aria-selected={tab === "configuracion"} className={`ia-tab ${tab === "configuracion" ? "active" : ""}`} onClick={() => setTab("configuracion")}>Configuración</button>
+      </div>
+
+      {tab === "decisiones" && (
+        <DecisionsPanel decisions={decisionData?.decisions ?? []} activitiesOk={decisionData?.activitiesOk ?? null} lifecycle={decisionData?.lifecycle ?? null} busy={evaluating} onStatus={(id, s) => void changeStatus(id, s)} onEvaluate={() => void evaluateNow()} />
+      )}
+
+      {tab === "alertas" && <AlertsPanel />}
+
+      {tab === "configuracion" && config && (
         <Card>
           <div className="card-head">
             <h2 className="card-title">Configuración de Anuncios</h2>
@@ -246,20 +258,6 @@ export default function Anuncios() {
           />
         </Card>
       )}
-
-      <div className="ia-tabs ads-tabs" role="tablist" aria-label="Secciones de Anuncios">
-        <button role="tab" aria-selected={tab === "resumen"} className={`ia-tab ${tab === "resumen" ? "active" : ""}`} onClick={() => setTab("resumen")}>Resumen</button>
-        <button role="tab" aria-selected={tab === "decisiones"} className={`ia-tab ${tab === "decisiones" ? "active" : ""}`} onClick={() => setTab("decisiones")}>
-          Decisiones{pendingCount > 0 ? ` (${pendingCount})` : ""}
-        </button>
-        <button role="tab" aria-selected={tab === "alertas"} className={`ia-tab ${tab === "alertas" ? "active" : ""}`} onClick={() => setTab("alertas")}>Alertas</button>
-      </div>
-
-      {tab === "decisiones" && (
-        <DecisionsPanel decisions={decisionData?.decisions ?? []} activitiesOk={decisionData?.activitiesOk ?? null} lifecycle={decisionData?.lifecycle ?? null} busy={evaluating} onStatus={(id, s) => void changeStatus(id, s)} onEvaluate={() => void evaluateNow()} />
-      )}
-
-      {tab === "alertas" && <AlertsPanel />}
 
       {tab === "resumen" && (
       <>

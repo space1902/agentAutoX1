@@ -284,6 +284,35 @@ export default function AlertsPanel() {
         </div>
       </Card>
 
+      <div className="ia-two">
+        <Card>
+          <div className="card-head"><h2 className="card-title">Registro en vivo</h2></div>
+          <div className="alerts-log" role="log" aria-live="off">
+            {logs.length === 0 ? <span className="muted">Aquí aparecerá lo que haga el monitor.</span> : logs.map((l, i) => <div key={i}>{l}</div>)}
+            <div ref={logEnd} />
+          </div>
+        </Card>
+        <Card>
+          <div className="card-head"><h2 className="card-title">Alertas recientes</h2></div>
+          {recent.length === 0 ? (
+            <p className="muted">Todavía no hay alertas.</p>
+          ) : (
+            <ul className="alerts-list">
+              {recent.slice(0, 30).map((a) => (
+                <li key={a.id}>
+                  <div className="alerts-list-head">
+                    <Pill tone={a.severity >= 2 ? "red" : "amber"}>{a.type}</Pill>
+                    <span className="muted">{new Date(a.ts).toLocaleString("es-CO")}</span>
+                    {!a.sent && <span className="muted">· no enviada</span>}
+                  </div>
+                  <p>{a.text}</p>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+      </div>
+
       <Card>
         <div className="card-head">
           <h2 className="card-title">WhatsApp</h2>
@@ -329,35 +358,6 @@ export default function AlertsPanel() {
           </div>
         )}
       </Card>
-
-      <div className="ia-two">
-        <Card>
-          <div className="card-head"><h2 className="card-title">Registro en vivo</h2></div>
-          <div className="alerts-log" role="log" aria-live="off">
-            {logs.length === 0 ? <span className="muted">Aquí aparecerá lo que haga el monitor.</span> : logs.map((l, i) => <div key={i}>{l}</div>)}
-            <div ref={logEnd} />
-          </div>
-        </Card>
-        <Card>
-          <div className="card-head"><h2 className="card-title">Alertas recientes</h2></div>
-          {recent.length === 0 ? (
-            <p className="muted">Todavía no hay alertas.</p>
-          ) : (
-            <ul className="alerts-list">
-              {recent.slice(0, 30).map((a) => (
-                <li key={a.id}>
-                  <div className="alerts-list-head">
-                    <Pill tone={a.severity >= 2 ? "red" : "amber"}>{a.type}</Pill>
-                    <span className="muted">{new Date(a.ts).toLocaleString("es-CO")}</span>
-                    {!a.sent && <span className="muted">· no enviada</span>}
-                  </div>
-                  <p>{a.text}</p>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-      </div>
 
       <Card>
         <div className="card-head"><h2 className="card-title">Ajustes del monitor</h2></div>
