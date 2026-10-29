@@ -138,3 +138,30 @@ test('alerts commands: config round trip, wa status and an empty alert list', as
   assert.deepEqual(await runAdsCommand('wa-status', {}, c), { linked: false, phoneMasked: '' });
   assert.deepEqual(await runAdsCommand('alerts-recent', {}, c), { alerts: [], pausedUntil: null });
 });
+
+test('sync --auto, tracking, country filter and the manual country override work through the command layer', async () => {
+  const c = ctx();
+  const sync = await runAdsCommand('sync', { auto: true }, c);
+  assert.equal(sync.backfilled, true);
+  assert.ok(sync.history.days >= 1);
+  const status = await runAdsCommand('status', {}, c);
+  assert.equal(status.history.backfill.from, sync.history.from);
+
+  const tracking = await runAdsCommand('tracking', {}, c);
+  assert.equal(Array.isArray(tracking.items), true);
+
+  const report = await runAdsCommand('report', { from: '2026-10-28', to: '2026-10-29', group: 'ct', country: 'CO', split: 'true' }, c);
+  assert.equal(report.country, 'CO');
+  assert.ok(report.countries.length >= 1);
+  assert.ok(report.history.days >= 1);
+  await assert.rejects(runAdsCommand('report', { from: '2026-10-28', to: '2026-10-29', country: 'Mexico' }, c), /país/i);
+
+  const key = report.comprobantes[0]?.key;
+  if (key) {
+    const set = await runAdsCommand('comprobante-country', { key, code: 'MX' }, c);
+    assert.equal(set.country, 'MX');
+    const again = await runAdsCommand('report', { from: '2026-10-28', to: '2026-10-29', group: 'ct' }, c);
+    assert.equal(again.comprobantes.find((v) => v.key === key).countrySource, 'manual');
+  }
+  await assert.rejects(runAdsCommand('comprobante-country', { key: 'nope', code: 'MX' }, c), AdsError);
+});

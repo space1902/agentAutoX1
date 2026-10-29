@@ -9,14 +9,17 @@ import { AlertsConfigError, ALERTS_DEFAULTS, loadAlertsConfig, saveAlertsConfig 
 import { monitorDbPath, readWaStatus } from './monitor/runner.js';
 import { createStore as createMonitorStore } from './monitor/store.js';
 import { runTick } from './tick.js';
+import { computeChanges } from './budget.js';
+import { probeActivities } from './activities.js';
+import { buildTracking, raisesByAd } from './tracking.js';
 import { openStoreAt } from './store.js';
-import { DEFAULT_TIMEZONE, redact, runSync } from './sync.js';
-import { daysBetween, isIsoDate, localParts } from './time.js';
+import { DEFAULT_TIMEZONE, historyInfo, redact, runAutoSync, runSync } from './sync.js';
+import { addDays, daysBetween, isIsoDate, localParts } from './time.js';
 
 export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
 const GROUPS = ['ct', 'campaign', 'ad'];
-const COMMANDS = ['sync', 'report', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status'];
+const COMMANDS = ['sync', 'report', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'activities-probe'];
 const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
 export class AdsError extends Error {}
@@ -100,6 +103,9 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
 
   const store = openStoreAt(dataDir);
   try {
+    if (command === 'sync' && (args.auto === true || args.auto === 'true')) {
+      return await runAutoSync({ store, config, token, fetchImpl, now });
+    }
     if (command === 'sync') {
       checkRange(args);
       return await runSync({ store, config, token, from: args.from, to: args.to, fetchImpl, now });
@@ -116,14 +122,36 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       return { id, status: args.status };
     }
 
+    if (command === 'comprobante-country') {
+      if (!/^[0-9a-f]{20}$/.test(String(args.key ?? '')) || !/^([A-Z]{2})?$/.test(String(args.code === true ? '' : (args.code ?? '')))) {
+        throw new AdsError('El comprobante o el país no son válidos.');
+      }
+      store.setCountryOverride(args.key, args.code === true ? '' : (args.code ?? ''), now());
+      return { key: args.key, country: args.code === true ? '' : (args.code ?? '') };
+    }
+    if (command === 'activities-probe') {
+      if (!token) throw new AdsError('Falta el token de Meta.');
+      const since = args.since && isIsoDate(args.since) ? args.since : '2026-10-01';
+      try {
+        return await probeActivities({ api: new MetaApi({ token, version: config.graphVersion, fetchImpl, now }), config, since });
+      } catch (error) {
+        throw new AdsError(redact(friendlyMetaError(error), token));
+      }
+    }
+
     const timezone = accountTimezone(store);
     const today = localParts(now(), timezone).date;
+    const budgetChanges = () => computeChanges({ histories: store.budgetHistories(), events: store.budgetEvents() });
+    if (command === 'tracking') {
+      return buildTracking({ insights: store.insightsBetween(addDays(today, -60), today), ads: store.adsWithFirstSpend(), changes: budgetChanges(), config, today });
+    }
     if (command === 'status') {
       return {
         tokenPresent: Boolean(token),
         lastSync: store.getKv('lastSync') ?? { meta: null, sheet: null, metaError: null, sheetError: null },
         counts: store.counts(),
         account: store.getKv('account'),
+        history: historyInfo(store),
         today,
         dbPath: `${adsDir(dataDir)}/ads.db`,
       };
@@ -131,6 +159,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
 
     // report
     checkRange(args);
+    if (args.country && args.country !== true && !/^(all|-|[A-Z]{2})$/.test(args.country)) throw new AdsError('El país debe ser un código de 2 letras o «all».');
     const group = args.group ?? 'ct';
     if (!GROUPS.includes(group)) throw new AdsError('La agrupación debe ser ct, campaign o ad.');
     const report = buildReport({
@@ -143,11 +172,15 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       to: args.to,
       group,
       today,
+      country: args.country === true ? '' : (args.country ?? ''),
+      splitCountry: args.split === true || args.split === 'true',
+      raises: raisesByAd({ insights: store.insightsBetween(addDays(today, -60), today), changes: budgetChanges(), today }),
     });
     return {
       ...report,
       today,
       timezone,
+      history: historyInfo(store),
       lastSync: store.getKv('lastSync') ?? { meta: null, sheet: null, metaError: null, sheetError: null },
       settings: { campaignPrefix: config.campaignPrefix, flowPrefix: config.flowPrefix, validResult: config.validResult, autoRefreshMinutes: config.autoRefreshMinutes },
     };

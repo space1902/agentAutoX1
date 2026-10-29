@@ -82,7 +82,7 @@ const withMetrics = (t) => {
 const zero = () => ({ gasto: 0, mensajes: 0, valor: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
 
 export function buildReport({
-  insights, comprobantes, identities = {}, ads = {}, config, from, to, group = 'ct', today, country = '', splitCountry = false,
+  insights, comprobantes, identities = {}, ads = {}, config, from, to, group = 'ct', today, country = '', splitCountry = false, raises = {},
 }) {
   const prefix = config.campaignPrefix;
   const words = config.countryWords ?? DEFAULT_COUNTRY_TOKENS;
@@ -183,6 +183,8 @@ export function buildReport({
         ageDays: ages.length ? Math.max(...ages) : null,
         firstSpendDate: [...adIds].map((id) => ads[id]?.firstSpendDate).filter(Boolean).sort()[0] ?? null,
         effectiveStatus: single?.effectiveStatus ?? null,
+        // Latest recent budget raise among its ads (informational: day N since the raise).
+        raise: [...adIds].map((id) => raises[id]).filter(Boolean).sort((a, b) => (a.date < b.date ? 1 : -1))[0] ?? null,
         action: hasAction ? suggestAction(metrics, config.thresholds) : null,
       };
     })

@@ -19,7 +19,7 @@ const TOKEN_ENTRY: &str = "meta-token";
 /// Env var the engine reads the token from.
 pub const TOKEN_ENV: &str = "AGENTAUTO_META_TOKEN";
 
-const ALLOWED: &[&str] = &["sync", "report", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status"];
+const ALLOWED: &[&str] = &["sync", "report", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "activities-probe"];
 const DECISION_STATUSES: &[&str] = &["pending", "done", "ignored"];
 const GROUPS: &[&str] = &["ct", "campaign", "ad"];
 
@@ -55,6 +55,16 @@ pub struct AdsArgs<'a> {
     pub status: Option<&'a str>,
     /// `tick --force`: snapshot and sync even if nothing is due.
     pub force: bool,
+    /// `sync --auto`: incremental sync with the one-time history backfill (no dates needed).
+    pub auto: bool,
+    /// `report --country CO|all|-` and `--split` (separate CT rows by country).
+    pub country: Option<&'a str>,
+    pub split: bool,
+    /// `comprobante-country --key K --code MX` (an empty code removes the override).
+    pub key: Option<&'a str>,
+    pub code: Option<&'a str>,
+    /// `activities-probe --since D`.
+    pub since: Option<&'a str>,
 }
 
 /// Node arguments for one engine command. Everything is validated here so nothing odd reaches the shell-less spawn.
@@ -79,7 +89,35 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
         out.push("--group".to_string());
         out.push(g.to_string());
     }
-    if matches!(command, "sync" | "report") && (args.from.is_none() || args.to.is_none()) {
+    if let Some(c) = args.country {
+        if !(c == "all" || c == "-" || (c.len() == 2 && c.chars().all(|ch| ch.is_ascii_uppercase()))) {
+            return Err("El país debe ser un código de 2 letras o «all».".to_string());
+        }
+        out.extend(["--country".to_string(), c.to_string()]);
+    }
+    if args.split && command == "report" {
+        out.push("--split".to_string());
+    }
+    if command == "comprobante-country" {
+        let key = args.key.unwrap_or_default();
+        let code = args.code.unwrap_or_default();
+        if key.len() != 20 || !key.chars().all(|c| c.is_ascii_hexdigit()) || !(code.is_empty() || (code.len() == 2 && code.chars().all(|c| c.is_ascii_uppercase()))) {
+            return Err("El comprobante o el país no son válidos.".to_string());
+        }
+        out.extend(["--key".to_string(), key.to_string()]);
+        if !code.is_empty() {
+            out.extend(["--code".to_string(), code.to_string()]);
+        }
+    }
+    if let Some(since) = args.since {
+        if !valid_date(since) {
+            return Err("Las fechas deben tener el formato AAAA-MM-DD.".to_string());
+        }
+        out.extend(["--since".to_string(), since.to_string()]);
+    }
+    if args.auto && command == "sync" {
+        out.push("--auto".to_string());
+    } else if matches!(command, "sync" | "report") && (args.from.is_none() || args.to.is_none()) {
         return Err("Faltan las fechas del rango.".to_string());
     }
     if command == "decision-status" {
@@ -259,8 +297,23 @@ pub fn sync(settings: &Settings, from: &str, to: &str) -> Result<Value, String> 
     run_engine(settings, "sync", &AdsArgs { from: Some(from), to: Some(to), ..Default::default() }, None, token.as_deref())
 }
 
-pub fn report(settings: &Settings, from: &str, to: &str, group: &str) -> Result<Value, String> {
-    run_engine(settings, "report", &AdsArgs { from: Some(from), to: Some(to), group: Some(group), ..Default::default() }, None, None)
+/// Incremental sync; the very first run also backfills the whole history.
+pub fn sync_auto(settings: &Settings) -> Result<Value, String> {
+    let _guard = SyncGuard::acquire()?;
+    let token = stored_token()?;
+    run_engine(settings, "sync", &AdsArgs { auto: true, ..Default::default() }, None, token.as_deref())
+}
+
+pub fn report(settings: &Settings, from: &str, to: &str, group: &str, country: Option<&str>, split: bool) -> Result<Value, String> {
+    run_engine(settings, "report", &AdsArgs { from: Some(from), to: Some(to), group: Some(group), country, split, ..Default::default() }, None, None)
+}
+
+pub fn tracking(settings: &Settings) -> Result<Value, String> {
+    run_engine(settings, "tracking", &AdsArgs::default(), None, None)
+}
+
+pub fn comprobante_country(settings: &Settings, key: &str, code: &str) -> Result<Value, String> {
+    run_engine(settings, "comprobante-country", &AdsArgs { key: Some(key), code: Some(code), ..Default::default() }, None, None)
 }
 
 pub fn status(settings: &Settings) -> Result<Value, String> {
@@ -428,6 +481,20 @@ mod tests {
     }
 
     #[test]
+    fn builds_auto_sync_country_and_override_arguments() {
+        assert_eq!(&build_args("sync", &AdsArgs { auto: true, ..Default::default() }).unwrap()[2..], ["sync", "--auto"]);
+        let report = build_args("report", &AdsArgs { from: Some("2026-10-01"), to: Some("2026-10-29"), group: Some("ct"), country: Some("MX"), split: true, ..Default::default() }).unwrap();
+        assert_eq!(&report[2..], ["report", "--from", "2026-10-01", "--to", "2026-10-29", "--group", "ct", "--country", "MX", "--split"]);
+        assert!(build_args("report", &AdsArgs { from: Some("2026-10-01"), to: Some("2026-10-29"), country: Some("Mexico"), ..Default::default() }).is_err());
+        let key = "0123456789abcdef0123";
+        assert_eq!(&build_args("comprobante-country", &AdsArgs { key: Some(key), code: Some("MX"), ..Default::default() }).unwrap()[2..], ["comprobante-country", "--key", key, "--code", "MX"]);
+        assert_eq!(&build_args("comprobante-country", &AdsArgs { key: Some(key), code: Some(""), ..Default::default() }).unwrap()[2..], ["comprobante-country", "--key", key]);
+        assert!(build_args("comprobante-country", &AdsArgs { key: Some("../x"), code: Some("MX"), ..Default::default() }).is_err());
+        assert!(build_args("comprobante-country", &AdsArgs { key: Some(key), code: Some("mx; calc"), ..Default::default() }).is_err());
+        assert!(build_args("activities-probe", &AdsArgs { since: Some("ayer"), ..Default::default() }).is_err());
+    }
+
+    #[test]
     fn toast_text_comes_from_the_engine_message() {
         let d = json!({"message": {"title": "Prueba: CT 01 · día 4", "body": "Escalar. ROAS 3,4"}});
         assert_eq!(toast_text(&d), Some(("Prueba: CT 01 · día 4".to_string(), "Escalar. ROAS 3,4".to_string())));
@@ -537,7 +604,7 @@ mod tests {
         let saved = config_set(&settings, &json!({"flowPrefix": "Barf"})).unwrap();
         assert_eq!(saved["config"]["flowPrefix"], "Barf");
         assert!(config_set(&settings, &json!({"token": "x"})).is_err());
-        let report = report(&settings, "2026-10-01", "2026-10-02", "ct").unwrap();
+        let report = report(&settings, "2026-10-01", "2026-10-02", "ct", None, false).unwrap();
         assert_eq!(report["kpis"]["gasto"], 0);
         assert_eq!(report["daily"].as_array().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);

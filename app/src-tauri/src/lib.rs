@@ -439,9 +439,29 @@ async fn ads_sync(state: State<'_, AppState>, from: String, to: String) -> Resul
 }
 
 #[tauri::command]
-async fn ads_report(state: State<'_, AppState>, from: String, to: String, group: String) -> Result<Value, String> {
+async fn ads_report(state: State<'_, AppState>, from: String, to: String, group: String, country: Option<String>, split: Option<bool>) -> Result<Value, String> {
     let settings = state.current();
-    blocking(move || ads::report(&settings, &from, &to, &group)).await
+    blocking(move || ads::report(&settings, &from, &to, &group, country.as_deref(), split.unwrap_or(false))).await
+}
+
+/// Incremental sync (last days + today); the first run backfills the whole history.
+#[tauri::command]
+async fn ads_sync_auto(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::sync_auto(&settings)).await
+}
+
+#[tauri::command]
+async fn ads_tracking(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::tracking(&settings)).await
+}
+
+/// Manual country of one payment (an empty code removes it).
+#[tauri::command]
+async fn ads_comprobante_country(state: State<'_, AppState>, key: String, code: String) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::comprobante_country(&settings, &key, &code)).await
 }
 
 #[tauri::command]
@@ -750,6 +770,9 @@ pub fn run() {
             ollama_launch,
             ads_sync,
             ads_report,
+            ads_sync_auto,
+            ads_tracking,
+            ads_comprobante_country,
             ads_status,
             ads_config_get,
             ads_config_set,
