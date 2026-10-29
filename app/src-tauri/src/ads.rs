@@ -19,7 +19,7 @@ const TOKEN_ENTRY: &str = "meta-token";
 /// Env var the engine reads the token from.
 pub const TOKEN_ENV: &str = "AGENTAUTO_META_TOKEN";
 
-const ALLOWED: &[&str] = &["sync", "report", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status"];
+const ALLOWED: &[&str] = &["sync", "report", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status"];
 const DECISION_STATUSES: &[&str] = &["pending", "done", "ignored"];
 const GROUPS: &[&str] = &["ct", "campaign", "ad"];
 
@@ -249,7 +249,7 @@ fn run_engine(settings: &Settings, command: &str, args: &AdsArgs, payload: Optio
     parse_output(&stdout)
 }
 
-fn stored_token() -> Result<Option<String>, String> {
+pub fn stored_token() -> Result<Option<String>, String> {
     get_token_in(KEY_SERVICE)
 }
 
@@ -350,6 +350,22 @@ pub fn spawn_scheduler(app: AppHandle, settings: Arc<Mutex<Settings>>, stop: Arc
     });
 }
 
+pub fn alerts_config_get(settings: &Settings) -> Result<Value, String> {
+    run_engine(settings, "alerts-config-get", &AdsArgs::default(), None, None)
+}
+
+pub fn alerts_config_set(settings: &Settings, partial: &Value) -> Result<Value, String> {
+    run_engine(settings, "alerts-config-set", &AdsArgs { stdin: true, ..Default::default() }, Some(partial), None)
+}
+
+pub fn alerts_recent(settings: &Settings) -> Result<Value, String> {
+    run_engine(settings, "alerts-recent", &AdsArgs::default(), None, None)
+}
+
+pub fn wa_status(settings: &Settings) -> Result<Value, String> {
+    run_engine(settings, "wa-status", &AdsArgs::default(), None, None)
+}
+
 pub fn test_token(settings: &Settings) -> Result<Value, String> {
     let token = stored_token()?.ok_or("Falta el token de Meta. Impórtalo o pégalo en la configuración de Anuncios.")?;
     run_engine(settings, "test-token", &AdsArgs::default(), None, Some(&token))
@@ -401,6 +417,14 @@ mod tests {
         assert!(build_args("decision-status", &AdsArgs { id: Some(7), status: Some("x; calc"), ..Default::default() }).is_err());
         assert!(build_args("decision-status", &AdsArgs { id: Some(0), status: Some("done"), ..Default::default() }).is_err());
         assert!(build_args("decision-status", &AdsArgs::default()).is_err());
+    }
+
+    #[test]
+    fn alerts_commands_are_allowed_and_take_no_extra_arguments() {
+        for c in ["alerts-config-get", "alerts-recent", "wa-status"] {
+            assert_eq!(&build_args(c, &AdsArgs::default()).unwrap()[2..], [c]);
+        }
+        assert_eq!(build_args("alerts-config-set", &AdsArgs { stdin: true, ..Default::default() }).unwrap().last().unwrap(), "--stdin");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 mod ads;
+mod alerts;
 mod ai;
 mod data;
 mod embed;
@@ -35,6 +36,7 @@ struct AppState {
     keep_stop: Arc<AtomicBool>,
     last_on_file: PathBuf,
     embedder: Mutex<Option<Arc<embed::Embedder<embed::win::RealWin>>>>,
+    alerts: alerts::Alerts,
 }
 
 /// Profile the app is running right now (the engine refuses to edit it).
@@ -481,6 +483,104 @@ async fn ads_tick_now(app: AppHandle, state: State<'_, AppState>) -> Result<Valu
     Ok(result)
 }
 
+// ---- Alertas panel
+
+#[tauri::command]
+async fn ads_alerts_config_get(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::alerts_config_get(&settings)).await
+}
+
+#[tauri::command]
+async fn ads_alerts_config_set(state: State<'_, AppState>, config: Value) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::alerts_config_set(&settings, &config)).await
+}
+
+#[tauri::command]
+async fn ads_alerts_recent(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::alerts_recent(&settings)).await
+}
+
+#[tauri::command]
+async fn ads_wa_status(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::wa_status(&settings)).await
+}
+
+fn event_emitter(app: &AppHandle) -> alerts::Emit {
+    let app = app.clone();
+    Arc::new(move |name: &str, payload: Value| {
+        let _ = app.emit(name, payload);
+    })
+}
+
+/// Minutes since the standalone monitor last wrote its log, when that looks like "still running".
+#[tauri::command]
+fn ads_monitor_conflict(state: State<'_, AppState>) -> Option<u64> {
+    alerts::conflict_minutes(&state.root)
+}
+
+#[tauri::command]
+fn ads_monitor_status(state: State<'_, AppState>) -> alerts::ProcStatus {
+    state.alerts.monitor.status()
+}
+
+#[tauri::command]
+async fn ads_monitor_start(app: AppHandle, state: State<'_, AppState>, confirm_conflict: bool) -> Result<alerts::ProcStatus, String> {
+    let settings = state.current();
+    let root = state.root.clone();
+    let alerts = state.alerts.clone();
+    let emit = event_emitter(&app);
+    blocking(move || {
+        let token = ads::stored_token()?;
+        alerts.start_monitor(&settings, &root, token, confirm_conflict, emit)?;
+        Ok(alerts.monitor.status())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn ads_monitor_stop(state: State<'_, AppState>) -> Result<(), String> {
+    let proc = state.alerts.monitor.clone();
+    blocking(move || proc.stop()).await
+}
+
+#[tauri::command]
+fn ads_link_status(state: State<'_, AppState>) -> alerts::ProcStatus {
+    state.alerts.link.status()
+}
+
+#[tauri::command]
+async fn ads_wa_link_start(app: AppHandle, state: State<'_, AppState>, phone: String) -> Result<(), String> {
+    let settings = state.current();
+    let alerts = state.alerts.clone();
+    let emit = event_emitter(&app);
+    blocking(move || alerts.start_link(&settings, &phone, emit).map(|_| ())).await
+}
+
+#[tauri::command]
+async fn ads_wa_link_cancel(state: State<'_, AppState>) -> Result<(), String> {
+    let proc = state.alerts.link.clone();
+    blocking(move || proc.stop()).await
+}
+
+/// Copies the standalone monitor's WhatsApp session into the app data dir (the original stays untouched).
+#[tauri::command]
+async fn ads_wa_import_session(state: State<'_, AppState>, overwrite: bool) -> Result<usize, String> {
+    let settings = state.current();
+    let root = state.root.clone();
+    let alerts = state.alerts.clone();
+    blocking(move || {
+        if alerts.monitor.is_running() || alerts.link.is_running() {
+            return Err("Detén el monitor y la vinculación antes de importar la sesión.".to_string());
+        }
+        alerts::import_session(&root, &alerts::session_dir(&settings), overwrite)
+    })
+    .await
+}
+
 /// Only whether a token exists; the value never reaches the UI.
 #[tauri::command]
 async fn ads_token_status() -> Result<bool, String> {
@@ -568,6 +668,7 @@ pub fn run() {
                 keep_stop,
                 last_on_file,
                 embedder: Mutex::new(None),
+                alerts: alerts::Alerts::default(),
             });
             Ok(())
         })
@@ -589,6 +690,12 @@ pub fn run() {
                     embedder.detach_all();
                 }
                 state.keep_stop.store(true, Ordering::SeqCst);
+                // The alerts monitor and the WhatsApp linking close their session cleanly (their own pid only).
+                for proc in [&state.alerts.monitor, &state.alerts.link] {
+                    if proc.is_running() {
+                        let _ = proc.stop();
+                    }
+                }
                 for _ in 0..90 {
                     if state.keepalive.status().phase == keepalive::Phase::Idle {
                         break;
@@ -647,6 +754,18 @@ pub fn run() {
             ads_config_get,
             ads_config_set,
             ads_decisions,
+            ads_alerts_config_get,
+            ads_alerts_config_set,
+            ads_alerts_recent,
+            ads_wa_status,
+            ads_monitor_conflict,
+            ads_monitor_status,
+            ads_monitor_start,
+            ads_monitor_stop,
+            ads_link_status,
+            ads_wa_link_start,
+            ads_wa_link_cancel,
+            ads_wa_import_session,
             ads_decision_status,
             ads_tick_now,
             ads_token_status,

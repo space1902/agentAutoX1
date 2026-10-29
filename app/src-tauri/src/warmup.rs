@@ -208,7 +208,7 @@ impl Runner {
 }
 
 /// `taskkill /PID <pid> /T [/F]`: terminates the process and its children.
-fn taskkill(pid: u32, force: bool) -> bool {
+pub(crate) fn taskkill(pid: u32, force: bool) -> bool {
     let mut cmd = hidden_command("taskkill");
     cmd.args(["/PID", &pid.to_string(), "/T"]);
     if force {
