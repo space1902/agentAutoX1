@@ -1,0 +1,13 @@
+{
+  "name": "agentautox1-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Analista: Claude Code (headless) + read-only MCP tools over the ads database, with outcome-based learning.",
+  "type": "module",
+  "scripts": {
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
