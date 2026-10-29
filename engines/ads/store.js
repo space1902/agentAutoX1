@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 import { adsDir } from './config.js';
+import { installViews, refreshAdCt, syncCountryRates } from './views.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -105,12 +106,18 @@ function migrate(db) {
   return rebuilt;
 }
 
-export function createStore(file = ':memory:') {
-  const db = new DatabaseSync(file);
-  if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
-  db.exec(SCHEMA);
-  const insightsRebuilt = migrate(db);
-  if (!db.prepare('PRAGMA table_info(ads)').all().some((c) => c.name === 'first_spend_date')) db.exec('ALTER TABLE ads ADD COLUMN first_spend_date TEXT');
+// `readOnly`: opens an existing database for reading only (no schema, migration or view work). Used by the Analista.
+export function createStore(file = ':memory:', { readOnly = false } = {}) {
+  const db = new DatabaseSync(file, readOnly ? { readOnly: true } : {});
+  let insightsRebuilt = false;
+  if (!readOnly) {
+    if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
+    db.exec(SCHEMA);
+    insightsRebuilt = migrate(db);
+    if (!db.prepare('PRAGMA table_info(ads)').all().some((c) => c.name === 'first_spend_date')) db.exec('ALTER TABLE ads ADD COLUMN first_spend_date TEXT');
+    // Analysis views for the Analista (helper tables + views); rebuilt only when their version changes.
+    if (installViews(db) || db.prepare('SELECT COUNT(*) n FROM ad_ct').get().n === 0) refreshAdCt(db);
+  }
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => {
     db.exec('BEGIN');
@@ -124,6 +131,7 @@ export function createStore(file = ':memory:') {
   };
 
   return {
+    db, // raw handle: tests and the read-only analysis tools
     close: () => db.close(),
 
     getKv(key) {
@@ -148,7 +156,9 @@ export function createStore(file = ':memory:') {
         for (const g of groups) remove.run(...g.split('|'));
         for (const r of rows) insert.run(r.date, r.adId, r.adName, r.campaignId, r.campaignName, r.adsetId, r.adsetName, r.gasto, r.impressions, r.clicks, r.mensajes, now, r.country ?? '');
       });
+      refreshAdCt(db);
     },
+    setCountryRates: (countries) => syncCountryRates(db, countries),
     insightsBetween: (from, to) =>
       q('SELECT * FROM insights WHERE date >= ? AND date <= ? ORDER BY date, ad_id, country').all(from, to).map((r) => ({
         date: r.date, adId: r.ad_id, adName: r.ad_name, campaignId: r.campaign_id, campaignName: r.campaign_name,
@@ -325,4 +335,9 @@ export function createStore(file = ':memory:') {
 export function openStoreAt(dataDir) {
   fs.mkdirSync(adsDir(dataDir), { recursive: true });
   return createStore(path.join(adsDir(dataDir), 'ads.db'));
+}
+
+// Read-only handle on an existing ads.db (the Analista never writes to it).
+export function openStoreReadOnly(dataDir) {
+  return createStore(path.join(adsDir(dataDir), 'ads.db'), { readOnly: true });
 }
