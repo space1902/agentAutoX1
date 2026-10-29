@@ -1,42 +1,22 @@
 //! Embedded BlueStacks view (experimental, behind the `embedView` setting).
 //!
-//! A pod's BlueStacks window (HD-Player, title `wa-<pod>`) is re-parented into the app window as a child, stripped of
-//! its caption and borders, moved to the rectangle of the placeholder the UI measured, and hidden/shown when tabs
-//! switch. Everything is restored (top-level, original style and position) when the tab is closed or the app exits,
-//! so BlueStacks never dies with the app window.
+//! A pod's BlueStacks window (HD-Player, title `wa-<pod>`) is shown "inside" the app without ever being re-parented:
+//! it stays a normal top-level window (same style, same activation and input behaviour as when it is opened on its
+//! own) but it is OWNED by the app window, so it always floats above it, minimises with it and has no taskbar button,
+//! and it is moved to the screen rectangle of the placeholder the UI measured. Re-parenting it as a WS_CHILD of the
+//! webview window was tried first: the toolbar worked but taps on the Android screen never arrived, because the
+//! BlueStacks render/input window assumes its root is its own top-level window.
 //!
-//! The rules (styles, scaling, window choice, bookkeeping) are pure and tested here against a fake `WinApi`;
+//! The window keeps the aspect ratio it had before it was embedded (a portrait phone), fitted and centred inside the
+//! placeholder, so it is tall and narrow instead of stretched to the full width.
+//! Everything is restored (no owner, original position and size) when the tab is closed or the app exits.
+//!
+//! The rules (aspect fitting, window choice, bookkeeping) are pure and tested here against a fake `WinApi`;
 //! `RealWin` is the user32 implementation and is exercised with dummy windows (never with a real pod in the tests).
 
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-
-pub const WS_POPUP: u32 = 0x8000_0000;
-pub const WS_CHILD: u32 = 0x4000_0000;
-pub const WS_VISIBLE: u32 = 0x1000_0000;
-pub const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
-pub const WS_CLIPCHILDREN: u32 = 0x0200_0000;
-pub const WS_CAPTION: u32 = 0x00C0_0000; // WS_BORDER | WS_DLGFRAME
-pub const WS_SYSMENU: u32 = 0x0008_0000;
-pub const WS_THICKFRAME: u32 = 0x0004_0000;
-pub const WS_MINIMIZEBOX: u32 = 0x0002_0000;
-pub const WS_MAXIMIZEBOX: u32 = 0x0001_0000;
-pub const WS_EX_DLGMODALFRAME: u32 = 0x0000_0001;
-pub const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
-pub const WS_EX_WINDOWEDGE: u32 = 0x0000_0100;
-pub const WS_EX_CLIENTEDGE: u32 = 0x0000_0200;
-pub const WS_EX_APPWINDOW: u32 = 0x0004_0000;
-
-/// Style of the window once embedded: a plain child, no caption, borders, resize frame or system buttons.
-pub fn embedded_style(style: u32) -> u32 {
-    let stripped = style & !(WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
-    stripped | WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN
-}
-
-pub fn embedded_ex_style(ex_style: u32) -> u32 {
-    ex_style & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW)
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Rect {
@@ -51,6 +31,47 @@ pub fn scale_rect(x: f64, y: f64, width: f64, height: f64, dpr: f64) -> Rect {
     let dpr = if dpr.is_finite() && dpr > 0.0 { dpr } else { 1.0 };
     let px = |v: f64| if v.is_finite() { (v * dpr).round() as i32 } else { 0 };
     Rect { x: px(x).max(0), y: px(y).max(0), w: px(width).max(1), h: px(height).max(1) }
+}
+
+/// Width / height of a typical BlueStacks portrait window (528x912 outer), used when the real one cannot be measured.
+pub const DEFAULT_ASPECT: f64 = 0.58;
+/// Where a window with an unusable remembered position (minimised, off screen) is put back.
+pub const FALLBACK_NATIVE: Rect = Rect { x: 100, y: 100, w: 528, h: 912 };
+
+fn rect_is_usable(rect: Rect) -> bool {
+    rect.w >= 200 && rect.h >= 200 && rect.x > -10_000 && rect.y > -10_000 && rect.x < 30_000 && rect.y < 30_000
+}
+
+/// Aspect ratio (width / height) of the native window's OUTER rectangle, title bar and side toolbar included. A
+/// minimised, off-screen or absurdly shaped window cannot be trusted: the portrait default is used instead.
+pub fn native_aspect(rect: Rect) -> f64 {
+    if !rect_is_usable(rect) {
+        return DEFAULT_ASPECT;
+    }
+    let ratio = f64::from(rect.w) / f64::from(rect.h);
+    if (0.25..=4.0).contains(&ratio) { ratio } else { DEFAULT_ASPECT }
+}
+
+/// The rectangle to remember (and restore) for a window: itself when usable, otherwise a sane place on screen.
+pub fn restorable_rect(rect: Rect) -> Rect {
+    if rect_is_usable(rect) { rect } else { FALLBACK_NATIVE }
+}
+
+/// Largest rectangle with the given aspect (width / height) that fits inside `container`, centred in it.
+pub fn fit_aspect(container: Rect, aspect: f64) -> Rect {
+    let aspect = if aspect.is_finite() && aspect > 0.0 { aspect } else { DEFAULT_ASPECT };
+    let (cw, ch) = (container.w.max(1), container.h.max(1));
+    let (w, h) = if f64::from(cw) / f64::from(ch) > aspect {
+        (((f64::from(ch) * aspect).round() as i32).clamp(1, cw), ch) // limited by the height
+    } else {
+        (cw, ((f64::from(cw) / aspect).round() as i32).clamp(1, ch)) // limited by the width
+    };
+    Rect { x: container.x + (cw - w) / 2, y: container.y + (ch - h) / 2, w, h }
+}
+
+/// A rectangle in client coordinates -> screen coordinates, given where the client area starts on screen.
+pub fn to_screen(origin: (i32, i32), rect: Rect) -> Rect {
+    Rect { x: origin.0 + rect.x, y: origin.1 + rect.y, w: rect.w, h: rect.h }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -75,11 +96,9 @@ pub fn pod_window_title(pod_name: &str) -> String {
     format!("wa-{pod_name}")
 }
 
-/// What a window looked like before we embedded it.
+/// What a window looked like before we embedded it: its outer rectangle on screen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Original {
-    pub style: u32,
-    pub ex_style: u32,
     pub rect: Rect,
 }
 
@@ -87,11 +106,14 @@ pub trait WinApi {
     fn find_window(&self, title: &str) -> Option<isize>;
     fn is_window(&self, hwnd: isize) -> bool;
     fn snapshot(&self, hwnd: isize) -> Result<Original, String>;
-    /// Restyle as a child, re-parent under `parent`, place at `rect` and show it.
-    fn embed(&self, hwnd: isize, parent: isize, style: u32, ex_style: u32, rect: Rect) -> Result<(), String>;
+    /// Screen position of the top-left corner of `hwnd`'s client area.
+    fn client_origin(&self, hwnd: isize) -> (i32, i32);
+    /// Make `hwnd` owned by `owner`, put it at the SCREEN rectangle `rect`, above the owner, and show it.
+    fn embed(&self, hwnd: isize, owner: isize, rect: Rect) -> Result<(), String>;
+    /// Move/resize to the SCREEN rectangle `rect` without touching the z-order.
     fn place(&self, hwnd: isize, rect: Rect) -> Result<(), String>;
     fn set_visible(&self, hwnd: isize, visible: bool);
-    /// Back to a top-level window with its original style and position.
+    /// Back to an ownerless window at its original position and size.
     fn restore(&self, hwnd: isize, original: &Original) -> Result<(), String>;
     fn focus(&self, hwnd: isize);
 }
@@ -99,6 +121,10 @@ pub trait WinApi {
 struct Attached {
     hwnd: isize,
     original: Original,
+    /// Aspect ratio of the native window, kept for every later placement.
+    aspect: f64,
+    /// Last box the UI measured, in client coordinates of the app window (physical pixels).
+    container: Rect,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -124,13 +150,19 @@ impl<A: WinApi> Embedder<A> {
         EmbedState { attached: self.attached.lock().unwrap().keys().cloned().collect(), active: self.active.lock().unwrap().clone() }
     }
 
-    /// Embeds the pod's window at `rect` (or just moves it when it is already embedded). The first call remembers the
-    /// original look so `detach` can give it back.
-    pub fn attach(&self, pod: &str, rect: Rect) -> Result<(), String> {
+    /// Where the window goes on screen: the native aspect fitted and centred in the measured box.
+    fn screen_rect(&self, entry: &Attached) -> Rect {
+        to_screen(self.api.client_origin(self.parent), fit_aspect(entry.container, entry.aspect))
+    }
+
+    /// Embeds the pod's window inside `container` (client coordinates, physical pixels), or just re-places it when it
+    /// is already embedded. The first call remembers the original look so `detach` can give it back.
+    pub fn attach(&self, pod: &str, container: Rect) -> Result<(), String> {
         let mut attached = self.attached.lock().unwrap();
-        if let Some(existing) = attached.get(pod) {
+        if let Some(existing) = attached.get_mut(pod) {
             if self.api.is_window(existing.hwnd) {
-                return self.api.place(existing.hwnd, rect);
+                existing.container = container;
+                return self.api.place(existing.hwnd, self.screen_rect(existing));
             }
             attached.remove(pod); // the window was closed: embed the new one
         }
@@ -138,28 +170,49 @@ impl<A: WinApi> Embedder<A> {
             .api
             .find_window(&pod_window_title(pod))
             .ok_or_else(|| format!("No encuentro la ventana de BlueStacks del pod «{pod}». ¿Está encendido?"))?;
-        let original = self.api.snapshot(hwnd)?;
-        self.api.embed(hwnd, self.parent, embedded_style(original.style), embedded_ex_style(original.ex_style), rect)?;
-        attached.insert(pod.to_string(), Attached { hwnd, original });
+        let measured = self.api.snapshot(hwnd)?;
+        let entry = Attached {
+            hwnd,
+            aspect: native_aspect(measured.rect),
+            original: Original { rect: restorable_rect(measured.rect) },
+            container,
+        };
+        self.api.embed(hwnd, self.parent, self.screen_rect(&entry))?;
+        attached.insert(pod.to_string(), entry);
         Ok(())
     }
 
-    pub fn resize(&self, pod: &str, rect: Rect) -> Result<(), String> {
+    pub fn resize(&self, pod: &str, container: Rect) -> Result<(), String> {
+        let mut attached = self.attached.lock().unwrap();
+        let entry = attached.get_mut(pod).ok_or_else(|| format!("El pod «{pod}» no está en la vista embebida."))?;
+        entry.container = container;
+        self.api.place(entry.hwnd, self.screen_rect(entry))
+    }
+
+    /// The app window moved: an owned window does not travel with its owner, so the visible pod is placed again.
+    pub fn follow(&self) {
         let attached = self.attached.lock().unwrap();
-        let entry = attached.get(pod).ok_or_else(|| format!("El pod «{pod}» no está en la vista embebida."))?;
-        self.api.place(entry.hwnd, rect)
+        let active = self.active.lock().unwrap();
+        if let Some(entry) = active.as_deref().and_then(|name| attached.get(name)) {
+            let _ = self.api.place(entry.hwnd, self.screen_rect(entry));
+        }
     }
 
     /// Shows `pod` (if any) and hides every other embedded window. `None` hides them all.
     pub fn activate(&self, pod: Option<&str>) {
         let attached = self.attached.lock().unwrap();
         for (name, entry) in attached.iter() {
-            self.api.set_visible(entry.hwnd, pod == Some(name.as_str()));
+            let shown = pod == Some(name.as_str());
+            self.api.set_visible(entry.hwnd, shown);
+            if shown {
+                // Showing a Qt window lets it re-apply its own geometry: put it back where the UI wants it.
+                let _ = self.api.place(entry.hwnd, self.screen_rect(entry));
+            }
         }
         *self.active.lock().unwrap() = pod.filter(|p| attached.contains_key(*p)).map(str::to_string);
     }
 
-    /// Gives the window back (top-level, original style and place) and forgets it.
+    /// Gives the window back (no owner, original place and size) and forgets it.
     pub fn detach(&self, pod: &str) -> Result<(), String> {
         let entry = self.attached.lock().unwrap().remove(pod);
         {
@@ -190,18 +243,17 @@ impl<A: WinApi> Embedder<A> {
 pub mod win {
     use super::{Original, Rect, WinApi, WindowInfo, pick_window};
 
-    const GWL_STYLE: i32 = -16;
-    const GWL_EXSTYLE: i32 = -20;
+    const GWLP_HWNDPARENT: i32 = -8; // for a top-level window this is its OWNER
     const SW_HIDE: i32 = 0;
-    const SW_SHOW: i32 = 5;
+    const SW_SHOWNA: i32 = 8;
+    const SW_RESTORE: i32 = 9;
     const SWP_NOZORDER: u32 = 0x0004;
     /// Skip WM_WINDOWPOSCHANGING: BlueStacks (Qt) uses it to force its own geometry back, which sent the re-parented
     /// window thousands of pixels off screen. Without the message our rectangle is applied as asked.
     const SWP_NOSENDCHANGING: u32 = 0x0400;
-    /// Above its siblings, in particular above the webview that fills the app window.
+    /// Above the other top-level windows (and so above its owner).
     const HWND_TOP: isize = 0;
     const SWP_NOACTIVATE: u32 = 0x0010;
-    const SWP_FRAMECHANGED: u32 = 0x0020;
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 
     #[repr(C)]
@@ -220,11 +272,6 @@ pub mod win {
         y: i32,
     }
 
-    #[cfg(test)]
-    unsafe extern "system" {
-        fn ClientToScreen(hwnd: isize, point: *mut Pt) -> i32;
-    }
-
     type EnumProc = unsafe extern "system" fn(isize, isize) -> i32;
 
     unsafe extern "system" {
@@ -232,10 +279,10 @@ pub mod win {
         fn GetWindowTextW(hwnd: isize, text: *mut u16, max: i32) -> i32;
         fn IsWindowVisible(hwnd: isize) -> i32;
         fn IsWindow(hwnd: isize) -> i32;
+        fn IsIconic(hwnd: isize) -> i32;
         fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
-        fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
         fn SetWindowLongPtrW(hwnd: isize, index: i32, value: isize) -> isize;
-        fn SetParent(child: isize, parent: isize) -> isize;
+        fn ClientToScreen(hwnd: isize, point: *mut Pt) -> i32;
         fn GetWindowRect(hwnd: isize, rect: *mut Rc) -> i32;
         fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
         fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
@@ -249,7 +296,8 @@ pub mod win {
     unsafe extern "system" {
         pub(super) fn CreateWindowExW(ex: u32, class: *const u16, name: *const u16, style: u32, x: i32, y: i32, w: i32, h: i32, parent: isize, menu: isize, instance: isize, param: *const std::ffi::c_void) -> isize;
         pub(super) fn DestroyWindow(hwnd: isize) -> i32;
-        pub(super) fn GetParent(hwnd: isize) -> isize;
+        pub(super) fn GetWindow(hwnd: isize, cmd: u32) -> isize;
+        pub(super) fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
     }
 
     fn last_os_error(what: &str) -> String {
@@ -326,51 +374,52 @@ pub mod win {
                 if GetWindowRect(hwnd, &mut rc) == 0 {
                     return Err(last_os_error("No se pudo leer la ventana del pod"));
                 }
-                Ok(Original {
-                    style: GetWindowLongPtrW(hwnd, GWL_STYLE) as u32,
-                    ex_style: GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32,
-                    rect: Rect { x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top },
-                })
             }
+            Ok(Original { rect: Rect { x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top } })
         }
 
-        fn embed(&self, hwnd: isize, parent: isize, style: u32, ex_style: u32, rect: Rect) -> Result<(), String> {
-            // Order from the SetParent docs: becoming a child means clearing WS_POPUP / setting WS_CHILD BEFORE SetParent.
-            // SAFETY: plain Win32 window calls on handles we just looked up.
+        fn client_origin(&self, hwnd: isize) -> (i32, i32) {
+            let mut origin = Pt::default();
+            // SAFETY: valid out-pointer.
+            unsafe { ClientToScreen(hwnd, &mut origin) };
+            (origin.x, origin.y)
+        }
+
+        fn embed(&self, hwnd: isize, owner: isize, rect: Rect) -> Result<(), String> {
+            // SAFETY: plain Win32 window calls on handles we just looked up. The owner is the only thing that changes:
+            // style, parent and activation stay exactly as BlueStacks made them.
             unsafe {
-                SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style as isize);
-                if SetParent(hwnd, parent) == 0 {
-                    return Err(last_os_error("No se pudo meter la ventana del pod en la app"));
+                if IsIconic(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_RESTORE);
                 }
-                SetWindowPos(hwnd, HWND_TOP, rect.x, rect.y, rect.w, rect.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-                ShowWindow(hwnd, SW_SHOW);
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner);
+                // Show first and place after: showing a hidden Qt window runs its WM_WINDOWPOSCHANGING too.
+                ShowWindow(hwnd, SW_SHOWNA);
+                if SetWindowPos(hwnd, HWND_TOP, rect.x, rect.y, rect.w, rect.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE) == 0 {
+                    return Err(last_os_error("No se pudo colocar la ventana del pod en la app"));
+                }
             }
             Ok(())
         }
 
         fn place(&self, hwnd: isize, rect: Rect) -> Result<(), String> {
-            // SAFETY: plain Win32 call.
-            let ok = unsafe { SetWindowPos(hwnd, HWND_TOP, rect.x, rect.y, rect.w, rect.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE) };
+            // SAFETY: plain Win32 call. The z-order is left alone: the owner relation keeps the window above the app.
+            let ok = unsafe { SetWindowPos(hwnd, 0, rect.x, rect.y, rect.w, rect.h, SWP_NOZORDER | SWP_NOSENDCHANGING | SWP_NOACTIVATE) };
             if ok == 0 { Err(last_os_error("No se pudo mover la ventana del pod")) } else { Ok(()) }
         }
 
         fn set_visible(&self, hwnd: isize, visible: bool) {
             // SAFETY: plain Win32 call.
-            unsafe { ShowWindow(hwnd, if visible { SW_SHOW } else { SW_HIDE }) };
+            unsafe { ShowWindow(hwnd, if visible { SW_SHOWNA } else { SW_HIDE }) };
         }
 
         fn restore(&self, hwnd: isize, original: &Original) -> Result<(), String> {
-            // For the way back, SetParent(NULL) comes first and the original (WS_POPUP...) style after it.
             // SAFETY: plain Win32 window calls.
             unsafe {
-                ShowWindow(hwnd, SW_HIDE);
-                SetParent(hwnd, 0);
-                SetWindowLongPtrW(hwnd, GWL_STYLE, original.style as isize);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, original.ex_style as isize);
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+                ShowWindow(hwnd, SW_SHOWNA);
                 let r = original.rect;
-                SetWindowPos(hwnd, 0, r.x, r.y, r.w, r.h, SWP_NOZORDER | SWP_NOSENDCHANGING | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-                ShowWindow(hwnd, SW_SHOW);
+                SetWindowPos(hwnd, HWND_TOP, r.x, r.y, r.w, r.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE);
             }
             Ok(())
         }
@@ -384,6 +433,9 @@ pub mod win {
     #[cfg(test)]
     pub(super) mod dummy {
         use super::*;
+
+        const GWL_STYLE: i32 = -16;
+        const GW_OWNER: u32 = 4;
 
         #[repr(C)]
         struct WindowPos {
@@ -479,9 +531,10 @@ pub mod win {
             unsafe { DestroyWindow(hwnd) };
         }
 
-        pub fn parent_of(hwnd: isize) -> isize {
+        /// The owner of a top-level window (0 when it has none).
+        pub fn owner_of(hwnd: isize) -> isize {
             // SAFETY: plain Win32 call.
-            unsafe { GetParent(hwnd) }
+            unsafe { GetWindow(hwnd, GW_OWNER) }
         }
 
         pub fn style_of(hwnd: isize) -> u32 {
@@ -494,16 +547,9 @@ pub mod win {
             unsafe { IsWindowVisible(hwnd) != 0 }
         }
 
-        /// Position and size of `hwnd` in the client coordinates of `parent`.
-        pub fn client_rect_in(hwnd: isize, parent: isize) -> Rect {
-            let mut rc = Rc::default();
-            let mut origin = Pt::default();
-            // SAFETY: valid out-pointers.
-            unsafe {
-                GetWindowRect(hwnd, &mut rc);
-                ClientToScreen(parent, &mut origin);
-            }
-            Rect { x: rc.left - origin.x, y: rc.top - origin.y, w: rc.right - rc.left, h: rc.bottom - rc.top }
+        /// Screen position of the client area of `hwnd`.
+        pub fn client_origin(hwnd: isize) -> (i32, i32) {
+            RealWin { exe_filter: None }.client_origin(hwnd)
         }
 
         pub fn rect_of(hwnd: isize) -> Rect {
@@ -523,30 +569,63 @@ mod tests {
     // ----- pure rules -----
 
     #[test]
-    fn embedded_style_is_a_clean_child_without_caption_or_frame() {
-        let original = WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_VISIBLE;
-        let style = embedded_style(original);
-        assert_ne!(style & WS_CHILD, 0);
-        assert_ne!(style & WS_VISIBLE, 0);
-        for gone in [WS_POPUP, WS_CAPTION, WS_SYSMENU, WS_THICKFRAME, WS_MINIMIZEBOX, WS_MAXIMIZEBOX] {
-            assert_eq!(style & gone, 0, "{gone:#x} should be stripped");
-        }
-        // Unrelated bits survive.
-        assert_eq!(embedded_style(0x0000_0004) & 0x4, 0x4);
-    }
-
-    #[test]
-    fn embedded_ex_style_drops_the_frame_and_taskbar_bits_only() {
-        let ex = WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW | 0x0008_0000;
-        assert_eq!(embedded_ex_style(ex), 0x0008_0000);
-    }
-
-    #[test]
     fn scale_rect_converts_css_to_physical_pixels_and_never_goes_negative() {
         assert_eq!(scale_rect(10.0, 20.5, 300.0, 200.0, 1.5), Rect { x: 15, y: 31, w: 450, h: 300 });
         assert_eq!(scale_rect(-5.0, -1.0, 0.0, -9.0, 1.0), Rect { x: 0, y: 0, w: 1, h: 1 });
         assert_eq!(scale_rect(1.0, 1.0, 100.0, 100.0, 0.0), Rect { x: 1, y: 1, w: 100, h: 100 }, "bad dpr falls back to 1");
         assert_eq!(scale_rect(f64::NAN, 0.0, f64::INFINITY, 5.0, 2.0).x, 0);
+    }
+
+    #[test]
+    fn native_aspect_is_the_outer_window_ratio_and_ignores_unusable_windows() {
+        let portrait = Rect { x: 300, y: 100, w: 528, h: 912 };
+        assert!((native_aspect(portrait) - 528.0 / 912.0).abs() < 1e-9);
+        let minimised = Rect { x: -32000, y: -32000, w: 160, h: 28 };
+        assert_eq!(native_aspect(minimised), DEFAULT_ASPECT);
+        assert_eq!(native_aspect(Rect { x: 0, y: 0, w: 5000, h: 200 }), DEFAULT_ASPECT, "absurd shapes fall back");
+        assert_eq!(native_aspect(Rect::default()), DEFAULT_ASPECT);
+    }
+
+    #[test]
+    fn restorable_rect_keeps_a_good_place_and_replaces_a_lost_one() {
+        let ok = Rect { x: -1500, y: 40, w: 600, h: 900 }; // a second monitor on the left is fine
+        assert_eq!(restorable_rect(ok), ok);
+        assert_eq!(restorable_rect(Rect { x: -32000, y: -32000, w: 160, h: 28 }), FALLBACK_NATIVE);
+    }
+
+    #[test]
+    fn fit_aspect_makes_a_wide_box_tall_and_narrow_and_centres_it() {
+        // The reported case: a ~1650x870 landscape box and a portrait phone (528x912).
+        let aspect = 528.0 / 912.0;
+        let fitted = fit_aspect(Rect { x: 300, y: 200, w: 1650, h: 870 }, aspect);
+        assert_eq!(fitted.h, 870, "uses the whole height");
+        assert_eq!(fitted.w, 504);
+        assert_eq!(fitted.x, 300 + (1650 - 504) / 2, "centred horizontally");
+        assert_eq!(fitted.y, 200);
+        assert!((f64::from(fitted.w) / f64::from(fitted.h) - aspect).abs() < 0.002, "same aspect as the native window");
+    }
+
+    #[test]
+    fn fit_aspect_is_limited_by_the_width_when_the_box_is_narrow() {
+        let fitted = fit_aspect(Rect { x: 10, y: 20, w: 300, h: 900 }, 0.6);
+        assert_eq!((fitted.w, fitted.h), (300, 500));
+        assert_eq!((fitted.x, fitted.y), (10, 20 + 200), "centred vertically");
+    }
+
+    #[test]
+    fn fit_aspect_survives_degenerate_input() {
+        for container in [Rect::default(), Rect { x: 5, y: 5, w: 1, h: 1 }, Rect { x: 0, y: 0, w: 3, h: 2000 }] {
+            for aspect in [0.0, -1.0, f64::NAN, f64::INFINITY, 0.58] {
+                let r = fit_aspect(container, aspect);
+                assert!(r.w >= 1 && r.h >= 1, "{container:?} {aspect}: {r:?}");
+                assert!(r.w <= container.w.max(1) && r.h <= container.h.max(1), "never bigger than the box");
+            }
+        }
+    }
+
+    #[test]
+    fn to_screen_offsets_by_the_client_origin() {
+        assert_eq!(to_screen((100, -7), Rect { x: 5, y: 6, w: 7, h: 8 }), Rect { x: 105, y: -1, w: 7, h: 8 });
     }
 
     fn info(hwnd: isize, title: &str, exe: &str, visible: bool) -> WindowInfo {
@@ -574,11 +653,18 @@ mod tests {
 
     // ----- bookkeeping against a fake Win32 -----
 
+    /// Native window of every fake pod: portrait 400x800 (aspect 0.5) at (100, 50).
+    const NATIVE: Rect = Rect { x: 100, y: 50, w: 400, h: 800 };
+    /// Where the fake app window's client area starts on screen.
+    const ORIGIN: (i32, i32) = (1000, 200);
+
     #[derive(Default)]
     struct FakeWin {
         windows: RefCell<Vec<(String, isize)>>,
         calls: RefCell<Vec<String>>,
         closed: RefCell<Vec<isize>>,
+        native: RefCell<Option<Rect>>,
+        origin: RefCell<Option<(i32, i32)>>,
     }
 
     impl FakeWin {
@@ -588,6 +674,13 @@ mod tests {
         fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
         }
+        fn log(&self, what: String) {
+            self.calls.borrow_mut().push(what);
+        }
+    }
+
+    fn describe(rect: Rect) -> String {
+        format!("{},{} {}x{}", rect.x, rect.y, rect.w, rect.h)
     }
 
     impl WinApi for &FakeWin {
@@ -598,56 +691,87 @@ mod tests {
             !self.closed.borrow().contains(&hwnd)
         }
         fn snapshot(&self, hwnd: isize) -> Result<Original, String> {
-            Ok(Original { style: WS_POPUP | WS_CAPTION | 0x7, ex_style: WS_EX_APPWINDOW, rect: Rect { x: 100, y: 50, w: 800, h: 600 } }).inspect(|_| self.calls.borrow_mut().push(format!("snapshot:{hwnd}")))
+            self.log(format!("snapshot:{hwnd}"));
+            Ok(Original { rect: self.native.borrow().unwrap_or(NATIVE) })
         }
-        fn embed(&self, hwnd: isize, parent: isize, style: u32, _ex: u32, rect: Rect) -> Result<(), String> {
-            assert_ne!(style & WS_CHILD, 0);
-            self.calls.borrow_mut().push(format!("embed:{hwnd}->{parent}@{},{} {}x{}", rect.x, rect.y, rect.w, rect.h));
+        fn client_origin(&self, _hwnd: isize) -> (i32, i32) {
+            self.origin.borrow().unwrap_or(ORIGIN)
+        }
+        fn embed(&self, hwnd: isize, owner: isize, rect: Rect) -> Result<(), String> {
+            self.log(format!("embed:{hwnd}->{owner}@{}", describe(rect)));
             Ok(())
         }
         fn place(&self, hwnd: isize, rect: Rect) -> Result<(), String> {
-            self.calls.borrow_mut().push(format!("place:{hwnd}@{},{} {}x{}", rect.x, rect.y, rect.w, rect.h));
+            self.log(format!("place:{hwnd}@{}", describe(rect)));
             Ok(())
         }
         fn set_visible(&self, hwnd: isize, visible: bool) {
-            self.calls.borrow_mut().push(format!("{}:{hwnd}", if visible { "show" } else { "hide" }));
+            self.log(format!("{}:{hwnd}", if visible { "show" } else { "hide" }));
         }
         fn restore(&self, hwnd: isize, original: &Original) -> Result<(), String> {
-            self.calls.borrow_mut().push(format!("restore:{hwnd}@{},{} {}x{} style={:#x}", original.rect.x, original.rect.y, original.rect.w, original.rect.h, original.style));
+            self.log(format!("restore:{hwnd}@{}", describe(original.rect)));
             Ok(())
         }
         fn focus(&self, hwnd: isize) {
-            self.calls.borrow_mut().push(format!("focus:{hwnd}"));
+            self.log(format!("focus:{hwnd}"));
         }
     }
 
-    const R: Rect = Rect { x: 10, y: 20, w: 300, h: 400 };
+    /// A wide box like the one in the app: 1650x870 starting at (300, 20) in the client area.
+    const WIDE: Rect = Rect { x: 300, y: 20, w: 1650, h: 870 };
+    /// Native aspect 0.5 fitted in WIDE: 435x870, centred -> x = 300 + (1650-435)/2 = 907; on screen + ORIGIN.
+    const WIDE_SCREEN: &str = "1907,220 435x870";
 
     #[test]
-    fn attach_embeds_the_pod_window_under_the_app_window() {
+    fn attach_embeds_the_pod_window_with_its_native_aspect_not_the_full_box() {
         let win = FakeWin::with(&[("wa-pod2", 22)]);
         let embedder = Embedder::new(&win, 999);
-        embedder.attach("pod2", R).unwrap();
-        assert_eq!(win.calls(), vec!["snapshot:22", "embed:22->999@10,20 300x400"]);
+        embedder.attach("pod2", WIDE).unwrap();
+        assert_eq!(win.calls(), vec!["snapshot:22".to_string(), format!("embed:22->999@{WIDE_SCREEN}")]);
         assert_eq!(embedder.state().attached, vec!["pod2"]);
+    }
+
+    #[test]
+    fn the_window_never_leaves_its_native_aspect_when_the_box_changes() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.attach("pod2", WIDE).unwrap();
+        // The app window was shrunk: a short box. Height-limited again, still 1:2.
+        embedder.resize("pod2", Rect { x: 300, y: 20, w: 1000, h: 500 }).unwrap();
+        assert_eq!(win.calls().last().unwrap(), "place:22@1675,220 250x500");
+        // A narrow box: width-limited.
+        embedder.resize("pod2", Rect { x: 0, y: 0, w: 200, h: 900 }).unwrap();
+        assert_eq!(win.calls().last().unwrap(), "place:22@1000,450 200x400");
     }
 
     #[test]
     fn attaching_twice_only_moves_the_window_and_keeps_the_original_look() {
         let win = FakeWin::with(&[("wa-pod2", 22)]);
         let embedder = Embedder::new(&win, 999);
-        embedder.attach("pod2", R).unwrap();
-        embedder.attach("pod2", Rect { x: 0, y: 0, w: 50, h: 60 }).unwrap();
+        embedder.attach("pod2", WIDE).unwrap();
+        *win.native.borrow_mut() = Some(Rect { x: 0, y: 0, w: 900, h: 300 }); // would change the aspect if re-measured
+        embedder.attach("pod2", Rect { x: 0, y: 0, w: 100, h: 400 }).unwrap();
         assert_eq!(win.calls().iter().filter(|c| c.starts_with("snapshot")).count(), 1);
-        assert_eq!(win.calls().last().unwrap(), "place:22@0,0 50x60");
+        assert_eq!(win.calls().last().unwrap(), "place:22@1000,300 100x200");
         embedder.detach("pod2").unwrap();
-        assert!(win.calls().iter().any(|c| c.contains("restore:22@100,50 800x600")), "restores the first snapshot");
+        assert!(win.calls().iter().any(|c| c == "restore:22@100,50 400x800"), "restores the first snapshot");
+    }
+
+    #[test]
+    fn an_unmeasurable_window_gets_the_portrait_default_and_a_sane_restore_place() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        *win.native.borrow_mut() = Some(Rect { x: -32000, y: -32000, w: 160, h: 28 }); // minimised
+        let embedder = Embedder::new(&win, 999);
+        embedder.attach("pod2", Rect { x: 0, y: 0, w: 1000, h: 1000 }).unwrap();
+        assert_eq!(win.calls().last().unwrap(), "embed:22->999@1210,200 580x1000");
+        embedder.detach("pod2").unwrap();
+        assert!(win.calls().iter().any(|c| c == "restore:22@100,100 528x912"));
     }
 
     #[test]
     fn attach_fails_with_a_clear_message_when_the_pod_has_no_window() {
         let win = FakeWin::with(&[]);
-        let err = Embedder::new(&win, 999).attach("pod2", R).unwrap_err();
+        let err = Embedder::new(&win, 999).attach("pod2", WIDE).unwrap_err();
         assert!(err.contains("pod2") && err.contains("encendido"));
     }
 
@@ -656,11 +780,11 @@ mod tests {
         let win = FakeWin::with(&[("wa-pod1", 11), ("wa-pod2", 22), ("wa-pod3", 33)]);
         let embedder = Embedder::new(&win, 999);
         for pod in ["pod1", "pod2", "pod3"] {
-            embedder.attach(pod, R).unwrap();
+            embedder.attach(pod, WIDE).unwrap();
         }
         win.calls.borrow_mut().clear();
         embedder.activate(Some("pod2"));
-        assert_eq!(win.calls(), vec!["hide:11", "show:22", "hide:33"]);
+        assert_eq!(win.calls(), vec!["hide:11".to_string(), "show:22".to_string(), format!("place:22@{WIDE_SCREEN}"), "hide:33".to_string()]);
         assert_eq!(embedder.state().active.as_deref(), Some("pod2"));
 
         win.calls.borrow_mut().clear();
@@ -676,21 +800,44 @@ mod tests {
     fn resize_requires_an_attached_pod() {
         let win = FakeWin::with(&[("wa-pod2", 22)]);
         let embedder = Embedder::new(&win, 999);
-        assert!(embedder.resize("pod2", R).is_err());
-        embedder.attach("pod2", R).unwrap();
-        embedder.resize("pod2", Rect { x: 1, y: 2, w: 3, h: 4 }).unwrap();
-        assert_eq!(win.calls().last().unwrap(), "place:22@1,2 3x4");
+        assert!(embedder.resize("pod2", WIDE).is_err());
+        embedder.attach("pod2", WIDE).unwrap();
+        embedder.resize("pod2", WIDE).unwrap();
+        assert_eq!(win.calls().last().unwrap(), &format!("place:22@{WIDE_SCREEN}"));
+    }
+
+    #[test]
+    fn follow_replaces_only_the_visible_pod_after_the_app_window_moves() {
+        let win = FakeWin::with(&[("wa-pod1", 11), ("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.attach("pod1", WIDE).unwrap();
+        embedder.attach("pod2", WIDE).unwrap();
+        embedder.activate(Some("pod2"));
+
+        win.calls.borrow_mut().clear();
+        embedder.follow(); // nothing moved yet: same place
+        assert_eq!(win.calls(), vec![format!("place:22@{WIDE_SCREEN}")]);
+
+        *win.origin.borrow_mut() = Some((0, 0)); // the app window was dragged to the top-left corner
+        win.calls.borrow_mut().clear();
+        embedder.follow();
+        assert_eq!(win.calls(), vec!["place:22@907,20 435x870"]);
+
+        embedder.activate(None);
+        win.calls.borrow_mut().clear();
+        embedder.follow();
+        assert!(win.calls().is_empty(), "nothing visible, nothing to move");
     }
 
     #[test]
     fn detach_restores_and_brings_the_window_to_the_front_then_forgets_it() {
         let win = FakeWin::with(&[("wa-pod2", 22)]);
         let embedder = Embedder::new(&win, 999);
-        embedder.attach("pod2", R).unwrap();
+        embedder.attach("pod2", WIDE).unwrap();
         embedder.activate(Some("pod2"));
         win.calls.borrow_mut().clear();
         embedder.detach("pod2").unwrap();
-        assert_eq!(win.calls(), vec![format!("restore:22@100,50 800x600 style={:#x}", WS_POPUP | WS_CAPTION | 0x7), "focus:22".to_string()]);
+        assert_eq!(win.calls(), vec!["restore:22@100,50 400x800", "focus:22"]);
         assert_eq!(embedder.state(), EmbedState { attached: vec![], active: None });
         embedder.detach("pod2").unwrap(); // idempotent
     }
@@ -699,16 +846,16 @@ mod tests {
     fn a_window_the_user_closed_is_not_restored_and_can_be_embedded_again() {
         let win = FakeWin::with(&[("wa-pod2", 22)]);
         let embedder = Embedder::new(&win, 999);
-        embedder.attach("pod2", R).unwrap();
+        embedder.attach("pod2", WIDE).unwrap();
         win.closed.borrow_mut().push(22);
         embedder.detach("pod2").unwrap();
         assert!(!win.calls().iter().any(|c| c.starts_with("restore")));
 
         // New BlueStacks window after a restart.
-        embedder.attach("pod2", R).unwrap();
+        embedder.attach("pod2", WIDE).unwrap();
         *win.windows.borrow_mut() = vec![("wa-pod2".into(), 44)];
         win.closed.borrow_mut().push(22);
-        embedder.attach("pod2", R).unwrap();
+        embedder.attach("pod2", WIDE).unwrap();
         assert!(win.calls().iter().any(|c| c.starts_with("embed:44")));
     }
 
@@ -716,14 +863,19 @@ mod tests {
     fn detach_all_restores_every_window() {
         let win = FakeWin::with(&[("wa-pod1", 11), ("wa-pod2", 22)]);
         let embedder = Embedder::new(&win, 999);
-        embedder.attach("pod1", R).unwrap();
-        embedder.attach("pod2", R).unwrap();
+        embedder.attach("pod1", WIDE).unwrap();
+        embedder.attach("pod2", WIDE).unwrap();
         assert!(embedder.detach_all().is_empty());
         assert_eq!(win.calls().iter().filter(|c| c.starts_with("restore")).count(), 2);
         assert!(embedder.state().attached.is_empty());
     }
 
     // ----- real user32 with dummy windows (never a pod) -----
+
+    const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
+    const WS_CAPTION: u32 = 0x00C0_0000;
+    const WS_CHILD: u32 = 0x4000_0000;
+    const WS_VISIBLE: u32 = 0x1000_0000;
 
     /// BlueStacks is a Qt top-level window that rewrites any move/size in WM_WINDOWPOSCHANGING. Before the fix the
     /// embedded pod ended up far off screen (y = 15000+) and the stage stayed black.
@@ -732,22 +884,23 @@ mod tests {
     fn real_win32_placement_wins_over_a_window_that_fights_every_move() {
         use win::{RealWin, dummy};
 
-        let ws_overlapped = 0x00CF_0000u32;
-        let host = dummy::window("agentautox1-test-host2", ws_overlapped, Rect { x: 50, y: 50, w: 900, h: 700 });
+        let host = dummy::window("agentautox1-test-host2", WS_OVERLAPPEDWINDOW, Rect { x: 50, y: 50, w: 900, h: 700 });
         let pod = dummy::qt_like_window("wa-agentautox1-qt-like", Rect { x: 200, y: 120, w: 528, h: 912 });
         assert!(host != 0 && pod != 0);
 
         let embedder = Embedder::new(RealWin { exe_filter: None }, host);
-        let wanted = Rect { x: 40, y: 60, w: 600, h: 500 };
-        embedder.attach("agentautox1-qt-like", wanted).unwrap();
-        let at = |hwnd| dummy::client_rect_in(hwnd, host);
-        assert_eq!(at(pod), wanted, "attach placed it where the UI asked");
+        let aspect = native_aspect(Rect { x: 200, y: 120, w: 528, h: 912 });
+        let wanted_box = Rect { x: 40, y: 60, w: 600, h: 500 };
+        let expected = |container: Rect| to_screen(dummy::client_origin(host), fit_aspect(container, aspect));
+
+        embedder.attach("agentautox1-qt-like", wanted_box).unwrap();
+        assert_eq!(dummy::rect_of(pod), expected(wanted_box), "attach placed it where the UI asked, with the native aspect");
 
         let moved = Rect { x: 10, y: 20, w: 640, h: 480 };
         embedder.resize("agentautox1-qt-like", moved).unwrap();
-        assert_eq!(at(pod), moved, "resize too");
+        assert_eq!(dummy::rect_of(pod), expected(moved), "resize too");
         embedder.resize("agentautox1-qt-like", moved).unwrap();
-        assert_eq!(at(pod), moved, "and repeating it does not drift");
+        assert_eq!(dummy::rect_of(pod), expected(moved), "and repeating it does not drift");
 
         embedder.detach_all();
         for hwnd in [pod, host] {
@@ -757,35 +910,35 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn real_win32_embeds_and_restores_a_dummy_window() {
+    fn real_win32_embeds_as_an_owned_top_level_window_and_restores_it() {
         use win::{RealWin, dummy};
 
-        let ws_overlapped = 0x00CF_0000u32; // WS_OVERLAPPEDWINDOW
-        let host = dummy::window("agentautox1-test-host", ws_overlapped, Rect { x: 50, y: 50, w: 900, h: 700 });
-        let pod = dummy::window("wa-agentautox1-test-pod", ws_overlapped, Rect { x: 200, y: 120, w: 400, h: 300 });
-        let other = dummy::window("wa-agentautox1-test-other", ws_overlapped, Rect { x: 300, y: 220, w: 400, h: 300 });
+        let host = dummy::window("agentautox1-test-host", WS_OVERLAPPEDWINDOW, Rect { x: 50, y: 50, w: 900, h: 700 });
+        let pod = dummy::window("wa-agentautox1-test-pod", WS_OVERLAPPEDWINDOW, Rect { x: 200, y: 120, w: 400, h: 300 });
+        let other = dummy::window("wa-agentautox1-test-other", WS_OVERLAPPEDWINDOW, Rect { x: 300, y: 220, w: 400, h: 300 });
         assert!(host != 0 && pod != 0 && other != 0, "could not create the dummy windows");
+        let style_before = dummy::style_of(pod);
 
         let embedder = Embedder::new(RealWin { exe_filter: None }, host);
-        embedder.attach("agentautox1-test-pod", Rect { x: 10, y: 30, w: 320, h: 240 }).unwrap();
-        embedder.attach("agentautox1-test-other", Rect { x: 10, y: 30, w: 320, h: 240 }).unwrap();
+        let stage = Rect { x: 10, y: 30, w: 320, h: 240 };
+        embedder.attach("agentautox1-test-pod", stage).unwrap();
+        embedder.attach("agentautox1-test-other", stage).unwrap();
 
-        assert_eq!(dummy::parent_of(pod), host, "embedded under the host window");
+        assert_eq!(dummy::owner_of(pod), host, "owned by the host window");
         let style = dummy::style_of(pod);
-        assert_ne!(style & WS_CHILD, 0);
-        assert_eq!(style & WS_CAPTION, 0, "no caption");
-        assert_eq!((dummy::rect_of(pod).w, dummy::rect_of(pod).h), (320, 240), "sized to the placeholder");
+        assert_eq!(style & !WS_VISIBLE, style_before & !WS_VISIBLE, "style untouched: still the native top-level window");
+        assert_eq!(style & WS_CHILD, 0, "never a child window");
+        assert_eq!((dummy::rect_of(pod).w, dummy::rect_of(pod).h), (320, 240), "native 4:3 fills a 4:3 stage");
 
         embedder.activate(Some("agentautox1-test-pod"));
-        assert!(dummy::visible(pod) || !dummy::visible(host), "visible once its parent is visible");
+        assert!(dummy::visible(pod), "the active tab is shown");
+        assert!(!dummy::visible(other), "the other tab is hidden");
         embedder.activate(None);
         assert!(!dummy::visible(pod) && !dummy::visible(other), "tabs hidden");
 
         assert!(embedder.detach_all().is_empty());
-        assert_eq!(dummy::parent_of(pod), 0, "top level again");
-        let restored = dummy::style_of(pod);
-        assert_eq!(restored & WS_CHILD, 0);
-        assert_ne!(restored & WS_CAPTION, 0, "caption is back");
+        assert_eq!(dummy::owner_of(pod), 0, "no owner again");
+        assert_ne!(dummy::style_of(pod) & WS_CAPTION, 0, "caption still there");
         let r = dummy::rect_of(pod);
         assert_eq!((r.x, r.y, r.w, r.h), (200, 120, 400, 300), "original position and size");
 

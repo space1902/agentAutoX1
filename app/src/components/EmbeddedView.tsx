@@ -9,10 +9,21 @@ interface Props {
   suspended: boolean;
 }
 
-/** CSS-pixel rectangle of the stage, which is the client area of the webview. */
+/** Breathing room kept between the pod window and the edges of the app window, in CSS pixels. */
+const VIEWPORT_MARGIN = 12;
+
+/**
+ * CSS-pixel box available for the pod: the stage clipped to the visible part of the webview, so a stage scrolled
+ * half out of view (or taller than the window) never pushes the native window past the edge. The native side fits the
+ * pod's own aspect ratio inside this box and centres it.
+ */
 function measure(el: HTMLElement) {
   const r = el.getBoundingClientRect();
-  return { x: r.left, y: r.top, width: r.width, height: r.height, dpr: window.devicePixelRatio || 1 };
+  const left = Math.max(r.left, 0);
+  const top = Math.max(r.top, 0);
+  const right = Math.min(r.right, window.innerWidth - VIEWPORT_MARGIN);
+  const bottom = Math.min(r.bottom, window.innerHeight - VIEWPORT_MARGIN);
+  return { x: left, y: top, width: Math.max(right - left, 1), height: Math.max(bottom - top, 1), dpr: window.devicePixelRatio || 1 };
 }
 
 /**

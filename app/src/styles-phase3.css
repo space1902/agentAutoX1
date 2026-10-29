@@ -81,7 +81,7 @@
 .embed-tab.active { background: var(--nav-active-bg); border-color: var(--accent); }
 .embed-tab .embed-close { padding: 6px 10px 6px 4px; color: var(--muted); display: inline-flex; }
 .embed-popout { margin-left: auto; }
-.embed-stage { height: min(68vh, 720px); border-radius: 14px; background: var(--log-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
+.embed-stage { height: clamp(420px, calc(100vh - 250px), 1100px); border-radius: 14px; background: var(--log-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
 .link-btn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; }
 
 /* Pairing code card shown inside the running profile's card. */

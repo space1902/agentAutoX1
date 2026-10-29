@@ -206,7 +206,7 @@ fn set_embed_view(state: State<'_, AppState>, enabled: bool) -> Result<Settings,
     Ok(next)
 }
 
-/// Puts the pod's BlueStacks window inside the app at the measured rectangle (CSS pixels + devicePixelRatio).
+/// Shows the pod's BlueStacks window over the measured box (CSS pixels + devicePixelRatio), fitted to its native aspect.
 #[tauri::command]
 async fn embed_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String, x: f64, y: f64, width: f64, height: f64, dpr: f64) -> Result<embed::EmbedState, String> {
     if !util::is_valid_pod_name(&name) {
@@ -237,7 +237,7 @@ async fn embed_activate(window: tauri::WebviewWindow, state: State<'_, AppState>
     .await
 }
 
-/// Gives the window back (top-level, original place) and brings it to the front: "Abrir en ventana aparte".
+/// Gives the window back (no owner, original place and size) and brings it to the front: "Abrir en ventana aparte".
 #[tauri::command]
 async fn embed_detach(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String) -> Result<embed::EmbedState, String> {
     let embedder = embedder_for(&window, &state)?;
@@ -482,6 +482,14 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // An owned BlueStacks window does not travel with the app window: keep it glued to its placeholder.
+            if let tauri::WindowEvent::Moved(_) = event {
+                let state = window.state::<AppState>();
+                let embedder = state.embedder.lock().unwrap().clone();
+                if let Some(embedder) = embedder {
+                    embedder.follow();
+                }
+            }
             // Never leave a warm-up profile orphaned when the window is closed.
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let state = window.state::<AppState>();
