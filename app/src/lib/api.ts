@@ -264,10 +264,10 @@ export const api = {
   cancelPodLinks: () => invoke<void>("cancel_pod_links"),
   getEmbedView: async () => Boolean(((await invoke<Settings>("get_settings")) as Settings & { embedView?: boolean }).embedView),
   setEmbedView: (enabled: boolean) => invoke<Settings>("set_embed_view", { enabled }),
-  embedAttach: (name: string, x: number, y: number, width: number, height: number, dpr: number) =>
-    invoke<EmbedState>("embed_attach", { name, x, y, width, height, dpr }),
-  embedResize: (name: string, x: number, y: number, width: number, height: number, dpr: number) =>
-    invoke<void>("embed_resize", { name, x, y, width, height, dpr }),
+  embedAttach: (name: string, x: number, y: number, width: number, height: number, viewWidth: number, viewHeight: number, dpr: number) =>
+    invoke<EmbedState>("embed_attach", { name, x, y, width, height, viewWidth, viewHeight, dpr }),
+  embedResize: (name: string, x: number, y: number, width: number, height: number, viewWidth: number, viewHeight: number, dpr: number) =>
+    invoke<void>("embed_resize", { name, x, y, width, height, viewWidth, viewHeight, dpr }),
   embedActivate: (name: string | null) => invoke<EmbedState>("embed_activate", { name }),
   embedDetach: (name: string) => invoke<EmbedState>("embed_detach", { name }),
   keepAliveStatus: () => invoke<KeepAliveStatus>("keepalive_status"),

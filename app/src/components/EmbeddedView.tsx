@@ -9,21 +9,14 @@ interface Props {
   suspended: boolean;
 }
 
-/** Breathing room kept between the pod window and the edges of the app window, in CSS pixels. */
-const VIEWPORT_MARGIN = 12;
-
 /**
- * CSS-pixel box available for the pod: the stage clipped to the visible part of the webview, so a stage scrolled
- * half out of view (or taller than the window) never pushes the native window past the edge. The native side fits the
- * pod's own aspect ratio inside this box and centres it.
+ * CSS-pixel geometry for the native pod window: the stage's FULL rectangle (even the part scrolled out of view, so the
+ * pod keeps a fixed size and moves with the page like any other content) and the visible size of the webview, which
+ * the native side clips the pod to.
  */
 function measure(el: HTMLElement) {
   const r = el.getBoundingClientRect();
-  const left = Math.max(r.left, 0);
-  const top = Math.max(r.top, 0);
-  const right = Math.min(r.right, window.innerWidth - VIEWPORT_MARGIN);
-  const bottom = Math.min(r.bottom, window.innerHeight - VIEWPORT_MARGIN);
-  return { x: left, y: top, width: Math.max(right - left, 1), height: Math.max(bottom - top, 1), dpr: window.devicePixelRatio || 1 };
+  return { x: r.left, y: r.top, width: r.width, height: r.height, viewWidth: window.innerWidth, viewHeight: window.innerHeight, dpr: window.devicePixelRatio || 1 };
 }
 
 /**
@@ -61,7 +54,7 @@ export default function EmbeddedView({ pods, suspended }: Props) {
     const el = stage.current;
     if (!el || !current) return;
     const m = measure(el);
-    void api.embedResize(current, m.x, m.y, m.width, m.height, m.dpr).catch(() => undefined);
+    void api.embedResize(current, m.x, m.y, m.width, m.height, m.viewWidth, m.viewHeight, m.dpr).catch(() => undefined);
   }, [current]);
 
   // Attach the active pod and show it; hide everything when nothing should be visible (also on unmount).
@@ -73,7 +66,7 @@ export default function EmbeddedView({ pods, suspended }: Props) {
     (async () => {
       try {
         const m = measure(el);
-        await api.embedAttach(current, m.x, m.y, m.width, m.height, m.dpr);
+        await api.embedAttach(current, m.x, m.y, m.width, m.height, m.viewWidth, m.viewHeight, m.dpr);
         if (!cancelled) {
           await api.embedActivate(current);
           setError(null);

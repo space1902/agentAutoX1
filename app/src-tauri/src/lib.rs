@@ -206,14 +206,16 @@ fn set_embed_view(state: State<'_, AppState>, enabled: bool) -> Result<Settings,
     Ok(next)
 }
 
-/// Shows the pod's BlueStacks window over the measured box (CSS pixels + devicePixelRatio), fitted to its native aspect.
+/// Shows the pod's BlueStacks window in its stage (CSS pixels + devicePixelRatio): the stage is the FULL box, even the
+/// part scrolled out of view; `view_*` is the visible webview, which the native window is clipped to.
 #[tauri::command]
-async fn embed_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String, x: f64, y: f64, width: f64, height: f64, dpr: f64) -> Result<embed::EmbedState, String> {
+async fn embed_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String, x: f64, y: f64, width: f64, height: f64, view_width: f64, view_height: f64, dpr: f64) -> Result<embed::EmbedState, String> {
     if !util::is_valid_pod_name(&name) {
         return Err(format!("Nombre de pod no válido: {name}"));
     }
     let embedder = embedder_for(&window, &state)?;
     blocking(move || {
+        embedder.set_viewport(embed::scale_rect(0.0, 0.0, view_width, view_height, dpr));
         embedder.attach(&name, embed::scale_rect(x, y, width, height, dpr))?;
         Ok(embedder.state())
     })
@@ -221,9 +223,13 @@ async fn embed_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, 
 }
 
 #[tauri::command]
-async fn embed_resize(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String, x: f64, y: f64, width: f64, height: f64, dpr: f64) -> Result<(), String> {
+async fn embed_resize(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String, x: f64, y: f64, width: f64, height: f64, view_width: f64, view_height: f64, dpr: f64) -> Result<(), String> {
     let embedder = embedder_for(&window, &state)?;
-    blocking(move || embedder.resize(&name, embed::scale_rect(x, y, width, height, dpr))).await
+    blocking(move || {
+        embedder.set_viewport(embed::scale_rect(0.0, 0.0, view_width, view_height, dpr));
+        embedder.resize(&name, embed::scale_rect(x, y, width, height, dpr))
+    })
+    .await
 }
 
 /// Shows that pod's window and hides the rest; `None` hides all of them (modal open, other section...).

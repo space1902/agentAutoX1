@@ -26,11 +26,26 @@ pub struct Rect {
     pub h: i32,
 }
 
-/// CSS pixels (what the UI measures) -> physical pixels (what Win32 wants), never negative and at least 1x1.
+/// CSS pixels (what the UI measures) -> physical pixels (what Win32 wants), at least 1x1. The position may be
+/// negative: a stage scrolled partly out of view starts above the top of the page.
 pub fn scale_rect(x: f64, y: f64, width: f64, height: f64, dpr: f64) -> Rect {
     let dpr = if dpr.is_finite() && dpr > 0.0 { dpr } else { 1.0 };
     let px = |v: f64| if v.is_finite() { (v * dpr).round() as i32 } else { 0 };
-    Rect { x: px(x).max(0), y: px(y).max(0), w: px(width).max(1), h: px(height).max(1) }
+    Rect { x: px(x), y: px(y), w: px(width).max(1), h: px(height).max(1) }
+}
+
+/// The overlap of two rectangles, `None` when they do not share a single pixel.
+pub fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let left = a.x.max(b.x);
+    let top = a.y.max(b.y);
+    let right = (a.x + a.w).min(b.x + b.w);
+    let bottom = (a.y + a.h).min(b.y + b.h);
+    (right > left && bottom > top).then_some(Rect { x: left, y: top, w: right - left, h: bottom - top })
+}
+
+/// `inner` expressed relative to the top-left corner of `outer` (the coordinates SetWindowRgn wants).
+pub fn relative_to(inner: Rect, outer: Rect) -> Rect {
+    Rect { x: inner.x - outer.x, y: inner.y - outer.y, w: inner.w, h: inner.h }
 }
 
 /// Width / height of a typical BlueStacks portrait window (528x912 outer), used when the real one cannot be measured.
@@ -113,6 +128,8 @@ pub trait WinApi {
     /// Move/resize to the SCREEN rectangle `rect` without touching the z-order.
     fn place(&self, hwnd: isize, rect: Rect) -> Result<(), String>;
     fn set_visible(&self, hwnd: isize, visible: bool);
+    /// Show only `visible` (relative to the window top-left corner) of the window; `None` shows all of it.
+    fn set_clip(&self, hwnd: isize, visible: Option<Rect>);
     /// Back to an ownerless window at its original position and size.
     fn restore(&self, hwnd: isize, original: &Original) -> Result<(), String>;
     fn focus(&self, hwnd: isize);
@@ -139,11 +156,65 @@ pub struct Embedder<A: WinApi> {
     parent: isize,
     attached: Mutex<BTreeMap<String, Attached>>,
     active: Mutex<Option<String>>,
+    /// Visible part of the webview (client coordinates, physical pixels). Whatever of a pod falls outside it is
+    /// clipped away, so a scrolled page never lets the native window draw over the title bar or other cards.
+    viewport: Mutex<Option<Rect>>,
 }
 
 impl<A: WinApi> Embedder<A> {
     pub fn new(api: A, parent: isize) -> Embedder<A> {
-        Embedder { api, parent, attached: Mutex::new(BTreeMap::new()), active: Mutex::new(None) }
+        Embedder { api, parent, attached: Mutex::new(BTreeMap::new()), active: Mutex::new(None), viewport: Mutex::new(None) }
+    }
+
+    pub fn set_viewport(&self, viewport: Rect) {
+        *self.viewport.lock().unwrap() = Some(viewport);
+    }
+
+    /// The pod fixed rectangle inside its stage, whatever part of it is currently scrolled out of view.
+    fn pod_rect(entry: &Attached) -> Rect {
+        fit_aspect(entry.container, entry.aspect)
+    }
+
+    /// The part of the pod inside the viewport (client coordinates); the whole pod when no viewport is known.
+    fn visible_part(&self, entry: &Attached) -> Option<Rect> {
+        let pod = Self::pod_rect(entry);
+        match *self.viewport.lock().unwrap() {
+            Some(viewport) => intersect(pod, viewport),
+            None => Some(pod),
+        }
+    }
+
+    /// Clips the native window to the viewport. Qt re-applies its own geometry whenever it is shown or moved, so this
+    /// runs after every placement; a pod that is completely out of view is hidden.
+    fn clip(&self, entry: &Attached) {
+        if self.viewport.lock().unwrap().is_none() {
+            return;
+        }
+        let pod = Self::pod_rect(entry);
+        match self.visible_part(entry) {
+            None => self.api.set_visible(entry.hwnd, false),
+            Some(part) if part == pod => self.api.set_clip(entry.hwnd, None),
+            Some(part) => self.api.set_clip(entry.hwnd, Some(relative_to(part, pod))),
+        }
+    }
+
+    /// Shows/hides (as the tab and the scroll position require), places and clips one pod.
+    fn layout(&self, entry: &Attached, visible: bool) -> Result<(), String> {
+        if self.visible_part(entry).is_none() {
+            self.api.set_visible(entry.hwnd, false);
+            return Ok(());
+        }
+        if visible {
+            self.api.set_visible(entry.hwnd, true);
+        }
+        // Clip BEFORE placing: SetWindowRgn makes Windows send WM_WINDOWPOSCHANGING, which Qt answers with its own
+        // geometry. The placement that follows (without that message) is the one that sticks.
+        self.clip(entry);
+        self.api.place(entry.hwnd, self.screen_rect(entry))
+    }
+
+    fn is_active(&self, pod: &str) -> bool {
+        self.active.lock().unwrap().as_deref() == Some(pod)
     }
 
     pub fn state(&self) -> EmbedState {
@@ -152,7 +223,7 @@ impl<A: WinApi> Embedder<A> {
 
     /// Where the window goes on screen: the native aspect fitted and centred in the measured box.
     fn screen_rect(&self, entry: &Attached) -> Rect {
-        to_screen(self.api.client_origin(self.parent), fit_aspect(entry.container, entry.aspect))
+        to_screen(self.api.client_origin(self.parent), Self::pod_rect(entry))
     }
 
     /// Embeds the pod's window inside `container` (client coordinates, physical pixels), or just re-places it when it
@@ -162,7 +233,7 @@ impl<A: WinApi> Embedder<A> {
         if let Some(existing) = attached.get_mut(pod) {
             if self.api.is_window(existing.hwnd) {
                 existing.container = container;
-                return self.api.place(existing.hwnd, self.screen_rect(existing));
+                return self.layout(existing, self.is_active(pod));
             }
             attached.remove(pod); // the window was closed: embed the new one
         }
@@ -178,6 +249,10 @@ impl<A: WinApi> Embedder<A> {
             container,
         };
         self.api.embed(hwnd, self.parent, self.screen_rect(&entry))?;
+        if self.viewport.lock().unwrap().is_some() {
+            self.clip(&entry);
+            self.api.place(hwnd, self.screen_rect(&entry))?;
+        }
         attached.insert(pod.to_string(), entry);
         Ok(())
     }
@@ -186,7 +261,7 @@ impl<A: WinApi> Embedder<A> {
         let mut attached = self.attached.lock().unwrap();
         let entry = attached.get_mut(pod).ok_or_else(|| format!("El pod «{pod}» no está en la vista embebida."))?;
         entry.container = container;
-        self.api.place(entry.hwnd, self.screen_rect(entry))
+        self.layout(entry, self.is_active(pod))
     }
 
     /// The app window moved: an owned window does not travel with its owner, so the visible pod is placed again.
@@ -194,7 +269,7 @@ impl<A: WinApi> Embedder<A> {
         let attached = self.attached.lock().unwrap();
         let active = self.active.lock().unwrap();
         if let Some(entry) = active.as_deref().and_then(|name| attached.get(name)) {
-            let _ = self.api.place(entry.hwnd, self.screen_rect(entry));
+            let _ = self.layout(entry, true);
         }
     }
 
@@ -202,11 +277,11 @@ impl<A: WinApi> Embedder<A> {
     pub fn activate(&self, pod: Option<&str>) {
         let attached = self.attached.lock().unwrap();
         for (name, entry) in attached.iter() {
-            let shown = pod == Some(name.as_str());
-            self.api.set_visible(entry.hwnd, shown);
-            if shown {
-                // Showing a Qt window lets it re-apply its own geometry: put it back where the UI wants it.
-                let _ = self.api.place(entry.hwnd, self.screen_rect(entry));
+            if pod == Some(name.as_str()) {
+                // Showing a Qt window lets it re-apply its own geometry: place and clip it again right after.
+                let _ = self.layout(entry, true);
+            } else {
+                self.api.set_visible(entry.hwnd, false);
             }
         }
         *self.active.lock().unwrap() = pod.filter(|p| attached.contains_key(*p)).map(str::to_string);
@@ -258,7 +333,7 @@ pub mod win {
 
     #[repr(C)]
     #[derive(Default)]
-    struct Rc {
+    pub(super) struct Rc {
         left: i32,
         top: i32,
         right: i32,
@@ -274,6 +349,12 @@ pub mod win {
 
     type EnumProc = unsafe extern "system" fn(isize, isize) -> i32;
 
+    #[link(name = "gdi32")]
+    unsafe extern "system" {
+        fn CreateRectRgn(left: i32, top: i32, right: i32, bottom: i32) -> isize;
+        fn DeleteObject(object: isize) -> i32;
+    }
+
     unsafe extern "system" {
         fn EnumWindows(proc: EnumProc, lparam: isize) -> i32;
         fn GetWindowTextW(hwnd: isize, text: *mut u16, max: i32) -> i32;
@@ -287,6 +368,7 @@ pub mod win {
         fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
         fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
         fn SetForegroundWindow(hwnd: isize) -> i32;
+        fn SetWindowRgn(hwnd: isize, region: isize, redraw: i32) -> i32;
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
         fn CloseHandle(handle: isize) -> i32;
         fn QueryFullProcessImageNameW(process: isize, flags: u32, name: *mut u16, size: *mut u32) -> i32;
@@ -298,6 +380,7 @@ pub mod win {
         pub(super) fn DestroyWindow(hwnd: isize) -> i32;
         pub(super) fn GetWindow(hwnd: isize, cmd: u32) -> isize;
         pub(super) fn GetWindowLongPtrW(hwnd: isize, index: i32) -> isize;
+        pub(super) fn GetWindowRgnBox(hwnd: isize, rect: *mut Rc) -> i32;
     }
 
     fn last_os_error(what: &str) -> String {
@@ -413,9 +496,27 @@ pub mod win {
             unsafe { ShowWindow(hwnd, if visible { SW_SHOWNA } else { SW_HIDE }) };
         }
 
+        fn set_clip(&self, hwnd: isize, visible: Option<Rect>) {
+            // SAFETY: plain Win32 calls. After a successful SetWindowRgn the system owns the region handle.
+            unsafe {
+                match visible {
+                    None => {
+                        SetWindowRgn(hwnd, 0, 1);
+                    }
+                    Some(r) => {
+                        let region = CreateRectRgn(r.x, r.y, r.x + r.w, r.y + r.h);
+                        if region != 0 && SetWindowRgn(hwnd, region, 1) == 0 {
+                            DeleteObject(region);
+                        }
+                    }
+                }
+            }
+        }
+
         fn restore(&self, hwnd: isize, original: &Original) -> Result<(), String> {
             // SAFETY: plain Win32 window calls.
             unsafe {
+                SetWindowRgn(hwnd, 0, 1); // the native window comes back whole
                 SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
                 ShowWindow(hwnd, SW_SHOWNA);
                 let r = original.rect;
@@ -552,6 +653,14 @@ pub mod win {
             RealWin { exe_filter: None }.client_origin(hwnd)
         }
 
+        /// Bounding box of the window region (relative to the window top-left), `None` when it has no region.
+        pub fn region_box(hwnd: isize) -> Option<Rect> {
+            let mut rc = Rc::default();
+            // SAFETY: valid out-pointer.
+            let kind = unsafe { GetWindowRgnBox(hwnd, &mut rc) };
+            (kind != 0).then_some(Rect { x: rc.left, y: rc.top, w: rc.right - rc.left, h: rc.bottom - rc.top })
+        }
+
         pub fn rect_of(hwnd: isize) -> Rect {
             let mut rc = Rc::default();
             // SAFETY: valid out-pointer.
@@ -569,9 +678,9 @@ mod tests {
     // ----- pure rules -----
 
     #[test]
-    fn scale_rect_converts_css_to_physical_pixels_and_never_goes_negative() {
+    fn scale_rect_converts_css_to_physical_pixels_and_keeps_the_size_positive() {
         assert_eq!(scale_rect(10.0, 20.5, 300.0, 200.0, 1.5), Rect { x: 15, y: 31, w: 450, h: 300 });
-        assert_eq!(scale_rect(-5.0, -1.0, 0.0, -9.0, 1.0), Rect { x: 0, y: 0, w: 1, h: 1 });
+        assert_eq!(scale_rect(-5.0, -1.0, 0.0, -9.0, 1.0), Rect { x: -5, y: -1, w: 1, h: 1 }, "a scrolled stage starts above the page");
         assert_eq!(scale_rect(1.0, 1.0, 100.0, 100.0, 0.0), Rect { x: 1, y: 1, w: 100, h: 100 }, "bad dpr falls back to 1");
         assert_eq!(scale_rect(f64::NAN, 0.0, f64::INFINITY, 5.0, 2.0).x, 0);
     }
@@ -708,6 +817,9 @@ mod tests {
         fn set_visible(&self, hwnd: isize, visible: bool) {
             self.log(format!("{}:{hwnd}", if visible { "show" } else { "hide" }));
         }
+        fn set_clip(&self, hwnd: isize, visible: Option<Rect>) {
+            self.log(format!("clip:{hwnd}@{}", visible.map_or("none".to_string(), describe)));
+        }
         fn restore(&self, hwnd: isize, original: &Original) -> Result<(), String> {
             self.log(format!("restore:{hwnd}@{}", describe(original.rect)));
             Ok(())
@@ -816,12 +928,12 @@ mod tests {
 
         win.calls.borrow_mut().clear();
         embedder.follow(); // nothing moved yet: same place
-        assert_eq!(win.calls(), vec![format!("place:22@{WIDE_SCREEN}")]);
+        assert_eq!(win.calls(), vec!["show:22".to_string(), format!("place:22@{WIDE_SCREEN}")]);
 
         *win.origin.borrow_mut() = Some((0, 0)); // the app window was dragged to the top-left corner
         win.calls.borrow_mut().clear();
         embedder.follow();
-        assert_eq!(win.calls(), vec!["place:22@907,20 435x870"]);
+        assert_eq!(win.calls(), vec!["show:22", "place:22@907,20 435x870"]);
 
         embedder.activate(None);
         win.calls.borrow_mut().clear();
@@ -870,6 +982,91 @@ mod tests {
         assert!(embedder.state().attached.is_empty());
     }
 
+    // ----- scrolling: fixed size, clipped to the viewport -----
+
+    const PAGE: Rect = Rect { x: 0, y: 0, w: 2000, h: 889 };
+
+    /// A stage that starts `top` pixels from the top of the page (negative when scrolled up past it).
+    fn stage_at(top: i32) -> Rect {
+        Rect { x: 300, y: top, w: 1650, h: 870 }
+    }
+
+    #[test]
+    fn clip_math_intersects_and_translates_rectangles() {
+        let a = Rect { x: 0, y: 0, w: 100, h: 100 };
+        assert_eq!(intersect(a, Rect { x: 50, y: -20, w: 100, h: 60 }), Some(Rect { x: 50, y: 0, w: 50, h: 40 }));
+        assert_eq!(intersect(a, Rect { x: 100, y: 0, w: 10, h: 10 }), None, "touching edges share no pixel");
+        assert_eq!(intersect(a, Rect { x: -50, y: -50, w: 10, h: 10 }), None);
+        assert_eq!(relative_to(Rect { x: 50, y: 10, w: 5, h: 6 }, Rect { x: 40, y: 4, w: 99, h: 99 }), Rect { x: 10, y: 6, w: 5, h: 6 });
+    }
+
+    #[test]
+    fn scrolling_keeps_the_pod_size_and_clips_the_part_outside_the_viewport() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.set_viewport(PAGE);
+        embedder.attach("pod2", stage_at(20)).unwrap();
+        embedder.activate(Some("pod2"));
+
+        // Stage bottom (20 + 870) is one pixel below the viewport: 1 row clipped, size is the full 435x870.
+        win.calls.borrow_mut().clear();
+        embedder.resize("pod2", stage_at(20)).unwrap();
+        assert_eq!(win.calls(), vec!["show:22", "clip:22@0,0 435x869", "place:22@1907,220 435x870"]);
+
+        // Scrolled 300 px down: the pod moves up with the stage, same size, its top 300 px are hidden.
+        win.calls.borrow_mut().clear();
+        embedder.resize("pod2", stage_at(-300)).unwrap();
+        assert_eq!(win.calls(), vec!["show:22", "clip:22@0,300 435x570", "place:22@1907,-100 435x870"]);
+
+        // Scrolled back so it is whole again: no clip at all.
+        embedder.set_viewport(Rect { h: 1200, ..PAGE });
+        win.calls.borrow_mut().clear();
+        embedder.resize("pod2", stage_at(20)).unwrap();
+        assert_eq!(win.calls(), vec!["show:22", "clip:22@none", "place:22@1907,220 435x870"]);
+    }
+
+    #[test]
+    fn a_pod_scrolled_completely_out_of_view_is_hidden_and_comes_back() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.set_viewport(PAGE);
+        embedder.attach("pod2", stage_at(20)).unwrap();
+        embedder.activate(Some("pod2"));
+
+        win.calls.borrow_mut().clear();
+        embedder.resize("pod2", stage_at(-900)).unwrap();
+        assert_eq!(win.calls(), vec!["hide:22"], "nothing to draw, nothing placed");
+
+        win.calls.borrow_mut().clear();
+        embedder.resize("pod2", stage_at(-100)).unwrap();
+        assert_eq!(win.calls(), vec!["show:22", "clip:22@0,100 435x770", "place:22@1907,100 435x870"]);
+    }
+
+    #[test]
+    fn a_tab_that_is_not_active_is_never_shown_by_scrolling() {
+        let win = FakeWin::with(&[("wa-pod1", 11), ("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.set_viewport(PAGE);
+        embedder.attach("pod1", stage_at(20)).unwrap();
+        embedder.attach("pod2", stage_at(20)).unwrap();
+        embedder.activate(Some("pod2"));
+        win.calls.borrow_mut().clear();
+        embedder.resize("pod1", stage_at(-100)).unwrap();
+        assert!(!win.calls().iter().any(|c| c.starts_with("show")), "{:?}", win.calls());
+    }
+
+    #[test]
+    fn follow_clips_too_after_the_app_window_moves() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.set_viewport(PAGE);
+        embedder.attach("pod2", stage_at(-300)).unwrap();
+        embedder.activate(Some("pod2"));
+        win.calls.borrow_mut().clear();
+        embedder.follow();
+        assert_eq!(win.calls(), vec!["show:22", "clip:22@0,300 435x570", "place:22@1907,-100 435x870"]);
+    }
+
     // ----- real user32 with dummy windows (never a pod) -----
 
     const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
@@ -903,6 +1100,43 @@ mod tests {
         assert_eq!(dummy::rect_of(pod), expected(moved), "and repeating it does not drift");
 
         embedder.detach_all();
+        for hwnd in [pod, host] {
+            dummy::destroy(hwnd);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_win32_clips_the_window_to_the_viewport_and_clears_the_clip_on_detach() {
+        use win::{RealWin, dummy};
+
+        let host = dummy::window("agentautox1-test-host3", WS_OVERLAPPEDWINDOW, Rect { x: 50, y: 50, w: 900, h: 700 });
+        let pod = dummy::qt_like_window("wa-agentautox1-clip", Rect { x: 200, y: 120, w: 400, h: 800 });
+        assert!(host != 0 && pod != 0);
+
+        let embedder = Embedder::new(RealWin { exe_filter: None }, host);
+        embedder.set_viewport(Rect { x: 0, y: 0, w: 1000, h: 600 });
+        // 400x800 native (1:2) in a 300x600 box starting 100 px above the page: pod 300x600 at y = -100.
+        embedder.attach("agentautox1-clip", Rect { x: 50, y: -100, w: 300, h: 600 }).unwrap();
+        embedder.activate(Some("agentautox1-clip"));
+
+        let r = dummy::rect_of(pod);
+        assert_eq!((r.w, r.h), (300, 600), "full size even though 100 px are above the viewport");
+        assert_eq!(dummy::client_origin(host).1 - 100, r.y, "moves with the stage");
+        assert_eq!(dummy::region_box(pod), Some(Rect { x: 0, y: 100, w: 300, h: 500 }), "top 100 px clipped away");
+        assert!(dummy::visible(pod));
+
+        // Scrolled to where the whole pod is inside the viewport: the clip goes away, the size stays.
+        embedder.resize("agentautox1-clip", Rect { x: 50, y: 0, w: 300, h: 600 }).unwrap();
+        assert_eq!(dummy::region_box(pod), None);
+        assert_eq!((dummy::rect_of(pod).w, dummy::rect_of(pod).h), (300, 600));
+
+        // Clip again, then hand the window back: no region left.
+        embedder.resize("agentautox1-clip", Rect { x: 50, y: -100, w: 300, h: 600 }).unwrap();
+        assert!(dummy::region_box(pod).is_some());
+        embedder.detach_all();
+        assert_eq!(dummy::region_box(pod), None, "native window intact after un-embedding");
+
         for hwnd in [pod, host] {
             dummy::destroy(hwnd);
         }
