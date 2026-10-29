@@ -8,6 +8,7 @@ mod pods;
 mod profiles;
 mod settings;
 mod util;
+mod pairing;
 mod warmup;
 
 use serde::Serialize;

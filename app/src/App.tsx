@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence, motion } from "framer-motion";
 import { Flame, Hash, LogOut, MessageCircleMore, Settings as SettingsIcon, Smartphone, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { api, type LogLine } from "./lib/api";
+import { api, type LogLine, type PairingCard } from "./lib/api";
 import { usePodCreation } from "./lib/podCreation";
 import { applyTheme, loadTheme, type Theme } from "./lib/theme";
 import Ajustes from "./sections/Ajustes";
@@ -27,6 +27,7 @@ function useWarmupRun() {
   const [running, setRunning] = useState(false);
   const [profile, setProfile] = useState<string | null>(null);
   const [logs, setLogs] = useState<LogLine[]>([]);
+  const [pairing, setPairing] = useState<PairingCard[]>([]);
 
   const sync = useCallback(async () => {
     try {
@@ -34,6 +35,7 @@ function useWarmupRun() {
       setRunning(s.running);
       setProfile(s.profile);
       setLogs(s.logs);
+      setPairing(s.pairing ?? []);
     } catch {
       /* backend not ready yet */
     }
@@ -48,9 +50,11 @@ function useWarmupRun() {
         // The profile name arrives with the first status sync after a start.
         void api.warmupStatus().then((s) => setProfile(s.profile)).catch(() => undefined);
       }),
+      listen<PairingCard[]>("warmup-pairing", (e) => setPairing(e.payload)),
       listen("warmup-exit", () => {
         setRunning(false);
         setProfile(null);
+        setPairing([]);
       }),
     ];
     return () => {
@@ -58,7 +62,7 @@ function useWarmupRun() {
     };
   }, [sync]);
 
-  return { running, profile, logs, clearLogs: () => setLogs([]) };
+  return { running, profile, logs, pairing, clearLogs: () => setLogs([]) };
 }
 
 export default function App() {
@@ -110,7 +114,7 @@ export default function App() {
           >
             {section === "pods" && <MultiWhatsApp creation={podCreation} />}
             {section === "bots" && (
-              <CalentadorBots running={warmup.running} profile={warmup.profile} logs={warmup.logs} onClearLogs={warmup.clearLogs} />
+              <CalentadorBots running={warmup.running} profile={warmup.profile} logs={warmup.logs} pairing={warmup.pairing} onClearLogs={warmup.clearLogs} />
             )}
             {section === "numeros" && <Numeros />}
             {section === "ajustes" && <Ajustes theme={theme} onTheme={setTheme} />}

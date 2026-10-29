@@ -83,3 +83,29 @@
 .embed-popout { margin-left: auto; }
 .embed-stage { height: min(68vh, 720px); border-radius: 14px; background: var(--log-bg); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; }
 .link-btn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; }
+
+/* Pairing code card shown inside the running profile's card. */
+.pairing-card {
+  margin: 12px 0 4px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--card));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pairing-who { font-size: 13.5px; color: var(--muted); }
+.pairing-who strong { color: var(--text); }
+.pairing-code-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.pairing-code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 48px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  line-height: 1.1;
+  color: var(--text);
+  user-select: all;
+}
+.pairing-steps { margin: 0; font-size: 13.5px; line-height: 1.5; }
+.pairing-hint { color: var(--muted); }

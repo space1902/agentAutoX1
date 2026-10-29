@@ -43,11 +43,18 @@ export interface LogLine {
   line: string;
 }
 
+export interface PairingCard {
+  id: string;
+  code: string;
+  phone: string | null;
+}
+
 export interface WarmupStatus {
   running: boolean;
   profile: string | null;
   pid: number | null;
   logs: LogLine[];
+  pairing: PairingCard[];
 }
 
 export type NumberSource = "pod" | "externo" | "pod sin calentar";

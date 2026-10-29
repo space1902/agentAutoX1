@@ -1,6 +1,7 @@
 //! Warm-up profile runner: spawns `node perfil.js usar "<profile>"`, streams its output to the UI
 //! and stops the whole process tree cleanly so Baileys sessions are closed (not killed mid-write).
 
+use crate::pairing::{PairingCard, PairingTracker};
 use crate::settings::Settings;
 use crate::util::{hidden_command, hidden_group_command};
 use serde::Serialize;
@@ -27,6 +28,7 @@ struct Inner {
     profile: Option<String>,
     pid: Option<u32>,
     logs: VecDeque<LogLine>,
+    pairing: PairingTracker,
 }
 
 /// Shared runner state (cheap to clone; all clones see the same data).
@@ -40,6 +42,7 @@ pub struct Status {
     pub profile: Option<String>,
     pub pid: Option<u32>,
     pub logs: Vec<LogLine>,
+    pub pairing: Vec<PairingCard>,
 }
 
 #[derive(Clone, Serialize)]
@@ -51,19 +54,26 @@ struct ExitEvent {
 impl Runner {
     pub fn status(&self) -> Status {
         let g = self.0.lock().unwrap();
-        Status { running: g.pid.is_some(), profile: g.profile.clone(), pid: g.pid, logs: g.logs.iter().cloned().collect() }
+        Status { running: g.pid.is_some(), profile: g.profile.clone(), pid: g.pid, logs: g.logs.iter().cloned().collect(), pairing: g.pairing.cards() }
     }
 
     fn push(&self, app: &AppHandle, stream: &str, line: String) {
         let entry = LogLine { stream: stream.to_string(), line };
+        let mut pairing_changed = None;
         {
             let mut g = self.0.lock().unwrap();
+            if stream == "stdout" && g.pairing.feed(&entry.line) {
+                pairing_changed = Some(g.pairing.cards());
+            }
             if g.logs.len() >= MAX_LOG_LINES {
                 g.logs.pop_front();
             }
             g.logs.push_back(entry.clone());
         }
         let _ = app.emit("warmup-log", entry);
+        if let Some(cards) = pairing_changed {
+            let _ = app.emit("warmup-pairing", cards);
+        }
     }
 
     fn is_running(&self, pid: u32) -> bool {
@@ -87,6 +97,7 @@ impl Runner {
             g.pid = Some(0);
             g.profile = Some(profile.to_string());
             g.logs.clear();
+            g.pairing.clear();
         }
         let spawned = hidden_group_command(&settings.node_path)
             .arg("perfil.js")
@@ -130,7 +141,9 @@ impl Runner {
                 let mut g = runner.0.lock().unwrap();
                 g.pid = None;
                 g.profile = None;
+                g.pairing.clear();
             }
+            let _ = app.emit("warmup-pairing", Vec::<PairingCard>::new());
             let _ = app.emit("warmup-exit", ExitEvent { code });
         });
         Ok(self.status())

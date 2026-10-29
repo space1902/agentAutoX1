@@ -1,23 +1,24 @@
 import { AnimatePresence } from "framer-motion";
-import { ArrowLeft, ArrowRight, Check, Flame, Link2, Loader2, MessagesSquare, Pencil, Play, Plus, RefreshCw, Square, Trash2, Users } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, Copy, Flame, Link2, Loader2, MessagesSquare, Pencil, Play, Plus, RefreshCw, Square, Trash2, Users } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { HealthBadge, useLineHealth } from "../components/Health";
 import LinkPodsModal from "../components/LinkPods";
 import { Modal, Warning } from "../components/Modal";
 import NumberPicker, { buildItems, initialSelection, toSelections } from "../components/NumberPicker";
 import { Banner, Card, Notice, Pill, SkeletonGrid, StatCard } from "../components/ui";
-import { api, errorText, type LinkTarget, type LogLine, type ProfileView, type ProfilesData } from "../lib/api";
+import { api, errorText, type LinkTarget, type LogLine, type PairingCard, type ProfileView, type ProfilesData } from "../lib/api";
 
 interface Props {
   running: boolean;
   profile: string | null;
   logs: LogLine[];
+  pairing: PairingCard[];
   onClearLogs: () => void;
 }
 
 type Dialog = { kind: "link"; profile: string; targets: LinkTarget[] } | { kind: "create" } | { kind: "edit"; profile: ProfileView } | { kind: "delete"; profile: ProfileView } | null;
 
-export default function CalentadorBots({ running, profile, logs, onClearLogs }: Props) {
+export default function CalentadorBots({ running, profile, logs, pairing, onClearLogs }: Props) {
   const [data, setData] = useState<ProfilesData | null>(null);
   const [podsError, setPodsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -165,6 +166,7 @@ export default function CalentadorBots({ running, profile, logs, onClearLogs }: 
                     </span>
                   ))}
                 </div>
+                {isThis && pairing.map((c) => <PairingCodeCard key={c.id} card={c} />)}
                 <div className="row-actions">
                   {isThis ? (
                     <button className="btn sm danger" onClick={() => void stop()} disabled={pending === "stop"}>
@@ -246,6 +248,42 @@ export default function CalentadorBots({ running, profile, logs, onClearLogs }: 
           <DeleteProfileModal key="delete" profile={dialog.profile} onClose={() => setDialog(null)} onDeleted={saved} />
         )}
       </AnimatePresence>
+    </div>
+  );
+}
+
+/** Big pairing code for one number: the engine printed it and is waiting for it to be typed on the phone. */
+function PairingCodeCard({ card }: { card: PairingCard }) {
+  const [copied, setCopied] = useState(false);
+  const who = card.phone ? `${card.id} (+${card.phone})` : card.id;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(card.code);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      /* clipboard unavailable: the code stays selectable */
+    }
+  };
+
+  return (
+    <div className="pairing-card" role="status">
+      <div className="pairing-who">
+        Código de vinculación para <strong>{who}</strong>
+      </div>
+      <div className="pairing-code-row">
+        <span className="pairing-code" aria-label={`Código ${card.code}`}>
+          {card.code}
+        </span>
+        <button className="btn sm secondary" onClick={() => void copy()}>
+          {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />} {copied ? "Copiado" : "Copiar"}
+        </button>
+      </div>
+      <p className="pairing-steps">
+        En el celular de ese número: WhatsApp &gt; Dispositivos vinculados &gt; Vincular un dispositivo &gt; Vincular con el número de teléfono, y escribe el código.
+      </p>
+      <small className="pairing-hint">El código vence en un par de minutos. Si vence, aparecerá uno nuevo aquí.</small>
     </div>
   );
 }
