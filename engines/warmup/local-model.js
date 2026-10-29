@@ -11,6 +11,7 @@ export function resolveLocalModel(config) {
   return {
     url: local.url || 'http://localhost:11434',
     model: local.model || 'qwen2.5:7b',
+    cpuOnly: local.cpuOnly === true || config?.ai?.localGpu === 'cpu',
   };
 }
 
@@ -32,6 +33,8 @@ export async function generateLocal({
   system,
   prompt,
   maxTokens = 120,
+  // No usable video card: ask Ollama to keep every layer on the CPU instead of probing the GPU.
+  cpuOnly = false,
   fetchImpl = fetch,
 }) {
   const response = await fetchImpl(`${url.replace(/\/+$/, '')}/api/chat`, {
@@ -42,7 +45,7 @@ export async function generateLocal({
       stream: false,
       // Keep the model in VRAM between turns so it is not reloaded every message.
       keep_alive: '1h',
-      options: { num_predict: maxTokens, temperature: 0.9 },
+      options: { num_predict: maxTokens, temperature: 0.9, ...(cpuOnly ? { num_gpu: 0 } : {}) },
       messages: [
         { role: 'system', content: system },
         { role: 'user', content: prompt },

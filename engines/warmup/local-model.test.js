@@ -13,10 +13,11 @@ test('resolveLocalModel applies defaults and config overrides', () => {
   assert.deepEqual(resolveLocalModel({}), {
     url: 'http://localhost:11434',
     model: 'qwen2.5:7b',
+    cpuOnly: false,
   });
   assert.deepEqual(
     resolveLocalModel({ localModel: { model: 'llama3.1:8b', url: 'http://pc:11434' } }),
-    { url: 'http://pc:11434', model: 'llama3.1:8b' },
+    { url: 'http://pc:11434', model: 'llama3.1:8b', cpuOnly: false },
   );
 });
 
@@ -103,4 +104,16 @@ test('generateUsableMessage returns null after two failed attempts', async () =>
   assert.equal(text, null);
   assert.equal(calls, 2);
   assert.equal(warnings.length, 2);
+});
+
+test('generateLocal sends num_gpu 0 only when asked to run on CPU', async () => {
+  const bodies = [];
+  const fetchImpl = async (url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return { ok: true, json: async () => ({ message: { content: 'hola' } }) };
+  };
+  await generateLocal({ url: 'http://x', model: 'm', system: 's', prompt: 'p', fetchImpl });
+  await generateLocal({ url: 'http://x', model: 'm', system: 's', prompt: 'p', cpuOnly: true, fetchImpl });
+  assert.equal('num_gpu' in bodies[0].options, false);
+  assert.equal(bodies[1].options.num_gpu, 0);
 });

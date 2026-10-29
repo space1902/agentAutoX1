@@ -252,3 +252,10 @@ test('generateUsableMessage does not retry after a budget stop', async () => {
   assert.equal(text, null);
   assert.equal(calls, 1);
 });
+
+test('ai.localGpu cpu makes local generation (and the budget fallback) run without GPU', async () => {
+  const fetchImpl = fakeFetch(() => ollamaChat('hola'));
+  const { ai } = make({ provider: 'ollama', model: 'gemma3:1b', localGpu: 'cpu' }, { fetchImpl });
+  await ai.generate({ system: 's', prompt: 'p' });
+  assert.equal(fetchImpl.calls[0].body.options.num_gpu, 0);
+});

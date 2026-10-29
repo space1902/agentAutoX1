@@ -138,7 +138,15 @@ export function createAi({
       label: settings.label,
       settings,
       generate: ({ system, prompt, maxTokens = 120 }) =>
-        generateLocal({ url: settings.baseUrl, model: settings.model, system, prompt, maxTokens, fetchImpl }),
+        generateLocal({
+          url: settings.baseUrl,
+          model: settings.model,
+          system,
+          prompt,
+          maxTokens,
+          cpuOnly: settings.local.cpuOnly,
+          fetchImpl,
+        }),
     };
   }
 
@@ -184,6 +192,7 @@ export function createAi({
           system,
           prompt,
           maxTokens,
+          cpuOnly: settings.local.cpuOnly,
           fetchImpl,
         });
       }
