@@ -125,3 +125,16 @@ test('tick, decisions and decision-status work through the command layer', async
   await assert.rejects(runAdsCommand('decision-status', { id: 'x', status: 'done' }, c), AdsError);
   await assert.rejects(runAdsCommand('decision-status', { id: '1', status: 'borrar' }, c), AdsError);
 });
+
+test('alerts commands: config round trip, wa status and an empty alert list', async () => {
+  const c = ctx();
+  const got = await runAdsCommand('alerts-config-get', {}, c);
+  assert.equal(got.config.allowActions, false);
+  assert.equal(got.defaults.pollMinutes, 15);
+  const set = await runAdsCommand('alerts-config-set', { pollMinutes: 20, whatsapp: { alertTo: '316 758 5233' } }, c);
+  assert.equal(set.config.pollMinutes, 20);
+  assert.equal(set.config.whatsapp.alertTo, '573167585233');
+  await assert.rejects(runAdsCommand('alerts-config-set', { thresholds: { targetCpa: 99999999 } }, c), AdsError);
+  assert.deepEqual(await runAdsCommand('wa-status', {}, c), { linked: false, phoneMasked: '' });
+  assert.deepEqual(await runAdsCommand('alerts-recent', {}, c), { alerts: [], pausedUntil: null });
+});

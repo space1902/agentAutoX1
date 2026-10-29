@@ -29,7 +29,7 @@ try {
   if (args.json && args.json !== true) payload = JSON.parse(args.json);
   else if (args.stdin) payload = JSON.parse((await readStdin()).trim() || '{}');
   // Command-line flags (--from/--to/--group) and a JSON payload (config-set) share one object.
-  const merged = command === 'config-set' ? payload : { ...payload, ...args };
+  const merged = ['config-set', 'alerts-config-set'].includes(command) ? payload : { ...payload, ...args };
 
   try {
     print({ ok: true, data: await runAdsCommand(command, merged, { dataDir: resolveDataDir(ROOT) }) });

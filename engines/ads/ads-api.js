@@ -4,6 +4,10 @@ import { DEFAULT_CONFIG, ConfigError, adsDir, loadConfig, saveConfig } from './c
 import { MetaApi, friendlyMetaError } from './meta-api.js';
 import { fetchAccount } from './meta-data.js';
 import { buildReport } from './report.js';
+import { existsSync } from 'node:fs';
+import { AlertsConfigError, ALERTS_DEFAULTS, loadAlertsConfig, saveAlertsConfig } from './monitor/alerts-config.js';
+import { monitorDbPath, readWaStatus } from './monitor/runner.js';
+import { createStore as createMonitorStore } from './monitor/store.js';
 import { runTick } from './tick.js';
 import { openStoreAt } from './store.js';
 import { DEFAULT_TIMEZONE, redact, runSync } from './sync.js';
@@ -12,7 +16,7 @@ import { daysBetween, isIsoDate, localParts } from './time.js';
 export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
 const GROUPS = ['ct', 'campaign', 'ad'];
-const COMMANDS = ['sync', 'report', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status'];
+const COMMANDS = ['sync', 'report', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status'];
 const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
 export class AdsError extends Error {}
@@ -52,6 +56,26 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
     } catch (error) {
       if (error instanceof ConfigError) throw new AdsError(error.message);
       throw error;
+    }
+  }
+
+  if (command === 'alerts-config-get') return { config: loadAlertsConfig(dataDir), defaults: ALERTS_DEFAULTS };
+  if (command === 'alerts-config-set') {
+    try {
+      return { config: saveAlertsConfig(dataDir, args ?? {}) };
+    } catch (error) {
+      if (error instanceof AlertsConfigError) throw new AdsError(error.message);
+      throw error;
+    }
+  }
+  if (command === 'wa-status') return readWaStatus(dataDir);
+  if (command === 'alerts-recent') {
+    if (!existsSync(monitorDbPath(dataDir))) return { alerts: [], pausedUntil: null };
+    const monitorStore = createMonitorStore(monitorDbPath(dataDir));
+    try {
+      return { alerts: monitorStore.recentAlerts(60), pausedUntil: monitorStore.getKv('pausedUntil') };
+    } finally {
+      monitorStore.close();
     }
   }
 
