@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api, type Light, type LineHealth } from "../lib/api";
+import { Tooltip } from "./Tooltip";
 
 const LIGHT_LABEL: Record<Light, string> = { verde: "Línea sana", amarillo: "Atención", rojo: "En riesgo" };
 
@@ -26,59 +27,41 @@ export function useLineHealth() {
 
 /** Dot + score with a hover/focus tooltip that shows how the score is made up. */
 export function HealthBadge({ health, compact = false }: { health: LineHealth | undefined; compact?: boolean }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const [place, setPlace] = useState<CSSProperties>({});
   if (!health) return <span className="muted">–</span>;
   const label = LIGHT_LABEL[health.light];
-
-  // The tooltip is position: fixed so scrolling tables never clip it; flip above when there is no room below.
-  const open = () => {
-    const rect = ref.current?.getBoundingClientRect();
-    if (!rect) return;
-    const width = 290;
-    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
-    const below = window.innerHeight - rect.bottom;
-    setPlace(below > 260 ? { left, top: rect.bottom + 8 } : { left, bottom: window.innerHeight - rect.top + 8 });
-  };
-
+  const body = (
+    <div className="health-tip">
+      <strong>
+        {label} · fuerza {health.score}/100
+      </strong>
+      <small>
+        Fase: {health.phase.name}
+        {health.linked ? "" : " · sin vincular"}
+      </small>
+      <ul>
+        {health.components.map((c) => (
+          <li key={c.key}>
+            <span>
+              {c.label} <em>{c.points}/{c.max}</em>
+            </span>
+            <small>{c.detail}</small>
+          </li>
+        ))}
+      </ul>
+      {health.reasons.length > 0 && (
+        <ul className="health-reasons">
+          {health.reasons.map((r) => (
+            <li key={r}>{r}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
   return (
-    <span
-      ref={ref}
-      className={`health ${health.light}`}
-      tabIndex={0}
-      aria-label={`${label}, fuerza ${health.score} de 100`}
-      onMouseEnter={open}
-      onFocus={open}
-    >
+    <Tooltip className={`health ${health.light}`} content={body} label={`${label}, fuerza ${health.score} de 100`}>
       <i className="health-dot" aria-hidden />
       <b>{health.score}</b>
       {!compact && <span className="health-label">{label}</span>}
-      <span className="health-tip" role="tooltip" style={place}>
-        <strong>
-          {label} · fuerza {health.score}/100
-        </strong>
-        <small>
-          Fase: {health.phase.name}
-          {health.linked ? "" : " · sin vincular"}
-        </small>
-        <ul>
-          {health.components.map((c) => (
-            <li key={c.key}>
-              <span>
-                {c.label} <em>{c.points}/{c.max}</em>
-              </span>
-              <small>{c.detail}</small>
-            </li>
-          ))}
-        </ul>
-        {health.reasons.length > 0 && (
-          <ul className="health-reasons">
-            {health.reasons.map((r) => (
-              <li key={r}>{r}</li>
-            ))}
-          </ul>
-        )}
-      </span>
-    </span>
+    </Tooltip>
   );
 }

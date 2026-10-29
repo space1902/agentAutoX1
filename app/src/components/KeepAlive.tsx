@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { Clock, Info, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText, type KeepAliveStatus } from "../lib/api";
+import { Tooltip } from "./Tooltip";
 import { Card, Pill, type PillTone } from "./ui";
 
 export const KEEP_ALIVE_HELP =
@@ -35,12 +36,9 @@ export function KeepAliveSwitch({ enabled, onChange }: { enabled: boolean; onCha
   return (
     <div className="keepalive-switch">
       <span id="keepalive-label">Auto revisión de números en los pods</span>
-      <span className="info" tabIndex={0} aria-label={KEEP_ALIVE_HELP}>
+      <Tooltip className="info" content={<p className="info-text">{KEEP_ALIVE_HELP}</p>} label="Qué hace la auto revisión" placement="bottom-end" width={280}>
         <Info size={15} aria-hidden />
-        <span className="info-tip" role="tooltip">
-          {KEEP_ALIVE_HELP}
-        </span>
-      </span>
+      </Tooltip>
       <div className="seg yesno" role="switch" aria-checked={enabled} aria-labelledby="keepalive-label">
         <button className={enabled ? "on" : ""} onClick={() => onChange(true)}>
           Sí
