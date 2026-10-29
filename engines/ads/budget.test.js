@@ -70,3 +70,26 @@ test('computeChanges annotates the previous change of the same entity', () => {
   assert.equal(first.previous, null);
   assert.deepEqual([second.previous.date, Math.round(second.previous.pct)], ['2026-10-14', 20]);
 });
+
+test('parseActivity reads the real Meta shape: nested JSON strings with whole-peso amounts', () => {
+  const real = {
+    event_type: 'update_campaign_budget', object_id: '52556712297737', event_time: '2026-10-27T03:16:44+0000',
+    extra_data: JSON.stringify({
+      new_value: JSON.stringify({ type: 'payment_amount', currency: 'COP', new_value: 13000, additional_type: 'status_string', additional_value: 'Diario' }),
+      old_value: JSON.stringify({ type: 'payment_amount', currency: 'COP', old_value: 10000, additional_type: 'status_string', additional_value: 'Diario' }),
+      type: 'composite_data',
+    }),
+  };
+  assert.deepEqual(parseActivity(real, 'America/Bogota'), {
+    entityType: 'campaign', entityId: '52556712297737', time: Date.parse('2026-10-27T03:16:44Z'), date: '2026-10-26', oldBudget: 10000, newBudget: 13000,
+  });
+});
+
+test('parseActivity ignores lifetime budgets and scheduling-state events', () => {
+  const lifetime = {
+    event_type: 'update_campaign_budget', object_id: 'c1', event_time: '2026-10-27T03:16:44+0000',
+    extra_data: JSON.stringify({ new_value: JSON.stringify({ new_value: 50000, additional_value: 'Total' }), old_value: JSON.stringify({ old_value: 40000, additional_value: 'Total' }) }),
+  };
+  assert.equal(parseActivity(lifetime, 'UTC'), null);
+  assert.equal(parseActivity({ event_type: 'update_campaign_budget_scheduling_state', object_id: 'c1', event_time: '2026-10-27T03:16:44+0000', extra_data: '{}' }, 'UTC'), null);
+});

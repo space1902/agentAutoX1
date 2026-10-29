@@ -23,11 +23,47 @@ export function detectIncreases(history) {
   return out;
 }
 
-const budgetValue = (v) => {
-  const raw = v && typeof v === 'object' ? (v.daily_budget ?? v.budget ?? v.value) : v;
-  const n = Number(raw);
-  return raw == null || raw === '' || !Number.isFinite(n) ? null : n;
+// Meta nests the amount: extra_data is a JSON string whose new_value / old_value are themselves JSON strings like
+// {"type":"payment_amount","currency":"COP","new_value":13000,"additional_value":"Diario"}. Plain numbers and
+// {daily_budget} objects are accepted too. Amounts are whole currency units (COP has no minor unit), the same unit
+// the Graph API returns for daily_budget.
+const AMOUNT_KEYS = ['new_value', 'old_value', 'daily_budget', 'budget', 'value', 'amount'];
+const budgetValue = (v, depth = 0) => {
+  if (v == null || depth > 3) return null;
+  if (typeof v === 'string') {
+    const text = v.trim();
+    if (text.startsWith('{') || text.startsWith('[')) {
+      try {
+        return budgetValue(JSON.parse(text), depth + 1);
+      } catch {
+        return null;
+      }
+    }
+    const n = Number(text);
+    return text !== '' && Number.isFinite(n) ? n : null;
+  }
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'object') {
+    for (const key of AMOUNT_KEYS) if (v[key] !== undefined) return budgetValue(v[key], depth + 1);
+  }
+  return null;
 };
+
+// Lifetime budgets are described as "Total"/"Vitalicio" in additional_value; only daily budgets matter here.
+const isDailyBudget = (extra) => {
+  const kind = String(budgetKind(extra?.new_value) ?? budgetKind(extra?.old_value) ?? '').toLowerCase();
+  return !kind || /diario|daily/.test(kind);
+};
+function budgetKind(v) {
+  if (typeof v === 'string' && v.trim().startsWith('{')) {
+    try {
+      return JSON.parse(v).additional_value;
+    } catch {
+      return null;
+    }
+  }
+  return v && typeof v === 'object' ? v.additional_value : null;
+}
 
 // One /activities row -> { entityType, entityId, time, date, oldBudget, newBudget } or null.
 export function parseActivity(activity, timezone) {
@@ -41,6 +77,7 @@ export function parseActivity(activity, timezone) {
       return null;
     }
   }
+  if (!isDailyBudget(extra)) return null;
   const oldBudget = budgetValue(extra?.old_value);
   const newBudget = budgetValue(extra?.new_value);
   const time = Date.parse(activity.event_time);

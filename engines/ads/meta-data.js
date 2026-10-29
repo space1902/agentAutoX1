@@ -27,7 +27,7 @@ export function parseInsightRow(row) {
     campaignName: row.campaign_name ?? '',
     adsetId: String(row.adset_id ?? ''),
     adsetName: row.adset_name ?? '',
-    country: String(row.country ?? ''),
+    country: row.country && row.country !== 'unknown' ? String(row.country) : '',
     gasto: num(row.spend),
     impressions: num(row.impressions),
     clicks: num(row.clicks),

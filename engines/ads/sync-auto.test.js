@@ -103,3 +103,9 @@ test('without a token the sheet history still builds and no backfill is marked d
   assert.equal(out.sheet.ok, true);
   assert.equal(historyInfo(store).vouchers, 2);
 });
+
+test('Meta\'s "unknown" country is stored as no country', async () => {
+  const { parseInsightRow } = await import('./meta-data.js');
+  assert.equal(parseInsightRow({ date_start: '2026-10-29', ad_id: '1', country: 'unknown', spend: '5' }).country, '');
+  assert.equal(parseInsightRow({ date_start: '2026-10-29', ad_id: '1', country: 'MX', spend: '5' }).country, 'MX');
+});
