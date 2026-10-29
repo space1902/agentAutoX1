@@ -42,9 +42,10 @@ function resultStatus(result, validResult) {
   return normalizeText(result).includes('invalido') ? 'invalid' : 'review';
 }
 
-const ageOf = (ad, today) => {
-  const created = String(ad?.createdTime ?? '').slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(created) ? Math.max(0, daysBetween(created, today)) : null;
+// "Day N": the first day with spend is day 1. null when the ad has not spent yet.
+const dayOf = (ad, today) => {
+  const first = String(ad?.firstSpendDate ?? '');
+  return /^\d{4}-\d{2}-\d{2}$/.test(first) && first <= today ? daysBetween(first, today) + 1 : null;
 };
 
 const addTotals = (to, from) => {
@@ -102,7 +103,7 @@ export function buildReport({ insights, comprobantes, identities = {}, ads = {},
 
   const groups = new Map();
   const daily = new Map(eachDate(from, to).map((d) => [d, blank(d, '')]));
-  const total = blank('', '');
+  const total = { gasto: 0, mensajes: 0, valor: 0, ventas: 0 };
   for (const e of joined.values()) {
     const info = describe(e.adId);
     const g = groupOf(info);
@@ -126,11 +127,12 @@ export function buildReport({ insights, comprobantes, identities = {}, ads = {},
   const rows = [...groups.values()]
     .map(({ adIds, hasAction, ...row }) => {
       const metrics = withMetrics(row);
-      const ages = [...adIds].map((id) => ageOf(ads[id], today)).filter((n) => n !== null);
+      const ages = [...adIds].map((id) => dayOf(ads[id], today)).filter((n) => n !== null);
       const single = group === 'ad' ? ads[row.adId] : null;
       return {
         ...metrics,
         ageDays: ages.length ? Math.max(...ages) : null,
+        firstSpendDate: [...adIds].map((id) => ads[id]?.firstSpendDate).filter(Boolean).sort()[0] ?? null,
         effectiveStatus: single?.effectiveStatus ?? null,
         action: hasAction ? suggestAction(metrics, config.thresholds) : null,
       };

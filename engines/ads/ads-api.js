@@ -37,6 +37,13 @@ function checkRange({ from, to }) {
   if (from > to || daysBetween(from, to) > MAX_RANGE_DAYS) throw new AdsError(`El rango de fechas no es válido (máximo ${MAX_RANGE_DAYS} días).`);
 }
 
+// Day 1 of an ad = first day with spend; derived from the stored daily insights so it is always current.
+function withFirstSpend(ads, first) {
+  const out = { ...ads };
+  for (const [id, date] of Object.entries(first)) out[id] = { ...(out[id] ?? {}), firstSpendDate: date };
+  return out;
+}
+
 const accountTimezone = (store) => store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
 
 export async function runAdsCommand(command, args, { dataDir, env = process.env, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
@@ -100,7 +107,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       insights: store.insightsBetween(args.from, args.to),
       comprobantes: store.comprobantesBetween(args.from, args.to),
       identities: store.identities(),
-      ads: store.adsMap(),
+      ads: withFirstSpend(store.adsMap(), store.firstSpendMap()),
       config,
       from: args.from,
       to: args.to,

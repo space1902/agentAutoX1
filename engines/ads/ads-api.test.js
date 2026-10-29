@@ -50,7 +50,8 @@ test('sync then report returns KPIs, rows with actions, daily series and masked 
   assert.equal(report.kpis.roas, 3);
   assert.equal(report.rows[0].label, 'CT 01');
   assert.equal(report.rows[0].action.label, 'Escalar');
-  assert.equal(report.rows[0].ageDays, 4);
+  assert.equal(report.rows[0].ageDays, 2); // first spend 2026-10-28 = day 1
+  assert.equal(report.rows[0].firstSpendDate, '2026-10-28');
   assert.equal(report.comprobantes.length, 2);
   assert.equal(report.reviewCount, 1);
   assert.equal(JSON.stringify(report).includes('573001234567'), false);

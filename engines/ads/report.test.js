@@ -34,8 +34,8 @@ const identities = {
   X: { adName: 'Otro', campaignId: 'c9', campaignName: 'Branding' },
 };
 const ads = {
-  A: { createdTime: '2026-10-25T10:00:00-0500', effectiveStatus: 'ACTIVE' },
-  B: { createdTime: '2026-10-27T10:00:00-0500', effectiveStatus: 'ACTIVE' },
+  A: { createdTime: '2026-10-24T10:00:00-0500', firstSpendDate: '2026-10-26', effectiveStatus: 'ACTIVE' },
+  B: { createdTime: '2026-10-27T10:00:00-0500', firstSpendDate: '2026-10-28', effectiveStatus: 'ACTIVE' },
   C: { createdTime: '2026-10-20T10:00:00-0500', effectiveStatus: 'PAUSED' },
 };
 const run = (group = 'ct', overrides = {}) =>
@@ -84,12 +84,15 @@ test('group by CT merges campaigns of the same code and keeps unattributed payme
   assert.equal(byLabel['Sin anuncio'].valor, 14000);
 });
 
-test('rows know the age of their oldest ad', () => {
+test('day N counts from the first day with spend, not from created_time, and is null before any spend', () => {
   const { rows } = run('ct');
   assert.equal(rows.find((r) => r.label === 'CT 01').ageDays, 4);
   const adRows = run('ad').rows;
   assert.equal(adRows.find((r) => r.adId === 'B').ageDays, 2);
   assert.equal(adRows.find((r) => r.adId === 'A').effectiveStatus, 'ACTIVE');
+  assert.equal(adRows.find((r) => r.adId === 'A').firstSpendDate, '2026-10-26');
+  const noSpend = run('ad', { ads: { ...ads, B: { createdTime: ads.B.createdTime } } }).rows;
+  assert.equal(noSpend.find((r) => r.adId === 'B').ageDays, null);
 });
 
 test('group by campaign and by ad', () => {

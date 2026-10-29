@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS insights (
 CREATE INDEX IF NOT EXISTS insights_ad ON insights (ad_id, date);
 CREATE TABLE IF NOT EXISTS ads (
   ad_id TEXT PRIMARY KEY, name TEXT NOT NULL, created_time TEXT NOT NULL, effective_status TEXT NOT NULL,
-  campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL, adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, updated_at INTEGER NOT NULL
+  campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL, adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, updated_at INTEGER NOT NULL,
+  first_spend_date TEXT -- first day with spend > 0: "day 1" of the ad (created_time is only a reference)
 );
 -- Budgets are stored as Meta returns them (currency minor units). A row is appended only when the value changes.
 CREATE TABLE IF NOT EXISTS budget_history (
@@ -36,6 +37,7 @@ export function createStore(file = ':memory:') {
   const db = new DatabaseSync(file);
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
+  if (!db.prepare('PRAGMA table_info(ads)').all().some((c) => c.name === 'first_spend_date')) db.exec('ALTER TABLE ads ADD COLUMN first_spend_date TEXT');
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => {
     db.exec('BEGIN');
@@ -91,10 +93,18 @@ export function createStore(file = ':memory:') {
         for (const a of ads) stmt.run(a.adId, a.name, a.createdTime, a.effectiveStatus, a.campaignId, a.campaignName, a.adsetId, a.adsetName, now);
       });
     },
+    // Stores the first day with spend > 0 of every ad that has insights. Past rows are never deleted, so it is stable.
+    refreshFirstSpend() {
+      q('UPDATE ads SET first_spend_date = (SELECT MIN(date) FROM insights i WHERE i.ad_id = ads.ad_id AND i.gasto > 0)').run();
+    },
+    firstSpendMap() {
+      const rows = q('SELECT ad_id, MIN(date) AS d FROM insights WHERE gasto > 0 GROUP BY ad_id').all();
+      return Object.fromEntries(rows.map((r) => [r.ad_id, r.d]));
+    },
     adsMap() {
       const rows = q('SELECT * FROM ads').all();
       return Object.fromEntries(
-        rows.map((r) => [r.ad_id, { name: r.name, createdTime: r.created_time, effectiveStatus: r.effective_status, campaignId: r.campaign_id, adsetId: r.adset_id }]),
+        rows.map((r) => [r.ad_id, { name: r.name, createdTime: r.created_time, effectiveStatus: r.effective_status, campaignId: r.campaign_id, adsetId: r.adset_id, firstSpendDate: r.first_spend_date }]),
       );
     },
 

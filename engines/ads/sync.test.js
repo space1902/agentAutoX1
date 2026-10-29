@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { DEFAULT_CONFIG } from './config.js';
 import { MetaApi, friendlyMetaError } from './meta-api.js';
-import { redact, runSync } from './sync.js';
+import { lookbackPlan, redact, runSync } from './sync.js';
 import { createStore } from './store.js';
 
 const TOKEN = 'EAAB-secret-token-1234567890';
@@ -74,6 +74,29 @@ test('runSync pulls insights (paginated), ads, budgets and the sheet into the st
   assert.match(insightCall.url, /level=ad/);
   assert.match(insightCall.url, /time_increment=1/);
   assert.match(decodeURIComponent(insightCall.url), /"since":"2026-10-28","until":"2026-10-29"/);
+});
+
+test('first spend date: looks back once to the creation date and stores day 1 per ad', async () => {
+  const store = createStore();
+  const requests = [];
+  const inner = fakeFetch({ requests });
+  let lookbackCalls = 0;
+  const fetchImpl = async (url, init) => {
+    const u = new URL(url);
+    if (u.pathname.endsWith('/insights') && JSON.parse(u.searchParams.get('time_range')).since === '2026-10-25') {
+      lookbackCalls++;
+      return json({ data: [insightRow('2026-10-26', 'A', 3000, 2)] });
+    }
+    return inner(url, init);
+  };
+  const run = () => runSync({ ...base, from: '2026-10-28', to: '2026-10-29', store, fetchImpl });
+  await run();
+  assert.equal(store.adsMap().A.firstSpendDate, '2026-10-26');
+  assert.equal(store.firstSpendMap().A, '2026-10-26');
+  const lookbacks = () => lookbackCalls;
+  assert.equal(lookbacks(), 1);
+  await run();
+  assert.equal(lookbacks(), 1, 'an ad is looked back only once');
 });
 
 test('the token travels only in the Authorization header', async () => {
@@ -147,4 +170,14 @@ test('rate limit errors back off instead of hammering Meta', async () => {
 test('redact removes the token from any text', () => {
   assert.equal(redact(`boom ${TOKEN} bam`, TOKEN), 'boom *** bam');
   assert.equal(redact('safe', ''), 'safe');
+});
+
+test('lookbackPlan skips ads that started inside the range, already have spend, were checked or are not monitored', () => {
+  const ad = (adId, createdTime, campaignName = 'CT01') => ({ adId, createdTime, campaignName });
+  const plan = lookbackPlan({
+    ads: [ad('1', '2026-10-20T10:00:00-0500'), ad('2', '2026-10-28T10:00:00-0500'), ad('3', '2026-10-10T10:00:00-0500'), ad('4', '2026-10-10T10:00:00-0500'), ad('5', '2026-10-10T10:00:00-0500', 'Branding')],
+    first: { 3: '2026-10-11' }, checked: ['4'], from: '2026-10-28', prefix: 'CT', today: '2026-10-29',
+  });
+  assert.deepEqual(plan, { ids: ['1'], since: '2026-10-20', until: '2026-10-27' });
+  assert.equal(lookbackPlan({ ads: [], first: {}, checked: [], from: '2026-10-28', prefix: 'CT', today: '2026-10-29' }), null);
 });

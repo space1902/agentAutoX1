@@ -3,9 +3,29 @@
 import { MetaApi, friendlyMetaError } from './meta-api.js';
 import { fetchAccount, fetchAds, fetchInsights } from './meta-data.js';
 import { fetchSheetCsv, parseComprobantes } from './sheet.js';
-import { localParts } from './time.js';
+import { isMonitored } from './report.js';
+import { addDays, daysBetween, localParts } from './time.js';
 
 export const DEFAULT_TIMEZONE = 'America/Bogota';
+
+const MAX_LOOKBACK_DAYS = 120;
+
+// Ads already seen before `from` whose first spending day is still unknown: look back to their creation date
+// (once per ad) so "day 1" (first day with spend > 0) is reliable.
+export function lookbackPlan({ ads, first, checked, from, prefix, today }) {
+  const ids = [];
+  let start = null;
+  for (const ad of ads) {
+    const created = String(ad.createdTime ?? '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(created) || created >= from) continue;
+    if ((first[ad.adId] && first[ad.adId] < from) || checked.includes(ad.adId) || !isMonitored(ad.campaignName, prefix)) continue;
+    ids.push(ad.adId);
+    if (!start || created < start) start = created;
+  }
+  if (!ids.length) return null;
+  const floor = addDays(today, -MAX_LOOKBACK_DAYS);
+  return { ids, since: start < floor ? floor : start, until: addDays(from, -1) };
+}
 
 export const redact = (value, token) => (token ? String(value ?? '').split(token).join('***') : String(value ?? ''));
 
@@ -24,7 +44,16 @@ async function syncMeta({ store, config, token, from, to, fetchImpl, now }) {
 
     const ads = await fetchAds(api, config.adAccountId);
     store.upsertAds(ads, now());
-    store.recordBudgets(ads, localParts(now(), timezone).date, now());
+    const today = localParts(now(), timezone).date;
+    store.recordBudgets(ads, today, now());
+    store.refreshFirstSpend();
+
+    const plan = lookbackPlan({ ads, first: store.firstSpendMap(), checked: store.getKv('lookbackChecked') ?? [], from, prefix: config.campaignPrefix, today });
+    if (plan && plan.since <= plan.until) {
+      store.upsertInsights(await fetchInsights(api, config.adAccountId, plan.since, plan.until), now());
+      store.refreshFirstSpend();
+    }
+    if (plan) store.setKv('lookbackChecked', [...new Set([...(store.getKv('lookbackChecked') ?? []), ...plan.ids])].slice(-2000));
     return { ok: true, insightRows: insights.length, ads: ads.length };
   } catch (error) {
     return { ok: false, code: error?.code ?? 'META', error: redact(friendlyMetaError(error), token) };
