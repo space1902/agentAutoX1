@@ -1,0 +1,174 @@
+/* ---------- Analista ---------- */
+
+.analista .an-chat {
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  gap: 16px;
+  height: calc(100vh - 250px);
+  min-height: 420px;
+}
+
+.an-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  overflow: hidden;
+}
+
+.an-side ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.an-side li {
+  display: flex;
+  align-items: center;
+  border-radius: 10px;
+}
+
+.an-side li.active { background: var(--nav-active-bg); }
+.an-empty { padding: 8px; font-size: 12px; }
+
+.an-session {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.an-del {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  padding: 6px;
+  border-radius: 8px;
+  opacity: 0;
+}
+
+.an-side li:hover .an-del,
+.an-del:focus-visible { opacity: 1; }
+.an-del:hover { color: var(--red); }
+
+.an-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  min-height: 0;
+}
+
+.an-scroll {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 4px;
+}
+
+.an-welcome { margin: auto; text-align: center; max-width: 560px; }
+.an-welcome h2 { margin: 0 0 6px; }
+.an-starters { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 14px; }
+.an-starters .chip { cursor: pointer; border: 0; color: var(--text); }
+.an-starters .chip:hover:not(:disabled) { background: var(--nav-active-bg); }
+
+.an-msg {
+  max-width: 92%;
+  border-radius: 16px;
+  padding: 12px 16px;
+  line-height: 1.5;
+}
+
+.an-msg.user {
+  align-self: flex-end;
+  background: var(--nav-active-bg);
+  white-space: pre-wrap;
+}
+
+.an-msg.user p { margin: 0; }
+
+.an-msg.assistant {
+  align-self: flex-start;
+  background: var(--chip-bg);
+  min-width: 40%;
+}
+
+.an-msg.live { border: 1px dashed var(--border); }
+
+.an-md > :first-child { margin-top: 0; }
+.an-md > :last-child { margin-bottom: 0; }
+.an-md p, .an-md ul, .an-md ol, .an-md blockquote { margin: 0 0 10px; }
+.an-md h3, .an-md h4, .an-md h5, .an-md h6 { margin: 12px 0 6px; font-size: 14px; }
+.an-md code { background: var(--input); padding: 1px 5px; border-radius: 6px; font-size: 12px; }
+.an-md pre { background: var(--log-bg); padding: 10px; border-radius: 10px; overflow-x: auto; }
+.an-md blockquote { border-left: 3px solid var(--accent); padding-left: 10px; color: var(--muted); }
+.an-md hr { border: 0; border-top: 1px solid var(--border); }
+.an-md .an-link small { color: var(--muted); word-break: break-all; }
+
+.an-table { margin: 4px 0 12px; }
+.an-table table { font-size: 12.5px; }
+.an-table th { padding: 6px 10px; white-space: nowrap; }
+.an-table td { padding: 7px 10px; }
+
+.an-unverified {
+  background: color-mix(in srgb, var(--amber) 28%, transparent);
+  color: inherit;
+  border-radius: 4px;
+  padding: 0 3px;
+  box-shadow: inset 0 -2px 0 var(--amber);
+}
+
+.an-unverified sup { font-size: 9px; margin-left: 1px; font-weight: 700; }
+
+.an-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--amber);
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+
+.an-usage, .an-plan-note { color: var(--muted); font-size: 11.5px; margin: 8px 0 0; }
+.an-plan-note { margin: 0; text-align: center; }
+
+.an-steps { list-style: none; margin: 0 0 8px; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.an-steps li { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.an-steps li.ok svg { color: var(--green); }
+.an-steps li.bad svg { color: var(--red); }
+.an-steps small { color: var(--muted); opacity: 0.8; }
+.an-steps-box { margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+.an-steps-box summary { cursor: pointer; }
+
+.spin { animation: an-spin 1s linear infinite; }
+@keyframes an-spin { to { transform: rotate(360deg); } }
+
+.an-composer { display: flex; gap: 10px; align-items: flex-end; }
+.an-composer textarea { resize: none; flex: 1; font: inherit; }
+
+.an-settings { max-width: 640px; }
+.an-settings h2 { margin-top: 0; }
+.an-paths { margin-top: 14px; font-size: 12px; word-break: break-all; }
+
+@media (max-width: 900px) {
+  .analista .an-chat { grid-template-columns: 1fr; height: auto; }
+  .an-side { max-height: 160px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; }
+}

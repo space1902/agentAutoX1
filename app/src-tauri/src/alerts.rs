@@ -122,7 +122,7 @@ impl Proc {
 
     /// Spawns `cmd` (stdout = one JSON per line). `on_json` handles every parsed line; events are `<prefix>-log`,
     /// `<prefix>-status`, `<prefix>-exit`.
-    fn spawn(&self, mut cmd: std::process::Command, prefix: &'static str, emit: Emit) -> Result<u32, String> {
+    pub fn spawn(&self, mut cmd: std::process::Command, prefix: &'static str, emit: Emit) -> Result<u32, String> {
         {
             let mut g = self.0.lock().unwrap();
             if g.pid.is_some() {

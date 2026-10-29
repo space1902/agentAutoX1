@@ -1,5 +1,6 @@
 mod ads;
 mod alerts;
+mod analista;
 mod ai;
 mod data;
 mod embed;
@@ -37,6 +38,7 @@ struct AppState {
     last_on_file: PathBuf,
     embedder: Mutex<Option<Arc<embed::Embedder<embed::win::RealWin>>>>,
     alerts: alerts::Alerts,
+    analista: analista::Analista,
 }
 
 /// Profile the app is running right now (the engine refuses to edit it).
@@ -503,6 +505,34 @@ async fn ads_tick_now(app: AppHandle, state: State<'_, AppState>) -> Result<Valu
     Ok(result)
 }
 
+// ---- Analista (chat agent on the local Claude Code)
+
+#[tauri::command]
+async fn analista_call(state: State<'_, AppState>, command: String, payload: Value) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || analista::call(&settings, &command, &payload)).await
+}
+
+/// Starts a streaming command (`turn` or `eval-run`); events arrive as `analista-status` / `analista-eval-status`.
+#[tauri::command]
+async fn analista_start(app: AppHandle, state: State<'_, AppState>, command: String, payload: Value) -> Result<u32, String> {
+    let settings = state.current();
+    let analista = state.analista.clone();
+    let emit = event_emitter(&app);
+    blocking(move || analista.start(&settings, &command, &payload, emit)).await
+}
+
+#[tauri::command]
+async fn analista_cancel(state: State<'_, AppState>) -> Result<(), String> {
+    let analista = state.analista.clone();
+    blocking(move || analista.cancel()).await
+}
+
+#[tauri::command]
+fn analista_status(state: State<'_, AppState>) -> Value {
+    serde_json::json!({ "chat": state.analista.chat.status(), "eval": state.analista.eval.status() })
+}
+
 // ---- Alertas panel
 
 #[tauri::command]
@@ -689,6 +719,7 @@ pub fn run() {
                 last_on_file,
                 embedder: Mutex::new(None),
                 alerts: alerts::Alerts::default(),
+                analista: analista::Analista::default(),
             });
             Ok(())
         })
@@ -711,7 +742,7 @@ pub fn run() {
                 }
                 state.keep_stop.store(true, Ordering::SeqCst);
                 // The alerts monitor and the WhatsApp linking close their session cleanly (their own pid only).
-                for proc in [&state.alerts.monitor, &state.alerts.link] {
+                for proc in [&state.alerts.monitor, &state.alerts.link, &state.analista.chat, &state.analista.eval] {
                     if proc.is_running() {
                         let _ = proc.stop();
                     }
@@ -796,6 +827,10 @@ pub fn run() {
             ads_token_clear,
             ads_token_test,
             ads_token_import_from_monitor,
+            analista_call,
+            analista_start,
+            analista_cancel,
+            analista_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

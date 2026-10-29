@@ -1,0 +1,294 @@
+import { AlertTriangle, Check, Loader2, MessageSquarePlus, Send, Square, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { errorText } from "../../lib/api";
+import {
+  analista,
+  formatDuration,
+  formatTokens,
+  STARTERS,
+  type AgentMessage,
+  type AgentSession,
+  type AnalistaStatus,
+  type PlanInfo,
+  type StepInfo,
+  type TurnEvent,
+} from "../../lib/analistaApi";
+import { Notice } from "../ui";
+import Markdown from "./Markdown";
+import MessageActions from "./MessageActions";
+
+interface Live {
+  text: string;
+  steps: StepInfo[];
+}
+
+function Steps({ steps, live }: { steps: StepInfo[]; live: boolean }) {
+  if (!steps.length) return null;
+  return (
+    <ul className="an-steps" aria-label="Pasos del análisis" aria-live={live ? "polite" : undefined}>
+      {steps.map((s) => (
+        <li key={s.id} className={s.ok === null ? "run" : s.ok ? "ok" : "bad"}>
+          {s.ok === null ? <Loader2 size={13} className="spin" aria-hidden /> : s.ok ? <Check size={13} aria-hidden /> : <X size={13} aria-hidden />}
+          <span>{s.label}</span>
+          {s.summary && <small>{s.summary}</small>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function UsageFooter({ meta }: { meta: AgentMessage["meta"] }) {
+  if (!meta.usage && !meta.durationMs) return null;
+  const parts: string[] = [];
+  if (meta.durationMs) parts.push(formatDuration(meta.durationMs));
+  if (meta.turns) parts.push(`${meta.turns} ${meta.turns === 1 ? "turno" : "turnos"}`);
+  if (meta.usage) parts.push(`${formatTokens(meta.usage.total)} tokens (${formatTokens(meta.usage.output)} de respuesta)`);
+  const plan: PlanInfo | null | undefined = meta.plan;
+  if (plan && plan.fiveHour !== null) parts.push(`plan: ${Math.round(plan.fiveHour * 100)} % de la ventana de 5 h`);
+  return <p className="an-usage">{parts.join(" · ")}</p>;
+}
+
+export default function ChatPanel({ learning, onGoSettings, onLearningChange }: { learning: boolean; onGoSettings: () => void; onLearningChange: () => void }) {
+  const [sessions, setSessions] = useState<AgentSession[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [input, setInput] = useState("");
+  const [running, setRunning] = useState(false);
+  const [live, setLive] = useState<Live | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<AnalistaStatus | null>(null);
+  const [candidates, setCandidates] = useState(0);
+  const bottom = useRef<HTMLDivElement>(null);
+  const activeRef = useRef<string | null>(null);
+  activeRef.current = activeId;
+
+  const loadSessions = useCallback(async () => {
+    try {
+      setSessions((await analista.sessions()).sessions);
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }, []);
+
+  const openSession = useCallback(async (id: string | null) => {
+    setActiveId(id);
+    setCandidates(0);
+    if (!id) return setMessages([]);
+    try {
+      setMessages((await analista.messages(id)).messages);
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSessions();
+    void analista.status().then(setStatus).catch((e) => setError(errorText(e)));
+    void analista.running().then((s) => setRunning(s.chat.running)).catch(() => undefined);
+  }, [loadSessions]);
+
+  useEffect(() => {
+    const unlisten = [
+      analista.onTurn((ev: TurnEvent) => {
+        switch (ev.type) {
+          case "turn_start":
+            setActiveId(ev.sessionId);
+            setRunning(true);
+            setLive({ text: "", steps: [] });
+            void loadSessions();
+            break;
+          case "message_start":
+            setLive((l) => (l ? { ...l, text: "" } : l));
+            break;
+          case "text":
+            setLive((l) => (l ? { ...l, text: l.text + ev.delta } : l));
+            break;
+          case "step":
+            setLive((l) => (l ? { ...l, steps: [...l.steps, { id: ev.id, tool: ev.tool, label: ev.label, ok: null, summary: "" }] } : l));
+            break;
+          case "step_done":
+            setLive((l) => (l ? { ...l, steps: l.steps.map((s) => (s.id === ev.id ? { ...s, ok: ev.ok, summary: ev.summary } : s)) } : l));
+            break;
+          case "done":
+            setCandidates(ev.newCandidates ?? 0);
+            setLive(null);
+            setRunning(false);
+            void openSession(ev.sessionId).then(() => void loadSessions());
+            if ((ev.newCandidates ?? 0) > 0) onLearningChange();
+            break;
+          case "cancelled":
+            setLive(null);
+            setRunning(false);
+            void openSession(ev.sessionId);
+            break;
+          case "error":
+            setError(ev.error);
+            setLive(null);
+            setRunning(false);
+            if (ev.sessionId) void openSession(ev.sessionId);
+            break;
+          default:
+            break;
+        }
+      }),
+      analista.onExit(() => {
+        setRunning(false);
+        void loadSessions();
+      }),
+    ];
+    return () => unlisten.forEach((p) => void p.then((fn) => fn()));
+  }, [loadSessions, openSession, onLearningChange]);
+
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: "end" });
+  }, [messages, live]);
+
+  async function send(text: string) {
+    const body = text.trim();
+    if (!body || running) return;
+    setError(null);
+    setInput("");
+    setCandidates(0);
+    setMessages((m) => [...m, { id: -Date.now(), sessionId: activeRef.current ?? "", role: "user", text: body, ts: Date.now(), meta: {} }]);
+    setRunning(true);
+    setLive({ text: "", steps: [] });
+    try {
+      await analista.start("turn", { sessionId: activeRef.current ?? "", text: body });
+    } catch (e) {
+      setError(errorText(e));
+      setRunning(false);
+      setLive(null);
+    }
+  }
+
+  async function remove(id: string) {
+    try {
+      await analista.deleteSession(id);
+      if (activeId === id) await openSession(null);
+      await loadSessions();
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }
+
+  const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+
+  return (
+    <div className="an-chat">
+      <aside className="an-side card" aria-label="Conversaciones">
+        <button className="btn secondary sm" onClick={() => void openSession(null)} disabled={running}>
+          <MessageSquarePlus size={14} aria-hidden /> Nuevo chat
+        </button>
+        <ul>
+          {sessions.map((s) => (
+            <li key={s.id} className={s.id === activeId ? "active" : ""}>
+              <button className="an-session" onClick={() => void openSession(s.id)} disabled={running} title={s.title}>
+                {s.title}
+              </button>
+              <button className="an-del" aria-label={`Borrar el chat ${s.title}`} onClick={() => void remove(s.id)} disabled={running}>
+                <Trash2 size={13} aria-hidden />
+              </button>
+            </li>
+          ))}
+          {!sessions.length && <li className="an-empty muted">Aún no hay conversaciones.</li>}
+        </ul>
+      </aside>
+
+      <section className="an-main card" aria-label="Conversación">
+        {status && !status.claude.found && (
+          <Notice>
+            No encuentro Claude Code en este equipo. Instálalo e inicia sesión, o indica la ruta de <code>claude.exe</code> en{" "}
+            <button className="btn ghost sm" onClick={onGoSettings}>Ajustes del Analista</button>.
+          </Notice>
+        )}
+        {status && !status.adsDb && <Notice>Todavía no hay datos de Anuncios: abre la sección Anuncios y actualiza para que el Analista tenga qué consultar.</Notice>}
+        {error && <Notice>{error}</Notice>}
+
+        <div className="an-scroll" role="log" aria-live="polite">
+          {!messages.length && !live && (
+            <div className="an-welcome">
+              <h2>Pregúntame por tus anuncios y ventas</h2>
+              <p className="muted">Consulto tus datos reales de solo lectura, hago las cuentas con código y te explico. No cambio nada en Meta.</p>
+              <div className="an-starters">
+                {STARTERS.map((q) => (
+                  <button key={q} className="chip" onClick={() => void send(q)} disabled={running}>{q}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {messages.map((m) => (
+            <article key={m.id} className={`an-msg ${m.role}`}>
+              {m.role === "user" ? (
+                <p>{m.text}</p>
+              ) : (
+                <>
+                  {!!m.meta.steps?.length && (
+                    <details className="an-steps-box">
+                      <summary>{m.meta.steps.length} {m.meta.steps.length === 1 ? "paso" : "pasos"} de análisis</summary>
+                      <Steps steps={m.meta.steps} live={false} />
+                    </details>
+                  )}
+                  <Markdown text={m.text} marks={m.meta.ungrounded ?? []} />
+                  {!!m.meta.ungrounded?.length && (
+                    <p className="an-warn">
+                      <AlertTriangle size={13} aria-hidden /> {m.meta.ungrounded.length === 1 ? "1 cifra no verificada" : `${m.meta.ungrounded.length} cifras no verificadas`}: no las encontré en los datos de esta consulta. Tómalas con cuidado.
+                    </p>
+                  )}
+                  {m.meta.cancelled && <p className="an-warn">Respuesta cancelada.</p>}
+                  <UsageFooter meta={m.meta} />
+                  {learning && !m.meta.cancelled && (
+                    <MessageActions message={m} showCandidates={m.id === lastAssistant?.id ? candidates : 0} onChanged={onLearningChange} onRated={(rating) => setMessages((all) => all.map((x) => (x.id === m.id ? { ...x, meta: { ...x.meta, rating } } : x)))} />
+                  )}
+                </>
+              )}
+            </article>
+          ))}
+
+          {live && (
+            <article className="an-msg assistant live">
+              <Steps steps={live.steps} live />
+              {live.text ? <Markdown text={live.text} /> : !live.steps.length && <p className="muted"><Loader2 size={13} className="spin" aria-hidden /> Pensando…</p>}
+            </article>
+          )}
+          <div ref={bottom} />
+        </div>
+
+        <form
+          className="an-composer"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void send(input);
+          }}
+        >
+          <textarea
+            className="input"
+            rows={2}
+            value={input}
+            placeholder="Escribe tu pregunta… (Enter envía, Shift+Enter hace un salto de línea)"
+            aria-label="Pregunta para el Analista"
+            maxLength={8000}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send(input);
+              }
+            }}
+            disabled={running}
+          />
+          {running ? (
+            <button type="button" className="btn danger" onClick={() => void analista.cancel().catch((e) => setError(errorText(e)))}>
+              <Square size={14} aria-hidden /> Cancelar
+            </button>
+          ) : (
+            <button type="submit" className="btn" disabled={!input.trim()}>
+              <Send size={14} aria-hidden /> Enviar
+            </button>
+          )}
+        </form>
+        <p className="an-plan-note">Usa los límites de tu plan de Claude (tu sesión de Claude Code), no la API: no se cobra por token.</p>
+      </section>
+    </div>
+  );
+}

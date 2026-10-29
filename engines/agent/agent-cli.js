@@ -21,7 +21,8 @@ try {
   const [major, minor] = process.versions.node.split('.').map(Number);
   if (major < 22 || (major === 22 && minor < 13)) throw new Error(`El Analista necesita Node 22.13 o superior (tienes ${process.versions.node}).`);
   const [command = '', ...rest] = process.argv.slice(2);
-  const payload = rest.includes('--stdin') ? JSON.parse((await readStdin()).trim() || '{}') : {};
+  const jsonAt = rest.indexOf('--json');
+  const payload = jsonAt >= 0 ? JSON.parse(rest[jsonAt + 1] || '{}') : rest.includes('--stdin') ? JSON.parse((await readStdin()).trim() || '{}') : {};
   const dataDir = resolveDataDir(path.join(ROOT, '..', 'warmup'));
   const api = await import('./agent-api.js');
 
