@@ -27,7 +27,8 @@ function seeded() {
   store.refreshFirstSpend();
   store.recordBudgets([{ adsetId: 's1', adsetDailyBudget: 30000, campaignId: 'c1' }], '2026-10-01', 1);
   store.syncComprobantes([sale({}), sale({ registered: '2026-10-02 09:00', date: '2026-10-02', valor: 100, phone: '584121112233', flow: 'Bebidas Venezuela' }), sale({ registered: '2026-10-02 11:00', date: '2026-10-02', result: 'Inválido' })], 1);
-  store.setComprobanteCountries([{ key: store.comprobantesBetween('2026-10-01', '2026-10-01')[0].key, country: 'CO', source: 'telefono' }]);
+  const keys = store.comprobantesBetween('2026-10-01', '2026-10-02').map((c) => c.key);
+  store.setComprobanteCountries([{ key: keys[0], country: 'CO', source: 'telefono' }, { key: keys[1], country: 'VE', source: 'telefono' }]);
   store.setCountryRates({ CO: { currency: 'COP', rateToCop: 1 }, VE: { currency: 'USD', rateToCop: 4000 } });
   return store;
 }
