@@ -1,0 +1,82 @@
+// Read-only Graph API queries used by the ads engine, plus the normalization of their rows. Pure apart from `api`.
+import { chunkRange } from './time.js';
+
+export const ACTION_CONVERSATION = 'onsite_conversion.messaging_conversation_started_7d';
+
+const INSIGHT_FIELDS = 'campaign_name,campaign_id,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,actions';
+const AD_FIELDS =
+  'name,created_time,effective_status,campaign_id,adset_id,campaign{name,daily_budget,lifetime_budget},adset{name,daily_budget,lifetime_budget}';
+const AD_STATUSES = ['ACTIVE', 'PAUSED', 'DISAPPROVED', 'WITH_ISSUES', 'PENDING_REVIEW', 'IN_PROCESS', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'PENDING_BILLING_INFO', 'ARCHIVED'];
+
+const num = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+export function actionValue(actions, type) {
+  if (!Array.isArray(actions)) return 0;
+  return actions.filter((a) => a?.action_type === type).reduce((sum, a) => sum + num(a.value), 0);
+}
+
+export function parseInsightRow(row) {
+  return {
+    date: row.date_start,
+    adId: String(row.ad_id ?? ''),
+    adName: row.ad_name ?? '',
+    campaignId: String(row.campaign_id ?? ''),
+    campaignName: row.campaign_name ?? '',
+    adsetId: String(row.adset_id ?? ''),
+    adsetName: row.adset_name ?? '',
+    gasto: num(row.spend),
+    impressions: num(row.impressions),
+    clicks: num(row.clicks),
+    mensajes: actionValue(row.actions, ACTION_CONVERSATION),
+  };
+}
+
+// Budgets arrive as strings in the currency minor unit; absent when the budget lives on the other level.
+const budget = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+
+export function parseAdRow(row) {
+  return {
+    adId: String(row.id ?? ''),
+    name: row.name ?? '',
+    createdTime: row.created_time ?? '',
+    effectiveStatus: row.effective_status ?? '',
+    campaignId: String(row.campaign_id ?? row.campaign?.id ?? ''),
+    campaignName: row.campaign?.name ?? '',
+    campaignDailyBudget: budget(row.campaign?.daily_budget),
+    campaignLifetimeBudget: budget(row.campaign?.lifetime_budget),
+    adsetId: String(row.adset_id ?? row.adset?.id ?? ''),
+    adsetName: row.adset?.name ?? '',
+    adsetDailyBudget: budget(row.adset?.daily_budget),
+    adsetLifetimeBudget: budget(row.adset?.lifetime_budget),
+  };
+}
+
+export async function fetchAccount(api, accountId) {
+  const row = await api.get(`/${accountId}`, { fields: 'name,timezone_name,currency,account_status' });
+  return { name: row.name ?? '', timezone: row.timezone_name ?? '', currency: row.currency ?? '', status: row.account_status ?? null };
+}
+
+// Daily rows per ad. Ranges longer than 31 days are split so each request stays small.
+export async function fetchInsights(api, accountId, since, until) {
+  const rows = [];
+  for (const chunk of chunkRange(since, until, 31)) {
+    const page = await api.getAll(`/${accountId}/insights`, {
+      level: 'ad',
+      time_increment: 1,
+      time_range: { since: chunk.since, until: chunk.until },
+      fields: INSIGHT_FIELDS,
+      limit: 500,
+    });
+    rows.push(...page.map(parseInsightRow));
+  }
+  return rows.filter((r) => r.adId && r.date);
+}
+
+export async function fetchAds(api, accountId) {
+  const rows = await api.getAll(`/${accountId}/ads`, { fields: AD_FIELDS, effective_status: AD_STATUSES, limit: 500 });
+  return rows.map(parseAdRow).filter((r) => r.adId);
+}
+
