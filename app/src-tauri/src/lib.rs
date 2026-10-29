@@ -1,3 +1,4 @@
+mod ads;
 mod ai;
 mod data;
 mod embed;
@@ -426,6 +427,66 @@ fn ollama_launch() -> Result<(), String> {
     ai::launch_ollama()
 }
 
+// ---- Anuncios section
+
+#[tauri::command]
+async fn ads_sync(state: State<'_, AppState>, from: String, to: String) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::sync(&settings, &from, &to)).await
+}
+
+#[tauri::command]
+async fn ads_report(state: State<'_, AppState>, from: String, to: String, group: String) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::report(&settings, &from, &to, &group)).await
+}
+
+#[tauri::command]
+async fn ads_status(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::status(&settings)).await
+}
+
+#[tauri::command]
+async fn ads_config_get(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::config_get(&settings)).await
+}
+
+#[tauri::command]
+async fn ads_config_set(state: State<'_, AppState>, config: Value) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::config_set(&settings, &config)).await
+}
+
+/// Only whether a token exists; the value never reaches the UI.
+#[tauri::command]
+async fn ads_token_status() -> Result<bool, String> {
+    blocking(ads::token_present).await
+}
+
+#[tauri::command]
+async fn ads_token_set(token: String) -> Result<(), String> {
+    blocking(move || ads::set_token(&token)).await
+}
+
+#[tauri::command]
+async fn ads_token_clear() -> Result<(), String> {
+    blocking(ads::clear_token).await
+}
+
+#[tauri::command]
+async fn ads_token_test(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::test_token(&settings)).await
+}
+
+#[tauri::command]
+async fn ads_token_import_from_monitor(state: State<'_, AppState>) -> Result<(), String> {
+    let root = state.root.clone();
+    blocking(move || ads::import_from_monitor(&root)).await
+}
+
 #[tauri::command]
 fn warmup_status(state: State<'_, AppState>) -> warmup::Status {
     state.runner.status()
@@ -557,6 +618,16 @@ pub fn run() {
             ollama_installed,
             ollama_install,
             ollama_launch,
+            ads_sync,
+            ads_report,
+            ads_status,
+            ads_config_get,
+            ads_config_set,
+            ads_token_status,
+            ads_token_set,
+            ads_token_clear,
+            ads_token_test,
+            ads_token_import_from_monitor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
