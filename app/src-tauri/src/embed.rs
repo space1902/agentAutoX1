@@ -195,6 +195,11 @@ pub mod win {
     const SW_HIDE: i32 = 0;
     const SW_SHOW: i32 = 5;
     const SWP_NOZORDER: u32 = 0x0004;
+    /// Skip WM_WINDOWPOSCHANGING: BlueStacks (Qt) uses it to force its own geometry back, which sent the re-parented
+    /// window thousands of pixels off screen. Without the message our rectangle is applied as asked.
+    const SWP_NOSENDCHANGING: u32 = 0x0400;
+    /// Above its siblings, in particular above the webview that fills the app window.
+    const HWND_TOP: isize = 0;
     const SWP_NOACTIVATE: u32 = 0x0010;
     const SWP_FRAMECHANGED: u32 = 0x0020;
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
@@ -206,6 +211,18 @@ pub mod win {
         top: i32,
         right: i32,
         bottom: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct Pt {
+        x: i32,
+        y: i32,
+    }
+
+    #[cfg(test)]
+    unsafe extern "system" {
+        fn ClientToScreen(hwnd: isize, point: *mut Pt) -> i32;
     }
 
     type EnumProc = unsafe extern "system" fn(isize, isize) -> i32;
@@ -326,7 +343,7 @@ pub mod win {
                 if SetParent(hwnd, parent) == 0 {
                     return Err(last_os_error("No se pudo meter la ventana del pod en la app"));
                 }
-                SetWindowPos(hwnd, 0, rect.x, rect.y, rect.w, rect.h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                SetWindowPos(hwnd, HWND_TOP, rect.x, rect.y, rect.w, rect.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE | SWP_FRAMECHANGED);
                 ShowWindow(hwnd, SW_SHOW);
             }
             Ok(())
@@ -334,7 +351,7 @@ pub mod win {
 
         fn place(&self, hwnd: isize, rect: Rect) -> Result<(), String> {
             // SAFETY: plain Win32 call.
-            let ok = unsafe { SetWindowPos(hwnd, 0, rect.x, rect.y, rect.w, rect.h, SWP_NOZORDER | SWP_NOACTIVATE) };
+            let ok = unsafe { SetWindowPos(hwnd, HWND_TOP, rect.x, rect.y, rect.w, rect.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE) };
             if ok == 0 { Err(last_os_error("No se pudo mover la ventana del pod")) } else { Ok(()) }
         }
 
@@ -352,7 +369,7 @@ pub mod win {
                 SetWindowLongPtrW(hwnd, GWL_STYLE, original.style as isize);
                 SetWindowLongPtrW(hwnd, GWL_EXSTYLE, original.ex_style as isize);
                 let r = original.rect;
-                SetWindowPos(hwnd, 0, r.x, r.y, r.w, r.h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+                SetWindowPos(hwnd, 0, r.x, r.y, r.w, r.h, SWP_NOZORDER | SWP_NOSENDCHANGING | SWP_NOACTIVATE | SWP_FRAMECHANGED);
                 ShowWindow(hwnd, SW_SHOW);
             }
             Ok(())
@@ -367,6 +384,83 @@ pub mod win {
     #[cfg(test)]
     pub(super) mod dummy {
         use super::*;
+
+        #[repr(C)]
+        struct WindowPos {
+            hwnd: isize,
+            insert_after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        }
+
+        #[repr(C)]
+        struct WndClassExW {
+            size: u32,
+            style: u32,
+            proc: unsafe extern "system" fn(isize, u32, usize, isize) -> isize,
+            cls_extra: i32,
+            wnd_extra: i32,
+            instance: isize,
+            icon: isize,
+            cursor: isize,
+            background: isize,
+            menu: *const u16,
+            class_name: *const u16,
+            icon_sm: isize,
+        }
+
+        unsafe extern "system" {
+            fn RegisterClassExW(class: *const WndClassExW) -> u16;
+            fn DefWindowProcW(hwnd: isize, msg: u32, w: usize, l: isize) -> isize;
+        }
+
+        /// The geometry BlueStacks (Qt) forces on itself whenever Windows asks to move or size it.
+        pub const FORCED: Rect = Rect { x: 777, y: 18000, w: 528, h: 912 };
+
+        /// Behaves like Qt's top-level window: in WM_WINDOWPOSCHANGING it rewrites the requested geometry.
+        unsafe extern "system" fn qt_like_proc(hwnd: isize, msg: u32, w: usize, l: isize) -> isize {
+            const WM_WINDOWPOSCHANGING: u32 = 0x0046;
+            if msg == WM_WINDOWPOSCHANGING {
+                // SAFETY: for this message lParam points to a WINDOWPOS owned by the system for the call.
+                let pos = unsafe { &mut *(l as *mut WindowPos) };
+                pos.x = FORCED.x;
+                pos.y = FORCED.y;
+                pos.cx = FORCED.w;
+                pos.cy = FORCED.h;
+                pos.flags &= !(0x0002 | 0x0001); // clear SWP_NOMOVE | SWP_NOSIZE
+            }
+            // SAFETY: forwarding the untouched message to the default procedure.
+            unsafe { DefWindowProcW(hwnd, msg, w, l) }
+        }
+
+        /// A top-level popup window whose procedure fights every move, like the real BlueStacks one.
+        pub fn qt_like_window(title: &str, rect: Rect) -> isize {
+            let class_name = utf16("agentautox1QtLike");
+            let class = WndClassExW {
+                size: std::mem::size_of::<WndClassExW>() as u32,
+                style: 0,
+                proc: qt_like_proc,
+                cls_extra: 0,
+                wnd_extra: 0,
+                instance: 0,
+                icon: 0,
+                cursor: 0,
+                background: 0,
+                menu: std::ptr::null(),
+                class_name: class_name.as_ptr(),
+                icon_sm: 0,
+            };
+            // SAFETY: the class structure is fully initialised; registering twice just fails harmlessly.
+            unsafe { RegisterClassExW(&class) };
+            let name = utf16(title);
+            // WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_SYSMENU
+            let style = 0x8000_0000u32 | 0x0400_0000 | 0x0200_0000 | 0x0008_0000;
+            // SAFETY: valid NUL-terminated strings; the caller destroys the window.
+            unsafe { CreateWindowExW(0, class_name.as_ptr(), name.as_ptr(), style, rect.x, rect.y, rect.w, rect.h, 0, 0, 0, std::ptr::null()) }
+        }
 
         pub fn utf16(text: &str) -> Vec<u16> {
             text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -398,6 +492,18 @@ pub mod win {
         pub fn visible(hwnd: isize) -> bool {
             // SAFETY: plain Win32 call.
             unsafe { IsWindowVisible(hwnd) != 0 }
+        }
+
+        /// Position and size of `hwnd` in the client coordinates of `parent`.
+        pub fn client_rect_in(hwnd: isize, parent: isize) -> Rect {
+            let mut rc = Rc::default();
+            let mut origin = Pt::default();
+            // SAFETY: valid out-pointers.
+            unsafe {
+                GetWindowRect(hwnd, &mut rc);
+                ClientToScreen(parent, &mut origin);
+            }
+            Rect { x: rc.left - origin.x, y: rc.top - origin.y, w: rc.right - rc.left, h: rc.bottom - rc.top }
         }
 
         pub fn rect_of(hwnd: isize) -> Rect {
@@ -618,6 +724,36 @@ mod tests {
     }
 
     // ----- real user32 with dummy windows (never a pod) -----
+
+    /// BlueStacks is a Qt top-level window that rewrites any move/size in WM_WINDOWPOSCHANGING. Before the fix the
+    /// embedded pod ended up far off screen (y = 15000+) and the stage stayed black.
+    #[cfg(windows)]
+    #[test]
+    fn real_win32_placement_wins_over_a_window_that_fights_every_move() {
+        use win::{RealWin, dummy};
+
+        let ws_overlapped = 0x00CF_0000u32;
+        let host = dummy::window("agentautox1-test-host2", ws_overlapped, Rect { x: 50, y: 50, w: 900, h: 700 });
+        let pod = dummy::qt_like_window("wa-agentautox1-qt-like", Rect { x: 200, y: 120, w: 528, h: 912 });
+        assert!(host != 0 && pod != 0);
+
+        let embedder = Embedder::new(RealWin { exe_filter: None }, host);
+        let wanted = Rect { x: 40, y: 60, w: 600, h: 500 };
+        embedder.attach("agentautox1-qt-like", wanted).unwrap();
+        let at = |hwnd| dummy::client_rect_in(hwnd, host);
+        assert_eq!(at(pod), wanted, "attach placed it where the UI asked");
+
+        let moved = Rect { x: 10, y: 20, w: 640, h: 480 };
+        embedder.resize("agentautox1-qt-like", moved).unwrap();
+        assert_eq!(at(pod), moved, "resize too");
+        embedder.resize("agentautox1-qt-like", moved).unwrap();
+        assert_eq!(at(pod), moved, "and repeating it does not drift");
+
+        embedder.detach_all();
+        for hwnd in [pod, host] {
+            dummy::destroy(hwnd);
+        }
+    }
 
     #[cfg(windows)]
     #[test]
