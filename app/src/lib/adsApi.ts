@@ -245,3 +245,99 @@ export function agoText(ts: number | null, now: number): string {
 }
 
 export const dayLabel = (row: Pick<AdRow, "ageDays">) => (row.ageDays === null ? "sin gasto aún" : `día ${row.ageDays}`);
+
+// ---------------------------------------------------------------- Alertas (in-app monitor)
+
+export interface AlertThresholds {
+  targetCpa: number;
+  reviewCpa: number;
+  gapWorryMin: number;
+  gapActionMin: number;
+  maxGapMin: number;
+  noSpendHours: number;
+  noPurchaseHours: number;
+  minConversationsNoPurchase: number;
+  costPerConversationMult: number;
+  minConversationsForCost: number;
+  frequencyMax: number;
+  ctrMinRatio: number;
+  cpmMaxRatio: number;
+  minImpressions: number;
+}
+
+export interface AlertsConfig {
+  mode: string;
+  salesSource: "sheet" | "meta" | "both";
+  allowActions: boolean;
+  summaryEnabled: boolean;
+  campaignPrefix: string;
+  pollMinutes: number;
+  baselineDays: number;
+  cooldownMin: number;
+  budgetChangeMaxPct: number;
+  activeHours: { start: number; end: number };
+  restrictedHours: { start: number; end: number };
+  thresholds: AlertThresholds;
+  whatsapp: { senderPhone: string; alertTo: string };
+}
+
+export interface MonitorInfo {
+  tz: string | null;
+  lastPollTs: number | null;
+  nextPollTs: number | null;
+  lastError: string | null;
+  usagePct: number;
+  accessTier: string | null;
+  pausedUntil: number | null;
+  baselineDays: number;
+  salesSource: string;
+  mode: string;
+}
+
+export type WaState = "unlinked" | "connecting" | "connected" | "conflict" | "error";
+
+export interface MonitorStatusEvent {
+  type?: string;
+  monitor?: MonitorInfo;
+  wa?: { state: WaState; linked: boolean; phoneMasked: string };
+  error?: string;
+}
+
+export interface ProcStatus {
+  running: boolean;
+  pid: number | null;
+  logs: string[];
+  status: MonitorStatusEvent | null;
+}
+
+export interface RecentAlert {
+  id: number;
+  ts: number;
+  family: string;
+  severity: number;
+  type: string;
+  text: string;
+  sent: boolean;
+}
+
+export interface LinkEvent {
+  type: "pairing_code" | "linked" | "error" | "fatal" | string;
+  code?: string;
+  error?: string;
+  phoneMasked?: string;
+}
+
+export const alertsApi = {
+  configGet: () => invoke<{ config: AlertsConfig; defaults: AlertsConfig }>("ads_alerts_config_get"),
+  configSet: (config: Partial<AlertsConfig>) => invoke<{ config: AlertsConfig }>("ads_alerts_config_set", { config }),
+  recent: () => invoke<{ alerts: RecentAlert[]; pausedUntil: number | null }>("ads_alerts_recent"),
+  waStatus: () => invoke<{ linked: boolean; phoneMasked: string }>("ads_wa_status"),
+  conflict: () => invoke<number | null>("ads_monitor_conflict"),
+  monitorStatus: () => invoke<ProcStatus>("ads_monitor_status"),
+  monitorStart: (confirmConflict: boolean) => invoke<ProcStatus>("ads_monitor_start", { confirmConflict }),
+  monitorStop: () => invoke<void>("ads_monitor_stop"),
+  linkStatus: () => invoke<ProcStatus>("ads_link_status"),
+  linkStart: (phone: string) => invoke<void>("ads_wa_link_start", { phone }),
+  linkCancel: () => invoke<void>("ads_wa_link_cancel"),
+  importSession: (overwrite: boolean) => invoke<number>("ads_wa_import_session", { overwrite }),
+};

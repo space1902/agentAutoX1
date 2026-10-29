@@ -74,3 +74,26 @@ tr.ads-review td { background: color-mix(in srgb, var(--amber) 8%, transparent);
 .dec-actions { display: flex; gap: 8px; }
 .ads-switches { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .ads-check { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+
+.alerts-panel { display: flex; flex-direction: column; gap: 16px; }
+.alerts-status { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 8px 0; }
+.alerts-conflict { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.alerts-conflict p { margin: 0; }
+.alerts-code { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; padding: 14px; border-radius: 14px; border: 1px dashed var(--accent); }
+.alerts-code strong { font-size: 30px; letter-spacing: 0.18em; font-variant-numeric: tabular-nums; }
+.alerts-log {
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--log-bg);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.alerts-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; max-height: 320px; overflow: auto; }
+.alerts-list li { padding: 10px; border-radius: 12px; background: var(--input); }
+.alerts-list p { margin: 6px 0 0; white-space: pre-wrap; }
+.alerts-list-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.alerts-danger { color: var(--amber); font-weight: 600; }
+.field label .info { margin-left: 4px; vertical-align: middle; }

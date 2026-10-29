@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import AdsChart from "../components/ads/AdsChart";
 import AdsSettings from "../components/ads/AdsSettings";
 import AdsTable from "../components/ads/AdsTable";
+import AlertsPanel from "../components/ads/AlertsPanel";
 import DecisionsPanel from "../components/ads/DecisionsPanel";
 import VouchersPanel from "../components/ads/VouchersPanel";
 import { Banner, Card, Notice, Skeleton, StatCard } from "../components/ui";
@@ -39,7 +40,7 @@ const GROUPS: { id: Group; label: string }[] = [
   { id: "campaign", label: "Campaña" },
   { id: "ad", label: "Anuncio" },
 ];
-type Tab = "resumen" | "decisiones";
+type Tab = "resumen" | "decisiones" | "alertas";
 
 /** Opening the section only syncs when the last sync is older than this. */
 const STALE_MS = 5 * 60_000;
@@ -251,11 +252,14 @@ export default function Anuncios() {
         <button role="tab" aria-selected={tab === "decisiones"} className={`ia-tab ${tab === "decisiones" ? "active" : ""}`} onClick={() => setTab("decisiones")}>
           Decisiones{pendingCount > 0 ? ` (${pendingCount})` : ""}
         </button>
+        <button role="tab" aria-selected={tab === "alertas"} className={`ia-tab ${tab === "alertas" ? "active" : ""}`} onClick={() => setTab("alertas")}>Alertas</button>
       </div>
 
       {tab === "decisiones" && (
         <DecisionsPanel decisions={decisionData?.decisions ?? []} activitiesOk={decisionData?.activitiesOk ?? null} lifecycle={decisionData?.lifecycle ?? null} busy={evaluating} onStatus={(id, s) => void changeStatus(id, s)} onEvaluate={() => void evaluateNow()} />
       )}
+
+      {tab === "alertas" && <AlertsPanel />}
 
       {tab === "resumen" && (
       <>
