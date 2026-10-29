@@ -163,3 +163,22 @@ resized with the layout). Other tabs are hidden with `ShowWindow(SW_HIDE)`; dial
 drawn on top of the web content). Closing a tab, the **Abrir en ventana aparte** button, turning the flag off or closing the app
 restores the original parent, style and position. Windows only. The re-parenting code is tested with dummy windows, not with BlueStacks.
 
+
+## Phase 4: choose the AI (section "IA")
+
+The warm-up writes its messages with a **local model** (default, unchanged: Ollama `qwen2.5:7b`) or an **external OpenAI-compatible API** with a daily spend limit. Configuration lives in `config.json` under `ai`; without that key the engine behaves exactly as before with `localModel`.
+
+```json
+"ai": { "provider": "ollama" | "openai-compatible", "preset": "openrouter", "baseUrl": "...", "model": "...",
+        "dailyBudgetUsd": 1, "onBudgetExceeded": "fallback-local" | "stop", "fallbackLocalModel": "gemma3:1b",
+        "localGpu": "auto" | "cpu", "prices": { "inUsd": 0.1, "outUsd": 0.1 } }
+```
+
+- **API key**: never in `config.json`, logs or files. The app stores one key per provider in the Windows Credential Manager (service `agentAutoX1`, user `ai-key:<preset>`) and injects it into the profile process as `AGENTAUTO_AI_KEY`.
+- **Presets** (data-driven, `engines/warmup/ai-presets.js`, prices as of 2026-10-29): OpenRouter and Mistral (recommended, cheapest), then DeepSeek (peak/off-peak pricing: weekdays 01-04 and 06-10 UTC), OpenAI, Gemini and any OpenAI-compatible URL. Adding a provider is just a base URL, a model list and prices. Reasoning models get minimal effort (`gpt-5-nano`: `reasoning_effort: minimal`, `max_completion_tokens`; DeepSeek: `thinking: {type: disabled}`; Gemini: `reasoning_effort: none`).
+- **Spend control**: tokens come from the API `usage` (fallback chars/4); per-day totals per provider/model in `<data>/ai-usage.json` (atomic writes). At `dailyBudgetUsd` the engine either switches to the local fallback model or stops the run (same clean path as Ctrl+C).
+- **Local models**: the section lists installed Ollama models (size, parameters, quantization, fit for your GPU), deletes them (blocked while a running profile uses them), downloads recommended or any valid tag with progress and cancel, detects LM Studio / llama.cpp / Jan / LocalAI / vLLM and installs Ollama (winget first, direct installer as fallback, after confirmation).
+- **GPU policy**: dedicated card detected (`nvidia-smi` + WMI) -> Ollama default (GPU). Otherwise the UI saves `localGpu: "cpu"` and the engine sends `options.num_gpu = 0`.
+- **Live usage**: `/api/ps` (share on GPU vs CPU), VRAM from `nvidia-smi`, system RAM; "Probar" runs 5 sample messages and reports latency, tokens and estimated cost at 4,000 messages/day.
+
+Engine CLI: `node ai-cli.js <presets|config-get|config-save|ai-usage|ai-test|local-detect|local-resources|local-delete|local-pull> --stdin`.
