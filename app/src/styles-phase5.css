@@ -47,3 +47,30 @@ tr.ads-review td { background: color-mix(in srgb, var(--amber) 8%, transparent);
 .spin { animation: ads-spin 1s linear infinite; }
 @keyframes ads-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+
+.ads-tabs { align-self: flex-start; margin: 0; }
+.dec-panel { display: flex; flex-direction: column; gap: 16px; }
+.dec-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 14px; }
+.dec-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+.dec-card.closed { opacity: 0.65; }
+.dec-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.dec-head h3 { margin: 2px 0; font-size: 16px; }
+.dec-kind { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.dec-verdict { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; text-align: right; }
+.dec-reason { margin: 0; font-weight: 600; }
+.dec-note { margin: 0; font-size: 12px; }
+.dec-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 8px; margin: 0; }
+.dec-metrics div { padding: 8px; border-radius: 10px; background: var(--input); }
+.dec-metrics dt { font-size: 11px; color: var(--muted); }
+.dec-metrics dd { margin: 2px 0 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+.dec-actions { display: flex; gap: 8px; }
+.ads-switches { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.ads-check { display: flex; align-items: center; gap: 8px; cursor: pointer; }

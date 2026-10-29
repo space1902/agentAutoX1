@@ -10,13 +10,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tauri::{AppHandle, Emitter};
 
 const KEY_SERVICE: &str = "agentAutoX1";
 const TOKEN_ENTRY: &str = "meta-token";
 /// Env var the engine reads the token from.
 pub const TOKEN_ENV: &str = "AGENTAUTO_META_TOKEN";
 
-const ALLOWED: &[&str] = &["sync", "report", "status", "test-token", "config-get", "config-set"];
+const ALLOWED: &[&str] = &["sync", "report", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status"];
+const DECISION_STATUSES: &[&str] = &["pending", "done", "ignored"];
 const GROUPS: &[&str] = &["ct", "campaign", "ad"];
 
 // ---------------------------------------------------------------- engine location and arguments
@@ -46,6 +50,11 @@ pub struct AdsArgs<'a> {
     pub group: Option<&'a str>,
     /// The payload is piped through stdin (`config-set`).
     pub stdin: bool,
+    /// `decision-status`: decision id and new status.
+    pub id: Option<u64>,
+    pub status: Option<&'a str>,
+    /// `tick --force`: snapshot and sync even if nothing is due.
+    pub force: bool,
 }
 
 /// Node arguments for one engine command. Everything is validated here so nothing odd reaches the shell-less spawn.
@@ -72,6 +81,16 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
     }
     if matches!(command, "sync" | "report") && (args.from.is_none() || args.to.is_none()) {
         return Err("Faltan las fechas del rango.".to_string());
+    }
+    if command == "decision-status" {
+        let (Some(id), Some(status)) = (args.id, args.status) else { return Err("Faltan la decisión y el estado.".to_string()) };
+        if id == 0 || !DECISION_STATUSES.contains(&status) {
+            return Err("La decisión o el estado no son válidos.".to_string());
+        }
+        out.extend(["--id".to_string(), id.to_string(), "--status".to_string(), status.to_string()]);
+    }
+    if args.force && command == "tick" {
+        out.push("--force".to_string());
     }
     if args.stdin {
         out.push("--stdin".to_string());
@@ -257,6 +276,80 @@ pub fn config_set(settings: &Settings, partial: &Value) -> Result<Value, String>
     run_engine(settings, "config-set", &AdsArgs { stdin: true, ..Default::default() }, Some(partial), None)
 }
 
+/// One scheduler step (budget snapshot + due decisions). Shares the sync lock so it never overlaps a manual sync.
+pub fn tick(settings: &Settings, force: bool) -> Result<Value, String> {
+    let _guard = SyncGuard::acquire()?;
+    let token = stored_token()?;
+    run_engine(settings, "tick", &AdsArgs { force, ..Default::default() }, None, token.as_deref())
+}
+
+pub fn decisions(settings: &Settings) -> Result<Value, String> {
+    run_engine(settings, "decisions", &AdsArgs::default(), None, None)
+}
+
+pub fn decision_status(settings: &Settings, id: u64, status: &str) -> Result<Value, String> {
+    run_engine(settings, "decision-status", &AdsArgs { id: Some(id), status: Some(status), ..Default::default() }, None, None)
+}
+
+// ---------------------------------------------------------------- decision scheduler
+//
+// Phase B runs inside the app process: a plain thread calls the one-shot `tick` command every few minutes. The
+// engine decides what is due (and dedupes in SQLite), so a closed app only means the decision is issued late.
+
+const TICK_EVERY: Duration = Duration::from_secs(5 * 60);
+const FIRST_TICK_AFTER: Duration = Duration::from_secs(45);
+
+/// Title and body of a created decision (the engine builds the Spanish text).
+pub fn toast_text(decision: &Value) -> Option<(String, String)> {
+    let message = decision.get("message")?;
+    Some((message.get("title")?.as_str()?.to_string(), message.get("body")?.as_str()?.to_string()))
+}
+
+/// Emits the `ads-decisions` event and the desktop toast for the decisions a tick just created.
+pub fn announce(app: &AppHandle, result: &Value) {
+    let created = result.get("created").and_then(Value::as_array).cloned().unwrap_or_default();
+    if created.is_empty() {
+        return;
+    }
+    let _ = app.emit("ads-decisions", result);
+    if result.get("notifyDesktop").and_then(Value::as_bool) == Some(true) {
+        match created.as_slice() {
+            [one] => {
+                if let Some((title, body)) = toast_text(one) {
+                    crate::notify::toast(&title, &body);
+                }
+            }
+            many => crate::notify::toast("Nuevas decisiones de anuncios", &format!("Tienes {} decisiones por revisar en Anuncios > Decisiones.", many.len())),
+        }
+    }
+}
+
+fn sleep_unless_stopped(total: Duration, stop: &AtomicBool) -> bool {
+    let mut left = total;
+    while left > Duration::ZERO {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let step = left.min(Duration::from_secs(1));
+        std::thread::sleep(step);
+        left -= step;
+    }
+    !stop.load(Ordering::SeqCst)
+}
+
+pub fn spawn_scheduler(app: AppHandle, settings: Arc<Mutex<Settings>>, stop: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let mut wait = FIRST_TICK_AFTER;
+        while sleep_unless_stopped(wait, &stop) {
+            wait = TICK_EVERY;
+            let current = settings.lock().unwrap().clone();
+            if let Ok(result) = tick(&current, false) {
+                announce(&app, &result);
+            }
+        }
+    });
+}
+
 pub fn test_token(settings: &Settings) -> Result<Value, String> {
     let token = stored_token()?.ok_or("Falta el token de Meta. Impórtalo o pégalo en la configuración de Anuncios.")?;
     run_engine(settings, "test-token", &AdsArgs::default(), None, Some(&token))
@@ -268,7 +361,7 @@ mod tests {
     use serde_json::json;
 
     fn args<'a>(from: Option<&'a str>, to: Option<&'a str>, group: Option<&'a str>) -> AdsArgs<'a> {
-        AdsArgs { from, to, group, stdin: false }
+        AdsArgs { from, to, group, ..Default::default() }
     }
 
     #[test]
@@ -297,6 +390,32 @@ mod tests {
         assert!(build_args("sync", &args(Some("ayer"), Some("2026-10-29"), None)).is_err());
         assert!(build_args("report", &args(Some("2026-10-01"), Some("2026-10-29"), Some("x"))).is_err());
         assert!(build_args("sync", &args(None, None, None)).unwrap_err().contains("fechas"));
+    }
+
+    #[test]
+    fn builds_scheduler_and_decision_arguments() {
+        assert_eq!(&build_args("tick", &AdsArgs::default()).unwrap()[2..], ["tick"]);
+        assert_eq!(build_args("tick", &AdsArgs { force: true, ..Default::default() }).unwrap().last().unwrap(), "--force");
+        let ok = build_args("decision-status", &AdsArgs { id: Some(7), status: Some("done"), ..Default::default() }).unwrap();
+        assert_eq!(&ok[2..], ["decision-status", "--id", "7", "--status", "done"]);
+        assert!(build_args("decision-status", &AdsArgs { id: Some(7), status: Some("x; calc"), ..Default::default() }).is_err());
+        assert!(build_args("decision-status", &AdsArgs { id: Some(0), status: Some("done"), ..Default::default() }).is_err());
+        assert!(build_args("decision-status", &AdsArgs::default()).is_err());
+    }
+
+    #[test]
+    fn toast_text_comes_from_the_engine_message() {
+        let d = json!({"message": {"title": "Prueba: CT 01 · día 4", "body": "Escalar. ROAS 3,4"}});
+        assert_eq!(toast_text(&d), Some(("Prueba: CT 01 · día 4".to_string(), "Escalar. ROAS 3,4".to_string())));
+        assert_eq!(toast_text(&json!({})), None);
+    }
+
+    #[test]
+    fn the_scheduler_sleep_stops_quickly() {
+        let stop = AtomicBool::new(true);
+        let start = std::time::Instant::now();
+        assert!(!sleep_unless_stopped(Duration::from_secs(30), &stop));
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 
     #[test]

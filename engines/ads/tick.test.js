@@ -78,6 +78,8 @@ test('a due decision triggers a sync, is stored once and is queued for WhatsApp 
   const ad = out.created.find((d) => d.kind === 'test');
   assert.equal(ad.verdict.label, 'Escalar y duplicar');
   assert.ok(ad.id > 0);
+  assert.match(ad.message.title, /día 4/);
+  assert.match(ad.message.body, /Escalar y duplicar/);
   assert.equal(store.decisions().length, out.created.length);
   assert.equal(store.pendingWhatsapp().length, out.created.length);
   assert.match(store.pendingWhatsapp()[0].text, /día 4/);

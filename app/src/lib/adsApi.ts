@@ -108,6 +108,68 @@ export interface Thresholds {
   watchRoas: number;
 }
 
+export interface Lifecycle {
+  testDays: number;
+  testNotifyDay: number;
+  testNotifyAt: string;
+  postBudgetDays: number;
+  postBudgetNotifyDay: number;
+  postBudgetNotifyAt: string;
+  testEnabled: boolean;
+  budgetEnabled: boolean;
+  windowDays: number;
+  minRoasToScale: number;
+  maxCpaWorsenPct: number;
+  minSales: number;
+  lowerCpaWorsenPct: number;
+  raisePct: number;
+  maxRaisePct: number;
+  lateDays: number;
+  notifyDesktop: boolean;
+  notifyWhatsapp: boolean;
+  snapshotMinutes: number;
+}
+
+export type DecisionKind = "test" | "ct_test" | "budget";
+export type DecisionStatus = "pending" | "done" | "ignored";
+
+export interface Decision {
+  id: number;
+  key: string;
+  kind: DecisionKind;
+  entityType: string;
+  entityId: string;
+  label: string;
+  dayN: number;
+  late: boolean;
+  dueDate: string;
+  range: { from: string; to: string };
+  verdict: AdAction;
+  reason: string;
+  metrics: Totals;
+  extra: {
+    changePct?: number;
+    changeDate?: string;
+    exact?: boolean;
+    suggestedPct?: number | null;
+    before?: Totals;
+    beforeRange?: { from: string; to: string };
+    previous?: { date: string; pct: number } | null;
+    daysSincePrevious?: number | null;
+    firstSpendDate?: string;
+    nominalTestDays?: number;
+  };
+  status: DecisionStatus;
+  createdAt: number;
+}
+
+export interface DecisionsData {
+  decisions: Decision[];
+  activitiesOk: boolean | null;
+  lastSnapshot: number | null;
+  lifecycle: Lifecycle;
+}
+
 export interface AdsConfig {
   adAccountId: string;
   graphVersion: string;
@@ -119,6 +181,7 @@ export interface AdsConfig {
   currency: string;
   autoRefreshMinutes: number;
   thresholds: Thresholds;
+  lifecycle: Lifecycle;
 }
 
 export interface AdsStatus {
@@ -135,6 +198,9 @@ export const adsApi = {
   status: () => invoke<AdsStatus>("ads_status"),
   configGet: () => invoke<{ config: AdsConfig; defaults: AdsConfig }>("ads_config_get"),
   configSet: (config: Partial<AdsConfig>) => invoke<{ config: AdsConfig }>("ads_config_set", { config }),
+  decisions: () => invoke<DecisionsData>("ads_decisions"),
+  decisionStatus: (id: number, status: DecisionStatus) => invoke<{ id: number; status: DecisionStatus }>("ads_decision_status", { id, status }),
+  tickNow: () => invoke<{ created: Decision[]; warnings: string[]; snapshot: boolean; synced: boolean }>("ads_tick_now"),
   tokenStatus: () => invoke<boolean>("ads_token_status"),
   tokenSet: (token: string) => invoke<void>("ads_token_set", { token }),
   tokenClear: () => invoke<void>("ads_token_clear"),

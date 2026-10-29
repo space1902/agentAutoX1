@@ -3,6 +3,7 @@ mod ai;
 mod data;
 mod embed;
 mod linker;
+mod notify;
 mod keepalive;
 mod keepalive_real;
 mod linker_real;
@@ -459,6 +460,27 @@ async fn ads_config_set(state: State<'_, AppState>, config: Value) -> Result<Val
     blocking(move || ads::config_set(&settings, &config)).await
 }
 
+#[tauri::command]
+async fn ads_decisions(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::decisions(&settings)).await
+}
+
+#[tauri::command]
+async fn ads_decision_status(state: State<'_, AppState>, id: u64, status: String) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::decision_status(&settings, id, &status)).await
+}
+
+/// "Evaluar ahora": one scheduler step on demand (snapshot, sync and decisions that are due).
+#[tauri::command]
+async fn ads_tick_now(app: AppHandle, state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    let result = blocking(move || ads::tick(&settings, true)).await?;
+    ads::announce(&app, &result);
+    Ok(result)
+}
+
 /// Only whether a token exists; the value never reaches the UI.
 #[tauri::command]
 async fn ads_token_status() -> Result<bool, String> {
@@ -533,6 +555,7 @@ pub fn run() {
                     stop: keep_stop.clone(),
                 }),
             );
+            ads::spawn_scheduler(app.handle().clone(), settings.clone(), keep_stop.clone());
             app.manage(AppState {
                 root,
                 settings_file,
@@ -623,6 +646,9 @@ pub fn run() {
             ads_status,
             ads_config_get,
             ads_config_set,
+            ads_decisions,
+            ads_decision_status,
+            ads_tick_now,
             ads_token_status,
             ads_token_set,
             ads_token_clear,

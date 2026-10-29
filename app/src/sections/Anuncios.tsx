@@ -1,8 +1,10 @@
-import { Banknote, Coins, MessageCircle, Percent, RefreshCw, Settings2, Target, TrendingUp, Wallet } from "lucide-react";
+import { listen } from "@tauri-apps/api/event";
+import { Banknote, Bell, Coins, MessageCircle, Percent, RefreshCw, Settings2, Target, TrendingUp, Wallet } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import AdsChart from "../components/ads/AdsChart";
 import AdsSettings from "../components/ads/AdsSettings";
 import AdsTable from "../components/ads/AdsTable";
+import DecisionsPanel from "../components/ads/DecisionsPanel";
 import VouchersPanel from "../components/ads/VouchersPanel";
 import { Banner, Card, Notice, Skeleton, StatCard } from "../components/ui";
 import { errorText } from "../lib/api";
@@ -17,6 +19,9 @@ import {
   toIso,
   type AdsConfig,
   type AdsStatus,
+  type Decision,
+  type DecisionsData,
+  type DecisionStatus,
   type Group,
   type Preset,
   type Report,
@@ -34,6 +39,8 @@ const GROUPS: { id: Group; label: string }[] = [
   { id: "campaign", label: "Campaña" },
   { id: "ad", label: "Anuncio" },
 ];
+type Tab = "resumen" | "decisiones";
+
 /** Opening the section only syncs when the last sync is older than this. */
 const STALE_MS = 5 * 60_000;
 
@@ -59,6 +66,10 @@ export default function Anuncios() {
   const [showSettings, setShowSettings] = useState(false);
   const [problems, setProblems] = useState<string[]>([]);
   const [now, setNow] = useState(Date.now());
+  const [tab, setTab] = useState<Tab>("resumen");
+  const [decisionData, setDecisionData] = useState<DecisionsData | null>(null);
+  const [evaluating, setEvaluating] = useState(false);
+  const [banner, setBanner] = useState<string | null>(null);
 
   const range = preset === "custom" ? custom : presetRange(preset, today);
   const rangeValid = range.from !== "" && range.to !== "" && range.from <= range.to;
@@ -92,6 +103,14 @@ export default function Anuncios() {
     }
   }, []);
 
+  const loadDecisions = useCallback(async () => {
+    try {
+      setDecisionData(await adsApi.decisions());
+    } catch (e) {
+      setProblems([errorText(e)]);
+    }
+  }, []);
+
   const doSync = useCallback(
     async (from: string, to: string) => {
       setSyncing(true);
@@ -118,6 +137,7 @@ export default function Anuncios() {
         setProblems([errorText(e)]);
       }
       const s = await loadStatus();
+      void loadDecisions();
       await loadReport();
       setLoaded(true);
       const { range: r, rangeValid: ok } = latest.current;
@@ -126,6 +146,39 @@ export default function Anuncios() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The scheduler (inside the app) announces new decisions while any section is open.
+  useEffect(() => {
+    const un = listen<{ created: Decision[] }>("ads-decisions", (e) => {
+      void loadDecisions();
+      const n = e.payload.created.length;
+      setBanner(n === 1 ? `Nueva decisión: ${e.payload.created[0].label} → ${e.payload.created[0].verdict.label}` : `${n} decisiones nuevas por revisar.`);
+    });
+    return () => void un.then((fn) => fn());
+  }, [loadDecisions]);
+
+  const changeStatus = async (id: number, status: DecisionStatus) => {
+    try {
+      await adsApi.decisionStatus(id, status);
+      await loadDecisions();
+    } catch (e) {
+      setProblems([errorText(e)]);
+    }
+  };
+
+  const evaluateNow = async () => {
+    setEvaluating(true);
+    try {
+      const res = await adsApi.tickNow();
+      setProblems(res.warnings);
+      if (res.created.length === 0) setBanner("Revisé todo: no hay decisiones nuevas por ahora.");
+    } catch (e) {
+      setProblems([errorText(e)]);
+    } finally {
+      await loadDecisions();
+      setEvaluating(false);
+    }
+  };
 
   // Range or grouping changed: read the local cache (no network).
   useEffect(() => {
@@ -149,6 +202,7 @@ export default function Anuncios() {
     return () => window.clearInterval(id);
   }, [loaded, minutes, today, doSync]);
 
+  const pendingCount = decisionData?.decisions.filter((d) => d.status === "pending").length ?? 0;
   const k = report?.kpis;
   const updated = report?.lastSync.meta ?? status?.lastSync.meta ?? null;
   const rangeLabel = range.from === range.to ? range.from : `${range.from} → ${range.to}`;
@@ -161,6 +215,13 @@ export default function Anuncios() {
         </button>
       </Banner>
 
+      {banner && (
+        <Notice kind="ok">
+          <Bell size={14} aria-hidden /> {banner}{" "}
+          <button className="btn ghost sm" onClick={() => { setBanner(null); setTab("decisiones"); }}>Ver decisiones</button>
+          <button className="btn ghost sm" onClick={() => setBanner(null)}>Cerrar</button>
+        </Notice>
+      )}
       {problems.map((p) => (
         <Notice key={p}>{p}</Notice>
       ))}
@@ -185,6 +246,19 @@ export default function Anuncios() {
         </Card>
       )}
 
+      <div className="ia-tabs ads-tabs" role="tablist" aria-label="Secciones de Anuncios">
+        <button role="tab" aria-selected={tab === "resumen"} className={`ia-tab ${tab === "resumen" ? "active" : ""}`} onClick={() => setTab("resumen")}>Resumen</button>
+        <button role="tab" aria-selected={tab === "decisiones"} className={`ia-tab ${tab === "decisiones" ? "active" : ""}`} onClick={() => setTab("decisiones")}>
+          Decisiones{pendingCount > 0 ? ` (${pendingCount})` : ""}
+        </button>
+      </div>
+
+      {tab === "decisiones" && (
+        <DecisionsPanel decisions={decisionData?.decisions ?? []} activitiesOk={decisionData?.activitiesOk ?? null} lifecycle={decisionData?.lifecycle ?? null} busy={evaluating} onStatus={(id, s) => void changeStatus(id, s)} onEvaluate={() => void evaluateNow()} />
+      )}
+
+      {tab === "resumen" && (
+      <>
       <Card>
         <div className="ads-controls">
           <div className="ia-tabs" role="tablist" aria-label="Rango de fechas">
@@ -264,6 +338,8 @@ export default function Anuncios() {
         </div>
         {report ? <VouchersPanel vouchers={report.comprobantes} reviewCount={report.reviewCount} /> : <Skeleton height={120} />}
       </Card>
+      </>
+      )}
     </div>
   );
 }

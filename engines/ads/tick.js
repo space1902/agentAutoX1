@@ -82,7 +82,7 @@ export async function runTick({ store, config, token, fetchImpl = globalThis.fet
   for (const decision of due) {
     const id = store.insertDecision(decision, now());
     if (id === null) continue;
-    const stored = { ...decision, id, status: 'pending', createdAt: now() };
+    const stored = { ...decision, id, status: 'pending', createdAt: now(), message: decisionMessage(decision) };
     result.created.push(stored);
     if (life.notifyWhatsapp) store.enqueueWhatsapp(decisionMessage(decision).text, 'decision', now());
   }

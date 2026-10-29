@@ -1,7 +1,7 @@
 import { KeyRound, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { adsApi, type AdsConfig, type Thresholds } from "../../lib/adsApi";
+import { adsApi, type AdsConfig, type Lifecycle, type Thresholds } from "../../lib/adsApi";
 import { Notice, Pill } from "../ui";
 
 interface Props {
@@ -18,6 +18,22 @@ const THRESHOLD_LABELS: { key: keyof Thresholds; label: string; hint: string }[]
   { key: "scaleRoas", label: "ROAS para escalar", hint: "" },
   { key: "keepRoas", label: "ROAS para mantener", hint: "" },
   { key: "watchRoas", label: "ROAS para vigilar", hint: "Por debajo de esto: «Apagar»." },
+];
+
+type NumKey = Exclude<keyof Lifecycle, "testEnabled" | "budgetEnabled" | "notifyDesktop" | "notifyWhatsapp" | "testNotifyAt" | "postBudgetNotifyAt">;
+
+const LIFE_NUMBERS: { key: NumKey; label: string; hint: string }[] = [
+  { key: "testDays", label: "Duración nominal de la prueba (días)", hint: "Solo informativa." },
+  { key: "testNotifyDay", label: "Veredicto de la prueba en el día", hint: "El día 1 es el primer día con gasto." },
+  { key: "postBudgetNotifyDay", label: "Revisión tras subir presupuesto en el día", hint: "El día del cambio cuenta como día 1." },
+  { key: "windowDays", label: "Días de comparación antes del cambio", hint: "Ventana previa al aumento." },
+  { key: "minRoasToScale", label: "ROAS mínimo para «Subir más»", hint: "" },
+  { key: "minSales", label: "Ventas mínimas para decidir", hint: "" },
+  { key: "maxCpaWorsenPct", label: "Costo por venta: máximo que puede empeorar (%)", hint: "Para «Subir más»." },
+  { key: "lowerCpaWorsenPct", label: "Costo por venta: empeora más de (%) = «Bajar»", hint: "" },
+  { key: "raisePct", label: "Próxima subida sugerida (%)", hint: "" },
+  { key: "maxRaisePct", label: "Tope de subida (%)", hint: "Por defecto igual al del monitor (20 %)." },
+  { key: "lateDays", label: "Días de gracia si la app estaba cerrada", hint: "Pasado ese plazo la decisión ya no se emite." },
 ];
 
 export default function AdsSettings({ tokenPresent, config, onTokenChange, onConfigSaved }: Props) {
@@ -78,6 +94,7 @@ export default function AdsSettings({ tokenPresent, config, onTokenChange, onCon
     });
 
   const set = <K extends keyof AdsConfig>(key: K, value: AdsConfig[K]) => setDraft((d) => ({ ...d, [key]: value }));
+  const setLife = <K extends keyof Lifecycle>(key: K, value: Lifecycle[K]) => setDraft((d) => ({ ...d, lifecycle: { ...d.lifecycle, [key]: value } }));
   const setThreshold = (key: keyof Thresholds, value: string) =>
     setDraft((d) => ({ ...d, thresholds: { ...d.thresholds, [key]: value === "" ? 0 : Number(value) } }));
 
@@ -152,6 +169,38 @@ export default function AdsSettings({ tokenPresent, config, onTokenChange, onCon
           <div className="field" key={key}>
             <label htmlFor={`th-${key}`}>{label}</label>
             <input id={`th-${key}`} className="input" type="number" min={0} step="any" value={draft.thresholds[key]} onChange={(e) => setThreshold(key, e.target.value)} />
+            {hint && <small>{hint}</small>}
+          </div>
+        ))}
+      </div>
+
+      <h3 className="ia-sub" style={{ marginTop: 10 }}>Decisiones diarias</h3>
+      <div className="ads-switches">
+        {([
+          ["testEnabled", "Veredicto de prueba por anuncio y CT"],
+          ["budgetEnabled", "Revisión tras subir presupuesto"],
+          ["notifyDesktop", "Avisarme con una notificación de Windows"],
+          ["notifyWhatsapp", "Enviarme también el aviso por WhatsApp (si el canal está conectado)"],
+        ] as const).map(([key, label]) => (
+          <label key={key} className="ads-check">
+            <input type="checkbox" checked={draft.lifecycle[key]} onChange={(e) => setLife(key, e.target.checked)} /> {label}
+          </label>
+        ))}
+      </div>
+      <div className="ia-grid">
+        <div className="field">
+          <label htmlFor="life-test-at">Hora del veredicto de prueba</label>
+          <input id="life-test-at" className="input" type="time" value={draft.lifecycle.testNotifyAt} onChange={(e) => setLife("testNotifyAt", e.target.value)} />
+          <small>Hora de la cuenta publicitaria.</small>
+        </div>
+        <div className="field">
+          <label htmlFor="life-budget-at">Hora de la revisión de presupuesto</label>
+          <input id="life-budget-at" className="input" type="time" value={draft.lifecycle.postBudgetNotifyAt} onChange={(e) => setLife("postBudgetNotifyAt", e.target.value)} />
+        </div>
+        {LIFE_NUMBERS.map(({ key, label, hint }) => (
+          <div className="field" key={key}>
+            <label htmlFor={`life-${key}`}>{label}</label>
+            <input id={`life-${key}`} className="input" type="number" min={0} step="any" value={draft.lifecycle[key]} onChange={(e) => setLife(key, e.target.value === "" ? 0 : Number(e.target.value))} />
             {hint && <small>{hint}</small>}
           </div>
         ))}
