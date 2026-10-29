@@ -6,12 +6,15 @@ import AdsSettings from "../components/ads/AdsSettings";
 import AdsTable from "../components/ads/AdsTable";
 import AlertsPanel from "../components/ads/AlertsPanel";
 import DecisionsPanel from "../components/ads/DecisionsPanel";
+import CountriesPanel from "../components/ads/CountriesPanel";
 import VouchersPanel from "../components/ads/VouchersPanel";
 import { Banner, Card, Notice, Skeleton, StatCard } from "../components/ui";
 import { errorText } from "../lib/api";
 import {
   adsApi,
   agoText,
+  countryName,
+  dmy,
   formatInt,
   formatMoney,
   formatPct,
@@ -27,6 +30,7 @@ import {
   type Preset,
   type Report,
   type SyncResult,
+  type TrackingItem,
 } from "../lib/adsApi";
 
 const PRESETS: { id: Exclude<Preset, "custom">; label: string }[] = [
@@ -70,21 +74,24 @@ export default function Anuncios() {
   const [decisionData, setDecisionData] = useState<DecisionsData | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  const [country, setCountry] = useState("");
+  const [split, setSplit] = useState(false);
+  const [tracking, setTracking] = useState<TrackingItem[]>([]);
 
   const range = preset === "custom" ? custom : presetRange(preset, today);
   const rangeValid = range.from !== "" && range.to !== "" && range.from <= range.to;
   const includesToday = range.to >= today && range.from <= today;
 
-  const latest = useRef({ range, group, rangeValid, includesToday, tokenPresent, config });
-  latest.current = { range, group, rangeValid, includesToday, tokenPresent, config };
+  const latest = useRef({ range, group, rangeValid, includesToday, tokenPresent, config, country, split });
+  latest.current = { range, group, rangeValid, includesToday, tokenPresent, config, country, split };
   const seq = useRef(0);
 
   const loadReport = useCallback(async () => {
-    const { range: r, group: g, rangeValid: ok } = latest.current;
+    const { range: r, group: g, rangeValid: ok, country: c, split: sp } = latest.current;
     if (!ok) return;
     const mine = ++seq.current;
     try {
-      const data = await adsApi.report(r.from, r.to, g);
+      const data = await adsApi.report(r.from, r.to, g, c, sp);
       if (mine === seq.current) setReport(data);
     } catch (e) {
       if (mine === seq.current) setProblems([errorText(e)]);
@@ -106,16 +113,18 @@ export default function Anuncios() {
   const loadDecisions = useCallback(async () => {
     try {
       setDecisionData(await adsApi.decisions());
+      setTracking((await adsApi.tracking()).items);
     } catch (e) {
       setProblems([errorText(e)]);
     }
   }, []);
 
   const doSync = useCallback(
-    async (from: string, to: string) => {
+    async () => {
       setSyncing(true);
       try {
-        const res = await adsApi.sync(from, to);
+        const res = await adsApi.syncAuto();
+        if (res.backfilled && res.history) setBanner(`Historial cargado desde ${dmy(res.history.from)} (${res.history.days} días con datos).`);
         setProblems(syncProblems(res));
       } catch (e) {
         setProblems([errorText(e)]);
@@ -140,8 +149,8 @@ export default function Anuncios() {
       void loadDecisions();
       await loadReport();
       setLoaded(true);
-      const { range: r, rangeValid: ok } = latest.current;
-      if (s?.tokenPresent && ok && (!s.lastSync.meta || Date.now() - s.lastSync.meta > STALE_MS)) void doSync(r.from, r.to);
+      const { rangeValid: ok } = latest.current;
+      if (s?.tokenPresent && ok && (!s.history?.backfill || !s.lastSync.meta || Date.now() - s.lastSync.meta > STALE_MS)) void doSync();
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -165,6 +174,15 @@ export default function Anuncios() {
     }
   };
 
+  const setVoucherCountry = async (key: string, code: string) => {
+    try {
+      await adsApi.comprobanteCountry(key, code);
+      await loadReport();
+    } catch (e) {
+      setProblems([errorText(e)]);
+    }
+  };
+
   const evaluateNow = async () => {
     setEvaluating(true);
     try {
@@ -182,7 +200,7 @@ export default function Anuncios() {
   // Range or grouping changed: read the local cache (no network).
   useEffect(() => {
     if (loaded) void loadReport();
-  }, [preset, custom, group, loaded, loadReport]);
+  }, [preset, custom, group, country, split, loaded, loadReport]);
 
   // "Actualizado hace X min" ticks while the section is open.
   useEffect(() => {
@@ -196,7 +214,7 @@ export default function Anuncios() {
     if (!loaded || minutes <= 0) return;
     const id = window.setInterval(() => {
       const cur = latest.current;
-      if (cur.tokenPresent && cur.includesToday) void doSync(today, today);
+      if (cur.tokenPresent && cur.includesToday) void doSync();
     }, minutes * 60_000);
     return () => window.clearInterval(id);
   }, [loaded, minutes, today, doSync]);
@@ -237,7 +255,7 @@ export default function Anuncios() {
       </div>
 
       {tab === "decisiones" && (
-        <DecisionsPanel decisions={decisionData?.decisions ?? []} activitiesOk={decisionData?.activitiesOk ?? null} lifecycle={decisionData?.lifecycle ?? null} busy={evaluating} onStatus={(id, s) => void changeStatus(id, s)} onEvaluate={() => void evaluateNow()} />
+        <DecisionsPanel tracking={tracking} decisions={decisionData?.decisions ?? []} activitiesOk={decisionData?.activitiesOk ?? null} lifecycle={decisionData?.lifecycle ?? null} busy={evaluating} onStatus={(id, s) => void changeStatus(id, s)} onEvaluate={() => void evaluateNow()} />
       )}
 
       {tab === "alertas" && <AlertsPanel />}
@@ -275,7 +293,7 @@ export default function Anuncios() {
           </div>
           {preset === "custom" && (
             <div className="ads-dates">
-              <input className="input" type="date" aria-label="Desde" value={custom.from} max={custom.to || undefined} onChange={(e) => setCustom((c) => ({ ...c, from: e.target.value }))} />
+              <input className="input" type="date" aria-label="Desde" value={custom.from} min={report?.history.firstData ?? undefined} max={custom.to || undefined} onChange={(e) => setCustom((c) => ({ ...c, from: e.target.value }))} />
               <span className="muted">a</span>
               <input className="input" type="date" aria-label="Hasta" value={custom.to} min={custom.from || undefined} onChange={(e) => setCustom((c) => ({ ...c, to: e.target.value }))} />
             </div>
@@ -284,11 +302,33 @@ export default function Anuncios() {
             <span className="muted" role="status">
               Actualizado {agoText(updated, now)}
             </span>
-            <button className="btn" disabled={syncing || !rangeValid || !tokenPresent} onClick={() => void doSync(range.from, range.to)}>
+            <button className="btn" disabled={syncing || !tokenPresent} onClick={() => void doSync()}>
               <RefreshCw size={16} aria-hidden className={syncing ? "spin" : ""} /> {syncing ? "Actualizando…" : "Actualizar"}
             </button>
           </div>
         </div>
+        {report && report.countries.some((c) => c.country) && (
+          <div className="ads-countries-bar">
+            <div className="chips" role="group" aria-label="Filtrar por país">
+              <button className={`chip ads-chip ${country === "" ? "on" : ""}`} aria-pressed={country === ""} onClick={() => setCountry("")}>Todos</button>
+              {report.countries.filter((c) => c.country).map((c) => (
+                <button key={c.country} className={`chip ads-chip ${country === c.country ? "on" : ""}`} aria-pressed={country === c.country} onClick={() => setCountry(c.country)}>
+                  {c.country} · {countryName(c.country)}
+                </button>
+              ))}
+            </div>
+            {group === "ct" && (
+              <label className="ads-check">
+                <input type="checkbox" checked={split} onChange={(e) => setSplit(e.target.checked)} /> Separar CT por país
+              </label>
+            )}
+          </div>
+        )}
+        {report?.history && (
+          <p className="muted ads-note ads-history">
+            Historial: desde {dmy(report.history.from)} · {report.history.days} días guardados · {report.history.vouchers} comprobantes · última sincronización {agoText(report.lastSync.meta ?? report.lastSync.sheet, now)}
+          </p>
+        )}
         {!rangeValid && <p className="muted">Elige un rango válido: la fecha inicial no puede ser posterior a la final.</p>}
         {preset === "today" && <p className="muted ads-note">El gasto de hoy es en vivo: se trae directo de Meta cada vez que actualizas.</p>}
       </Card>
@@ -303,9 +343,18 @@ export default function Anuncios() {
           <StatCard icon={TrendingUp} label="ROAS" value={k.gasto > 0 ? formatRoas(k.roas) : "—"} caption="Valor / gasto" />
           <StatCard icon={Coins} label="Costo por venta" value={k.ventas > 0 && k.gasto > 0 ? formatMoney(k.costoVenta) : "—"} caption="Gasto / ventas" />
           <StatCard icon={MessageCircle} label="Mensajes" value={formatInt(k.mensajes)} caption={k.mensajes > 0 ? `${formatMoney(k.costoMensaje)} cada uno` : "Conversaciones iniciadas"} />
+          <StatCard icon={Banknote} label="Margen bruto" value={formatMoney(k.margen)} caption={`${k.valor > 0 ? formatPct(k.margenPct) : "—"} del valor, tras comisiones y costos`} />
           <StatCard icon={Percent} label="% conversión" value={k.mensajes > 0 ? formatPct(k.conversion) : "—"} caption="Ventas / mensajes" />
         </div>
       )}
+
+      <Card>
+        <div className="card-head">
+          <h2 className="card-title">Por país</h2>
+          <span className="muted">Gasto por país de entrega · ventas por país del cliente</span>
+        </div>
+        {report ? <CountriesPanel countries={report.countries} selected={country} onSelect={setCountry} /> : <Skeleton height={100} />}
+      </Card>
 
       <Card>
         <div className="card-head">
@@ -338,7 +387,7 @@ export default function Anuncios() {
           <h2 className="card-title">Comprobantes</h2>
           <span className="muted">{report ? `${report.comprobantes.length} en el rango` : ""}</span>
         </div>
-        {report ? <VouchersPanel vouchers={report.comprobantes} reviewCount={report.reviewCount} /> : <Skeleton height={120} />}
+        {report ? <VouchersPanel vouchers={report.comprobantes} reviewCount={report.reviewCount} onCountry={(key, code) => void setVoucherCountry(key, code)} /> : <Skeleton height={120} />}
       </Card>
       </>
       )}

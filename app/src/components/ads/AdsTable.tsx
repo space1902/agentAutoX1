@@ -1,9 +1,9 @@
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { useMemo, useState } from "react";
-import { dayLabel, formatInt, formatMoney, formatPct, formatRoas, type AdRow, type Group } from "../../lib/adsApi";
+import { dayLabel, dmy, formatInt, formatMoney, formatPct, formatRoas, type AdRow, type Group } from "../../lib/adsApi";
 import { Pill } from "../ui";
 
-type SortKey = "label" | "gasto" | "mensajes" | "ventas" | "valor" | "roas" | "costoVenta" | "conversion";
+type SortKey = "label" | "gasto" | "mensajes" | "ventas" | "valor" | "roas" | "costoVenta" | "conversion" | "margen";
 
 const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "gasto", label: "Gasto", numeric: true },
@@ -13,6 +13,7 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "roas", label: "ROAS", numeric: true },
   { key: "costoVenta", label: "Costo por venta", numeric: true },
   { key: "conversion", label: "% conversión", numeric: true },
+  { key: "margen", label: "Margen", numeric: true },
 ];
 
 const FIRST_COLUMN: Record<Group, string> = { ct: "CT", campaign: "Campaña", ad: "Anuncio" };
@@ -66,6 +67,7 @@ export default function AdsTable({ rows, group }: { rows: AdRow[]; group: Group 
                 <div className="muted ads-sub">
                   {group === "ad" && <>{r.ct} · {r.campaignName || "—"} · </>}
                   {r.action ? dayLabel(r) : "sin gasto de Meta"}
+                  {r.raise ? ` · día ${r.raise.dayN} desde la subida (${dmy(r.raise.date).slice(0, 5)}, +${Math.round(r.raise.pct)} %)` : ""}
                   {r.effectiveStatus && r.effectiveStatus !== "ACTIVE" ? ` · ${r.effectiveStatus.toLowerCase()}` : ""}
                 </div>
               </td>
@@ -76,6 +78,7 @@ export default function AdsTable({ rows, group }: { rows: AdRow[]; group: Group 
               <td className="num">{r.gasto > 0 ? formatRoas(r.roas) : "—"}</td>
               <td className="num">{r.ventas > 0 && r.gasto > 0 ? formatMoney(r.costoVenta) : "—"}</td>
               <td className="num">{r.mensajes > 0 ? formatPct(r.conversion) : "—"}</td>
+              <td className={`num ${r.margen < 0 ? "ads-neg" : ""}`} title={`Margen ${formatPct(r.margenPct)} del valor`}>{formatMoney(r.margen)}</td>
               <td>{r.action ? <Pill tone={r.action.tone}>{r.action.label}</Pill> : <span className="muted">—</span>}</td>
             </tr>
           ))}

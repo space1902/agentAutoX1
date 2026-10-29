@@ -1,7 +1,7 @@
 import { KeyRound, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { adsApi, type AdsConfig, type Lifecycle, type Thresholds } from "../../lib/adsApi";
+import { COUNTRY_NAMES, adsApi, countryName, type AdsConfig, type CountrySettings, type Lifecycle, type Thresholds } from "../../lib/adsApi";
 import { Notice, Pill } from "../ui";
 
 interface Props {
@@ -23,12 +23,12 @@ const THRESHOLD_LABELS: { key: keyof Thresholds; label: string; hint: string }[]
 type NumKey = Exclude<keyof Lifecycle, "testEnabled" | "budgetEnabled" | "notifyDesktop" | "notifyWhatsapp" | "testNotifyAt" | "postBudgetNotifyAt">;
 
 const LIFE_NUMBERS: { key: NumKey; label: string; hint: string }[] = [
-  { key: "testDays", label: "Duración nominal de la prueba (días)", hint: "Solo informativa." },
-  { key: "testNotifyDay", label: "Veredicto de la prueba en el día", hint: "El día 1 es el primer día con gasto." },
-  { key: "postBudgetNotifyDay", label: "Revisión tras subir presupuesto en el día", hint: "El día del cambio cuenta como día 1." },
-  { key: "windowDays", label: "Días de comparación antes del cambio", hint: "Ventana previa al aumento." },
+  { key: "testNotifyDay", label: "Día del veredicto de prueba", hint: "El día 1 es el primer día con gasto. El veredicto llega solo ese día, a la hora de abajo." },
+  { key: "testDays", label: "Duración de la prueba (días)", hint: "Solo informativa: cuántos días dura la prueba de un anuncio." },
+  { key: "postBudgetNotifyDay", label: "Día de revisión tras subir presupuesto", hint: "El día de la subida cuenta como día 1. La revisión llega sola ese día, a la hora de abajo." },
+  { key: "windowDays", label: "Días de comparación antes de la subida", hint: "Con cuántos días anteriores a la subida se compara el resultado." },
   { key: "minRoasToScale", label: "ROAS mínimo para «Subir más»", hint: "" },
-  { key: "minSales", label: "Ventas mínimas para decidir", hint: "" },
+  { key: "minSales", label: "Ventas mínimas para decidir", hint: "Con menos ventas que esto no se baja ni se sube por costo por venta." },
   { key: "maxCpaWorsenPct", label: "Costo por venta: máximo que puede empeorar (%)", hint: "Para «Subir más»." },
   { key: "lowerCpaWorsenPct", label: "Costo por venta: empeora más de (%) = «Bajar»", hint: "" },
   { key: "raisePct", label: "Próxima subida sugerida (%)", hint: "" },
@@ -95,6 +95,12 @@ export default function AdsSettings({ tokenPresent, config, onTokenChange, onCon
 
   const set = <K extends keyof AdsConfig>(key: K, value: AdsConfig[K]) => setDraft((d) => ({ ...d, [key]: value }));
   const setLife = <K extends keyof Lifecycle>(key: K, value: Lifecycle[K]) => setDraft((d) => ({ ...d, lifecycle: { ...d.lifecycle, [key]: value } }));
+  const setCountry = (code: string, patch: Partial<CountrySettings>) =>
+    setDraft((d) => ({
+      ...d,
+      countries: { ...d.countries, [code]: { ...({ currency: "COP", rateToCop: 0, feePct: 0, costPerSale: 0, taxPct: 0 } as CountrySettings), ...d.countries[code], ...patch } },
+    }));
+  const addableCountries = Object.keys(COUNTRY_NAMES).filter((c) => !draft.countries[c]);
   const setThreshold = (key: keyof Thresholds, value: string) =>
     setDraft((d) => ({ ...d, thresholds: { ...d.thresholds, [key]: value === "" ? 0 : Number(value) } }));
 
@@ -162,6 +168,56 @@ export default function AdsSettings({ tokenPresent, config, onTokenChange, onCon
           <small>0 desactiva la actualización automática.</small>
         </div>
       </div>
+
+      <h3 className="ia-sub" style={{ marginTop: 10 }}>Historial</h3>
+      <div className="ia-grid">
+        <div className="field">
+          <label htmlFor="ads-history">Historial desde</label>
+          <input id="ads-history" className="input" type="date" value={draft.historyFrom} onChange={(e) => set("historyFrom", e.target.value)} />
+          <small>Vacío = se detecta solo el día más antiguo que haya en la hoja o en Meta. Si eliges una fecha anterior a la actual, se vuelve a cargar el historial desde ahí. Nada se borra nunca.</small>
+        </div>
+      </div>
+
+      <h3 className="ia-sub" style={{ marginTop: 10 }}>Países: moneda, comisión y costos</h3>
+      <p className="muted ads-note">
+        El gasto de Meta ya viene en COP. El valor de cada pago se convierte a COP con la tasa; la comisión y el impuesto son un % del valor ya convertido y el costo es por venta (en COP). Margen bruto = valor − gasto − comisiones − costos − impuestos.
+      </p>
+      {Object.keys(draft.countries).sort().map((code) => {
+        const c = draft.countries[code];
+        return (
+          <div key={code} className="ads-countries-grid">
+            <div className="field">
+              <label htmlFor={`cc-cur-${code}`}>{code} · {countryName(code)}: moneda del valor</label>
+              <input id={`cc-cur-${code}`} className="input" maxLength={3} value={c.currency} onChange={(e) => setCountry(code, { currency: e.target.value.toUpperCase() })} />
+            </div>
+            <div className="field">
+              <label htmlFor={`cc-rate-${code}`}>Tasa: 1 {c.currency} = ? COP</label>
+              <input id={`cc-rate-${code}`} className="input" type="number" min={0} step="any" value={c.rateToCop} onChange={(e) => setCountry(code, { rateToCop: Number(e.target.value) })} />
+              {c.currency !== "COP" && !(c.rateToCop > 0) && <small className="ads-warn">Sin tasa: se muestra sin convertir.</small>}
+            </div>
+            <div className="field">
+              <label htmlFor={`cc-fee-${code}`}>Comisión de pago (%)</label>
+              <input id={`cc-fee-${code}`} className="input" type="number" min={0} max={100} step="any" value={c.feePct} onChange={(e) => setCountry(code, { feePct: Number(e.target.value) })} />
+            </div>
+            <div className="field">
+              <label htmlFor={`cc-cost-${code}`}>Costo por venta (COP)</label>
+              <input id={`cc-cost-${code}`} className="input" type="number" min={0} step="any" value={c.costPerSale} onChange={(e) => setCountry(code, { costPerSale: Number(e.target.value) })} />
+            </div>
+            <div className="field">
+              <label htmlFor={`cc-tax-${code}`}>Impuesto (%)</label>
+              <input id={`cc-tax-${code}`} className="input" type="number" min={0} max={100} step="any" value={c.taxPct} onChange={(e) => setCountry(code, { taxPct: Number(e.target.value) })} />
+            </div>
+          </div>
+        );
+      })}
+      {addableCountries.length > 0 && (
+        <div className="ia-inline" style={{ marginBottom: 14 }}>
+          <select className="input" aria-label="Añadir país" value="" onChange={(e) => e.target.value && setCountry(e.target.value, {})}>
+            <option value="">Añadir un país…</option>
+            {addableCountries.map((c) => <option key={c} value={c}>{c} · {countryName(c)}</option>)}
+          </select>
+        </div>
+      )}
 
       <h3 className="ia-sub" style={{ marginTop: 10 }}>Reglas de la acción sugerida</h3>
       <div className="ia-grid">

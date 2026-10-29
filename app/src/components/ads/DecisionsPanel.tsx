@@ -1,6 +1,6 @@
 import { Check, EyeOff, RefreshCw, Undo2 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { formatInt, formatMoney, formatPct, formatRoas, toIso, type Decision, type DecisionKind, type DecisionStatus, type Lifecycle, type Totals } from "../../lib/adsApi";
+import { dmy, formatInt, formatMoney, formatPct, formatRoas, toIso, type Decision, type DecisionKind, type DecisionStatus, type Lifecycle, type Totals, type TrackingItem } from "../../lib/adsApi";
 import { Card, Pill } from "../ui";
 
 type KindFilter = "all" | DecisionKind;
@@ -69,7 +69,45 @@ function DecisionCard({ d, onStatus }: { d: Decision; onStatus: (id: number, sta
   );
 }
 
+const short = (iso?: string) => dmy(iso).slice(0, 5);
+
+/** Informational day counters. Verdicts only come automatically (see the cards below). */
+function Following({ items }: { items: TrackingItem[] }) {
+  if (items.length === 0) return null;
+  return (
+    <Card>
+      <div className="card-head">
+        <h2 className="card-title">Seguimiento</h2>
+        <span className="muted">Solo informativo: los veredictos llegan solos</span>
+      </div>
+      <div className="ads-follow">
+        {items.map((i) => {
+          const lines: string[] = [];
+          if (i.kind === "budget") {
+            lines.push(`Día ${i.dayN} desde la subida (${short(i.date)}, +${Math.round(i.pct ?? 0)} %)${i.exact ? "" : " · fecha aproximada"}`);
+            if (i.checkDay && i.dayN < i.checkDay) lines.push(`Revisión automática el día ${i.checkDay} (${short(i.checkDate)}) a las ${i.checkAt}`);
+            else if (i.checkDay && i.dayN === i.checkDay) lines.push(`Revisión automática hoy a las ${i.checkAt}`);
+          } else {
+            lines.push(`Día ${i.dayN} desde que empezó a gastar`);
+            if (i.verdictDay && i.dayN < i.verdictDay) lines.push(`Prueba: día ${i.dayN} de ${i.testDays} · veredicto el día ${i.verdictDay} (${short(i.verdictDate)}) a las ${i.verdictAt}`);
+            else if (i.verdictDay && i.dayN === i.verdictDay) lines.push(`Prueba: veredicto hoy a las ${i.verdictAt}`);
+            else if (i.inTest) lines.push(`Prueba: día ${i.dayN} de ${i.testDays}`);
+            if (i.raise) lines.push(`Día ${i.raise.dayN} desde la subida (${short(i.raise.date)}, +${Math.round(i.raise.pct)} %)`);
+          }
+          return (
+            <div key={`${i.kind}-${i.id}`} className={`ads-follow-item ${i.kind}`}>
+              <strong>{i.kind === "ct" ? i.label : i.kind === "budget" ? `Presupuesto · ${i.label}` : i.label}</strong>
+              {lines.map((l) => <span key={l}>{l}</span>)}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 interface Props {
+  tracking: TrackingItem[];
   decisions: Decision[];
   activitiesOk: boolean | null;
   lifecycle: Lifecycle | null;
@@ -78,7 +116,7 @@ interface Props {
   onEvaluate: () => void;
 }
 
-export default function DecisionsPanel({ decisions, activitiesOk, lifecycle, busy, onStatus, onEvaluate }: Props) {
+export default function DecisionsPanel({ tracking, decisions, activitiesOk, lifecycle, busy, onStatus, onEvaluate }: Props) {
   const [kind, setKind] = useState<KindFilter>("all");
   const today = toIso(new Date());
 
@@ -90,6 +128,7 @@ export default function DecisionsPanel({ decisions, activitiesOk, lifecycle, bus
 
   return (
     <div className="dec-panel">
+      <Following items={tracking} />
       <Card>
         <div className="card-head">
           <h2 className="card-title">Decisiones del día</h2>

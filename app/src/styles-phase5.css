@@ -97,3 +97,16 @@ tr.ads-review td { background: color-mix(in srgb, var(--amber) 8%, transparent);
 .alerts-list-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .alerts-danger { color: var(--amber); font-weight: 600; }
 .field label .info { margin-left: 4px; vertical-align: middle; }
+
+.ads-neg { color: var(--red); }
+.ads-warn { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; color: var(--amber); font-size: 13px; }
+.ads-selected td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.ads-country-select { width: auto; min-width: 150px; padding: 6px 8px; }
+.ads-history { font-size: 12px; }
+.ads-follow { display: flex; flex-wrap: wrap; gap: 8px; }
+.ads-follow-item { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-radius: 12px; background: var(--input); border: 1px solid var(--border); min-width: 190px; }
+.ads-follow-item strong { font-size: 13px; }
+.ads-follow-item span { font-size: 12px; color: var(--muted); }
+.ads-follow-item.budget { border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
+.ads-countries-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 14px; }
+.ads-countries-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }

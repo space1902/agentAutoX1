@@ -22,6 +22,22 @@ export interface Totals {
   ticket: number;
   conversion: number;
   costoVenta: number;
+  /** Fees, per-sale costs and taxes in COP, and the gross margin: value - spend - fees - costs - taxes. */
+  comisiones: number;
+  costos: number;
+  impuestos: number;
+  margen: number;
+  margenPct: number;
+}
+
+/** Informational "day N since the last budget raise" (never a verdict). */
+export interface Raise {
+  date: string;
+  pct: number;
+  dayN: number;
+  exact: boolean;
+  entityType: string;
+  entityId: string;
 }
 
 export interface AdRow extends Totals {
@@ -37,6 +53,8 @@ export interface AdRow extends Totals {
   firstSpendDate: string | null;
   effectiveStatus: string | null;
   action: AdAction | null;
+  raise: Raise | null;
+  country: string;
 }
 
 export interface DayPoint {
@@ -62,6 +80,32 @@ export interface Voucher {
   result: string;
   status: VoucherStatus;
   phoneMasked: string;
+  key: string;
+  valorCop: number;
+  /** ISO country code; empty when it could not be derived. */
+  country: string;
+  /** How it was derived: telefono | campana | flujo | manual. */
+  countrySource: string;
+  /** The row is no longer in the sheet (kept in the history). */
+  gone: boolean;
+}
+
+export interface CountryRow extends Totals {
+  country: string;
+  name: string;
+  currency: string;
+  rateToCop: number;
+  rateMissing: boolean;
+}
+
+export interface HistoryInfo {
+  from: string | null;
+  source: string | null;
+  firstData: string | null;
+  lastData: string | null;
+  days: number;
+  vouchers: number;
+  backfill: { from: string; at: number } | null;
 }
 
 export interface LastSync {
@@ -74,6 +118,10 @@ export interface LastSync {
 export interface Report {
   range: { from: string; to: string };
   group: Group;
+  country: string;
+  splitCountry: boolean;
+  countries: CountryRow[];
+  history: HistoryInfo;
   currency: string;
   kpis: Totals;
   rows: AdRow[];
@@ -97,6 +145,8 @@ export interface SyncResult {
   syncedAt: number;
   meta: SyncPart & { insightRows?: number; ads?: number };
   sheet: SyncPart & { rows?: number };
+  backfilled?: boolean;
+  history?: HistoryInfo;
 }
 
 export interface Thresholds {
@@ -170,7 +220,18 @@ export interface DecisionsData {
   lifecycle: Lifecycle;
 }
 
+export interface CountrySettings {
+  currency: string;
+  rateToCop: number;
+  feePct: number;
+  costPerSale: number;
+  taxPct: number;
+}
+
 export interface AdsConfig {
+  historyFrom: string;
+  countries: Record<string, CountrySettings>;
+  countryWords: Record<string, string[]>;
   adAccountId: string;
   graphVersion: string;
   campaignPrefix: string;
@@ -189,12 +250,39 @@ export interface AdsStatus {
   lastSync: LastSync;
   counts: { insights: number; ads: number; comprobantes: number; budgets: number };
   account: { name: string; timezone: string; currency: string } | null;
+  history: HistoryInfo;
   today: string;
+}
+
+export interface TrackingItem {
+  kind: "ad" | "ct" | "budget";
+  id: string;
+  label: string;
+  ct?: string | null;
+  dayN: number;
+  firstSpendDate?: string;
+  inTest?: boolean;
+  testDays?: number;
+  verdictDay?: number;
+  verdictAt?: string;
+  verdictDate?: string;
+  raise?: Raise | null;
+  entityType?: string;
+  date?: string;
+  pct?: number;
+  exact?: boolean;
+  checkDay?: number;
+  checkAt?: string;
+  checkDate?: string;
 }
 
 export const adsApi = {
   sync: (from: string, to: string) => invoke<SyncResult>("ads_sync", { from, to }),
-  report: (from: string, to: string, group: Group) => invoke<Report>("ads_report", { from, to, group }),
+  syncAuto: () => invoke<SyncResult>("ads_sync_auto"),
+  report: (from: string, to: string, group: Group, country = "", split = false) =>
+    invoke<Report>("ads_report", { from, to, group, country: country || null, split }),
+  tracking: () => invoke<{ today: string; items: TrackingItem[] }>("ads_tracking"),
+  comprobanteCountry: (key: string, code: string) => invoke<{ key: string; country: string }>("ads_comprobante_country", { key, code }),
   status: () => invoke<AdsStatus>("ads_status"),
   configGet: () => invoke<{ config: AdsConfig; defaults: AdsConfig }>("ads_config_get"),
   configSet: (config: Partial<AdsConfig>) => invoke<{ config: AdsConfig }>("ads_config_set", { config }),
@@ -341,3 +429,16 @@ export const alertsApi = {
   linkCancel: () => invoke<void>("ads_wa_link_cancel"),
   importSession: (overwrite: boolean) => invoke<number>("ads_wa_import_session", { overwrite }),
 };
+
+export const COUNTRY_NAMES: Record<string, string> = {
+  CO: "Colombia", MX: "México", VE: "Venezuela", PE: "Perú", EC: "Ecuador", US: "Estados Unidos", CL: "Chile", AR: "Argentina",
+  BR: "Brasil", BO: "Bolivia", PY: "Paraguay", UY: "Uruguay", PA: "Panamá", CR: "Costa Rica", GT: "Guatemala", SV: "El Salvador",
+  HN: "Honduras", NI: "Nicaragua", CU: "Cuba", DO: "República Dominicana", ES: "España",
+};
+
+export const countryName = (code: string) => (code ? (COUNTRY_NAMES[code] ?? code) : "Sin país");
+
+export const SOURCE_LABEL: Record<string, string> = { telefono: "por teléfono", campana: "por campaña", flujo: "por flujo", manual: "manual" };
+
+/** AAAA-MM-DD -> DD/MM/AAAA */
+export const dmy = (iso: string | null | undefined) => (iso ? iso.split("-").reverse().join("/") : "—");
