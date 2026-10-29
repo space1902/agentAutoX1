@@ -1,0 +1,86 @@
+import { ArrowDown, ArrowUp } from "lucide-react";
+import { useMemo, useState } from "react";
+import { dayLabel, formatInt, formatMoney, formatPct, formatRoas, type AdRow, type Group } from "../../lib/adsApi";
+import { Pill } from "../ui";
+
+type SortKey = "label" | "gasto" | "mensajes" | "ventas" | "valor" | "roas" | "costoVenta" | "conversion";
+
+const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
+  { key: "gasto", label: "Gasto", numeric: true },
+  { key: "mensajes", label: "Mensajes", numeric: true },
+  { key: "ventas", label: "Ventas", numeric: true },
+  { key: "valor", label: "Valor", numeric: true },
+  { key: "roas", label: "ROAS", numeric: true },
+  { key: "costoVenta", label: "Costo por venta", numeric: true },
+  { key: "conversion", label: "% conversión", numeric: true },
+];
+
+const FIRST_COLUMN: Record<Group, string> = { ct: "CT", campaign: "Campaña", ad: "Anuncio" };
+
+export default function AdsTable({ rows, group }: { rows: AdRow[]; group: Group }) {
+  const [sortKey, setSortKey] = useState<SortKey>("roas");
+  const [dir, setDir] = useState<"asc" | "desc">("desc");
+
+  const sorted = useMemo(() => {
+    const factor = dir === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      if (sortKey === "label") return a.label.localeCompare(b.label, "es") * factor;
+      return (a[sortKey] - b[sortKey]) * factor;
+    });
+  }, [rows, sortKey, dir]);
+
+  const toggle = (key: SortKey) => {
+    if (key === sortKey) setDir((d) => (d === "asc" ? "desc" : "asc"));
+    else {
+      setSortKey(key);
+      setDir("desc");
+    }
+  };
+
+  const head = (key: SortKey, label: string, numeric: boolean) => (
+    <th key={key} className={numeric ? "num" : ""} aria-sort={sortKey === key ? (dir === "asc" ? "ascending" : "descending") : "none"}>
+      <button className="ads-sort" onClick={() => toggle(key)}>
+        {label}
+        {sortKey === key && (dir === "asc" ? <ArrowUp size={12} aria-hidden /> : <ArrowDown size={12} aria-hidden />)}
+      </button>
+    </th>
+  );
+
+  if (rows.length === 0) return <p className="muted">No hay datos en este rango. Pulsa «Actualizar» para traerlos de Meta y de la hoja de pagos.</p>;
+
+  return (
+    <div className="table-wrap">
+      <table className="ads-table">
+        <thead>
+          <tr>
+            {head("label", FIRST_COLUMN[group], false)}
+            {COLUMNS.map((c) => head(c.key, c.label, c.numeric))}
+            <th>Acción</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r) => (
+            <tr key={r.key}>
+              <td>
+                <strong>{r.label}</strong>
+                <div className="muted ads-sub">
+                  {group === "ad" && <>{r.ct} · {r.campaignName || "—"} · </>}
+                  {r.action ? dayLabel(r) : "sin gasto de Meta"}
+                  {r.effectiveStatus && r.effectiveStatus !== "ACTIVE" ? ` · ${r.effectiveStatus.toLowerCase()}` : ""}
+                </div>
+              </td>
+              <td className="num">{formatMoney(r.gasto)}</td>
+              <td className="num">{formatInt(r.mensajes)}</td>
+              <td className="num">{formatInt(r.ventas)}</td>
+              <td className="num">{formatMoney(r.valor)}</td>
+              <td className="num">{r.gasto > 0 ? formatRoas(r.roas) : "—"}</td>
+              <td className="num">{r.ventas > 0 && r.gasto > 0 ? formatMoney(r.costoVenta) : "—"}</td>
+              <td className="num">{r.mensajes > 0 ? formatPct(r.conversion) : "—"}</td>
+              <td>{r.action ? <Pill tone={r.action.tone}>{r.action.label}</Pill> : <span className="muted">—</span>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}

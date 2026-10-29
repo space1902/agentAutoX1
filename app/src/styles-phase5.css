@@ -1,0 +1,49 @@
+/* ---------- Anuncios section ---------- */
+
+.ads-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; }
+.ads-controls .ia-tabs { margin: 0; flex-wrap: wrap; border-radius: 18px; }
+.ads-dates { display: flex; align-items: center; gap: 8px; }
+.ads-dates .input { width: auto; }
+.ads-refresh { display: flex; align-items: center; gap: 12px; }
+.ads-note { margin: 10px 0 0; font-size: 12px; }
+.ads-group { margin: 0; }
+
+.ads-token { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ads-settings small { display: block; margin-top: 4px; }
+
+.ads-table th.num, .ads-table td.num { text-align: right; white-space: nowrap; }
+.ads-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+.ads-sort:hover { color: var(--text); }
+.ads-sub { font-size: 12px; margin-top: 2px; }
+
+.ads-chip.on { box-shadow: inset 0 0 0 1px var(--accent); }
+.ads-vouchers { margin-top: 12px; max-height: 420px; overflow: auto; }
+.ads-vouchers th.num { text-align: right; }
+tr.ads-review td { background: color-mix(in srgb, var(--amber) 8%, transparent); }
+
+.ads-chart svg { width: 100%; height: auto; display: block; }
+.ads-chart .grid { stroke: var(--border); stroke-width: 1; }
+.ads-chart .axis { fill: var(--muted); font-size: 11px; }
+.ads-chart .roas-axis { fill: var(--green); }
+.ads-chart .bar.gasto, .ads-legend .sw.gasto { fill: #ec4899; background: #ec4899; }
+.ads-chart .bar.valor, .ads-legend .sw.valor { fill: var(--accent); background: var(--accent); }
+.ads-chart .roas-line { stroke: var(--green); stroke-width: 2; }
+.ads-chart .roas-dot { fill: var(--green); }
+.ads-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-bottom: 8px; font-size: 12px; color: var(--muted); min-height: 20px; }
+.ads-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; }
+.ads-legend .sw.roas { background: var(--green); }
+.ads-hover { color: var(--text); font-weight: 600; }
+
+.spin { animation: ads-spin 1s linear infinite; }
+@keyframes ads-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
