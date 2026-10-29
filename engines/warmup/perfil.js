@@ -125,7 +125,7 @@ export async function runPerfil(argv) {
     return;
   }
 
-  // usar: log in only the missing sessions (QR only for those), then run with exactly these testers.
+  // usar: log in only the missing sessions (pairing code only for those), then run with exactly these testers.
   const ids = testerIds(resolveProfile(profiles, options.name, testers));
   const { runAll } = await import('./run.js');
   const groupName = profileGroupName(profiles[options.name.trim()], config);

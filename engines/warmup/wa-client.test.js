@@ -672,3 +672,65 @@ test('info exposes the own lid when the account has one', async () => {
     await cleanup();
   }
 });
+
+test('with qrFallback off, a failed pairing code request emits pairing_failed and never a qr', async () => {
+  const { baileys, client, cleanup } = setup({ client: { phone: '573001234567', qrFallback: false } });
+  try {
+    baileys.authState.creds.registered = false;
+    const events = [];
+    client.on('qr', (qr) => events.push(['qr', qr]));
+    client.on('pairing_failed', (error) => events.push(['pairing_failed', error.message]));
+
+    await client.connect();
+    const sock = baileys.sockets[0];
+    sock.pairingError = new Error('rate limited');
+    sock.fire('connection.update', { qr: 'QR-1' });
+    await tick();
+    sock.fire('connection.update', { qr: 'QR-2' });
+    await tick();
+
+    assert.deepEqual(events, [['pairing_failed', 'rate limited']]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('with qrFallback off and no phone, no qr is emitted and pairing_failed says why', async () => {
+  const { baileys, client, cleanup } = setup({ client: { qrFallback: false } });
+  try {
+    baileys.authState.creds.registered = false;
+    const events = [];
+    client.on('qr', () => events.push('qr'));
+    client.on('pairing_failed', (error) => events.push(error.code));
+
+    await client.connect();
+    baileys.sockets[0].fire('connection.update', { qr: 'QR-1' });
+    await tick();
+
+    assert.deepEqual(events, ['NO_PHONE']);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('with qrFallback off, a new socket after the code expired requests a fresh pairing code', async () => {
+  const { baileys, client, cleanup } = setup({ client: { phone: '573001234567', qrFallback: false } });
+  try {
+    baileys.authState.creds.registered = false;
+    const codes = [];
+    client.on('pairing_code', (code) => codes.push(code));
+
+    await client.connect();
+    baileys.sockets[0].fire('connection.update', { qr: 'QR-1' });
+    await tick();
+    baileys.sockets[0].fire('connection.update', { connection: 'close', lastDisconnect: { error: { output: { statusCode: 408 } } } });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    baileys.sockets[1].fire('connection.update', { qr: 'QR-2' });
+    await tick();
+
+    assert.equal(baileys.sockets.length, 2);
+    assert.deepEqual(codes, ['ABCD-1234', 'ABCD-1234']);
+  } finally {
+    await cleanup();
+  }
+});

@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import qrcode from 'qrcode-terminal';
 import { installConsoleFilter } from './console-filter.js';
 import { dataPaths, resolveDataDir } from './data-dir.js';
+import { isQrMode, normalizeLinkPhone, parsePhoneHints, persistTesterPhone, resolveLinkPhone } from './link-phone.js';
 import { archiveLoggedOutSession } from './session-archive.js';
 import { hasSavedSession } from './session-selection.js';
 import { rememberVoiceTranscript } from './voice-transcripts.js';
@@ -193,34 +194,77 @@ export function loadConfig(requiredKeys = []) {
   return config;
 }
 
-// Optional per-session proxy from config.json (bot.proxy, or "proxy" in a tester entry).
-function sessionProxy(id) {
-  try {
-    return resolveSessionProxy(loadConfig(), id);
-  } catch {
-    return null;
-  }
+// Pairing codes (or failed requests) allowed per session and run before giving up; each code lasts a
+// couple of minutes, so this leaves the user several minutes to type one.
+const MAX_PAIRING_ATTEMPTS = 5;
+
+function noPhoneError(id) {
+  return Object.assign(
+    new Error(`[${id}] needs a phone number to link by code: set it in the app (Editar instancia / Números)`),
+    { code: 'NO_PHONE' },
+  );
 }
 
-// Optional per-session phone number: when set, unlinked sessions use a pairing code instead of a QR.
-function sessionPhone(id) {
-  try {
-    return resolveSessionPhone(loadConfig(), id);
-  } catch {
-    return null;
-  }
-}
-
-// Options are for tests: authRoot (sessions folder) and clientFactory (replaces WaClient).
-export function startClient(id, { authRoot = AUTH_DIR, clientFactory = (options) => new WaClient(options) } = {}) {
-  // Only a session that was really linked can be "logged out"; an unlinked one just shows a QR.
+// Linking is ALWAYS by pairing code. The phone comes from (in order) config.json, the session, the newest
+// logged-out/unlinked backup, or LINK_PHONES (set by the app). With no phone the session is not started and
+// no QR is shown. LINK_MODE=qr is a hidden escape hatch that restores the old QR flow.
+// Options are for tests: authRoot (sessions folder), clientFactory (replaces WaClient), config, hints,
+// linkMode, persistPhone and maxPairingAttempts.
+export function startClient(
+  id,
+  {
+    authRoot = AUTH_DIR,
+    clientFactory = (options) => new WaClient(options),
+    config = null,
+    hints = parsePhoneHints(process.env.LINK_PHONES),
+    linkMode = process.env.LINK_MODE,
+    persistPhone = (args) => persistTesterPhone({ configFile: CONFIG_FILE, ...args }),
+    maxPairingAttempts = MAX_PAIRING_ATTEMPTS,
+  } = {},
+) {
+  // Only a session that was really linked can be "logged out"; an unlinked one needs a pairing code.
   const wasLinked = hasSavedSession(authRoot, id);
+  const qrMode = isQrMode(linkMode);
+
+  let currentConfig = config;
+  if (!currentConfig) {
+    try {
+      currentConfig = loadConfig();
+    } catch {
+      currentConfig = {};
+    }
+  }
+
+  let phone;
+  if (qrMode) {
+    phone = normalizeLinkPhone(resolveSessionPhone(currentConfig, id));
+  } else {
+    const resolved = resolveLinkPhone({ config: currentConfig, id, authRoot, hints });
+    phone = resolved.phone;
+    if (!phone && !wasLinked) {
+      console.error(noPhoneError(id).message);
+      return Promise.reject(noPhoneError(id));
+    }
+    if (phone && !wasLinked && resolved.source !== 'config') {
+      // Written by this same process (synchronous read-modify-write), so it cannot race the engine's own config writes.
+      const outcome = persistPhone({ id, phone });
+      if (outcome?.status === 'saved') {
+        console.log(`[${id}] saved +${phone} (from its ${resolved.source}) to config.json.`);
+      } else if (outcome?.status === 'duplicate') {
+        console.warn(`[${id}] +${phone} is already used by "${outcome.owner}" in config.json; not saving it for this tester.`);
+      } else if (outcome && !['has-phone', 'not-in-config'].includes(outcome.status)) {
+        console.warn(`[${id}] could not save +${phone} to config.json (${outcome.error ?? outcome.status}).`);
+      }
+    }
+  }
+
   const client = clientFactory({
     id,
     authDir: path.join(authRoot, id),
     activityDir: RESULTS_DIR,
-    proxy: sessionProxy(id),
-    phone: sessionPhone(id),
+    proxy: resolveSessionProxy(currentConfig, id),
+    phone,
+    qrFallback: qrMode,
   });
 
   activeClients.add(client);
@@ -266,8 +310,32 @@ export function startClient(id, { authRoot = AUTH_DIR, clientFactory = (options)
       }
     };
 
+    // Codes expire (WhatsApp closes the socket and the client asks for a new one); keep going up to a limit.
+    let attempts = 0;
+    let lastWasCode = false;
+    const giveUpIfExhausted = () => {
+      if (attempts <= maxPairingAttempts) return false;
+      fail(
+        Object.assign(
+          new Error(
+            `[${id}] pairing code expired ${maxPairingAttempts} times without being entered; ` +
+              'giving up on this number for this run.',
+          ),
+          { code: 'PAIRING_EXPIRED' },
+        ),
+      );
+      return true;
+    };
+
     client.on('pairing_code', (code) => {
+      if (settled) return;
+      attempts++;
+      if (giveUpIfExhausted()) return;
       noteLinkingPrompt();
+      if (lastWasCode) {
+        console.log(`[${id}] Pairing code expired; requested a new one (${attempts}/${maxPairingAttempts})`);
+      }
+      lastWasCode = true;
       console.log(`
 [${id}] Pairing code: ${code}`);
       console.log(
@@ -276,9 +344,21 @@ export function startClient(id, { authRoot = AUTH_DIR, clientFactory = (options)
       );
     });
 
+    client.on('pairing_failed', (error) => {
+      if (settled) return;
+      attempts++;
+      lastWasCode = false;
+      if (giveUpIfExhausted()) return;
+      console.warn(
+        `[${id}] could not get a pairing code (${error?.message || error}); ` +
+          `trying again (${attempts}/${maxPairingAttempts})`,
+      );
+    });
+
     client.on('qr', (qr) => {
       noteLinkingPrompt();
-      console.log(`\n[${id}] Scan this QR from WhatsApp > Linked devices on the phone for "${id}":`);
+      console.log(`
+[${id}] Scan this QR from WhatsApp > Linked devices on the phone for "${id}":`);
       qrcode.generate(qr, { small: true });
     });
 
@@ -325,7 +405,7 @@ export function startClient(id, { authRoot = AUTH_DIR, clientFactory = (options)
       fail(
         new Error(
           `[${id}] WhatsApp logged this number out. Close this run, delete ".baileys_auth\\${id}", ` +
-            `remove old entries in WhatsApp > Linked devices on that phone, and scan a new QR.`,
+            `remove old entries in WhatsApp > Linked devices on that phone, and link it again with a pairing code.`,
         ),
       );
     });
@@ -338,7 +418,7 @@ export function startClient(id, { authRoot = AUTH_DIR, clientFactory = (options)
             ? `[${id}] this session is in use by another run (usually run.js). ` +
                 'Stop it with a single Ctrl+C, wait for it to close, then run the command again.'
             : `[${id}] WhatsApp closed the connection (${reason}). Run the command again; if it repeats, ` +
-                `delete ".baileys_auth\\${id}" and scan a new QR.`,
+                `delete ".baileys_auth\\${id}" and link it again with a pairing code.`,
         ),
       );
     });

@@ -393,6 +393,11 @@ export async function runTests({
         try {
           client = await startClient(settings.id);
         } catch (error) {
+          // No phone / codes never entered: retrying right away cannot help, skip this tester for this run.
+          if (error?.code === 'NO_PHONE' || error?.code === 'PAIRING_EXPIRED') {
+            if (error.code === 'PAIRING_EXPIRED') console.warn(error.message);
+            break;
+          }
           console.warn(`[${settings.id}] failed to start (attempt ${attempt}/2): ${error?.message || error}`);
           if (attempt < 2) await sleep(10_000);
         }

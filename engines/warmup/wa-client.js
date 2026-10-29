@@ -78,6 +78,9 @@ export class WaClient extends EventEmitter {
     activityDir,
     proxy = null,
     phone = null,
+    // true (default): when no pairing code can be had, emit the QR instead. The engine turns this off
+    // so linking is always by code; 'pairing_failed' is emitted instead of 'qr'.
+    qrFallback = true,
     loadBaileys: load = loadBaileys,
     createProxyAgent: makeAgent = createProxyAgent,
     reconnectDelay = reconnectDelayMs,
@@ -89,6 +92,7 @@ export class WaClient extends EventEmitter {
     this.activityDir = activityDir;
     this.proxy = proxy;
     this.phone = phone;
+    this.qrFallback = qrFallback;
     this.load = load;
     this.makeAgent = makeAgent;
     this.reconnectDelay = reconnectDelay;
@@ -226,18 +230,32 @@ export class WaClient extends EventEmitter {
     this.#scheduleReconnect(action === 'restart' ? 0 : this.reconnectDelay(this.reconnectAttempts++));
   }
 
-  // Unlinked + phone configured: ask for an 8-character pairing code once per socket instead of
-  // showing a QR. If WhatsApp refuses, fall back to the QR so the session can still be linked.
+  // Unlinked + phone known: ask for an 8-character pairing code once per socket instead of showing a
+  // QR. When the code expires WhatsApp closes the socket (408) and the reconnect opens a new one, which
+  // asks for a fresh code. If a code cannot be had, fall back to the QR (qrFallback) or emit
+  // 'pairing_failed' so the caller decides.
   #onQr(qr, sock) {
-    const usePairing = this.phone && !this.state?.creds?.registered;
-    if (!usePairing) {
+    const unlinked = !this.state?.creds?.registered;
+    if (!unlinked) {
       this.emit('qr', qr);
+      return;
+    }
+
+    if (!this.phone) {
+      if (this.qrFallback) {
+        this.emit('qr', qr);
+        return;
+      }
+      if (!this.pairingAttempts.get(sock)) {
+        this.pairingAttempts.set(sock, 'failed');
+        this.emit('pairing_failed', Object.assign(new Error('no phone number to request a pairing code'), { code: 'NO_PHONE' }));
+      }
       return;
     }
 
     const attempt = this.pairingAttempts.get(sock);
     if (attempt === 'failed') {
-      this.emit('qr', qr);
+      if (this.qrFallback) this.emit('qr', qr);
       return;
     }
     if (attempt) return;
@@ -250,9 +268,14 @@ export class WaClient extends EventEmitter {
         this.emit('pairing_code', formatPairingCode(code));
       })
       .catch((error) => {
-        console.warn(`[${this.id}] could not request a pairing code, using the QR: ${error?.message || error}`);
         this.pairingAttempts.set(sock, 'failed');
-        if (this.sock === sock) this.emit('qr', qr);
+        if (this.sock !== sock) return;
+        if (this.qrFallback) {
+          console.warn(`[${this.id}] could not request a pairing code, using the QR: ${error?.message || error}`);
+          this.emit('qr', qr);
+        } else {
+          this.emit('pairing_failed', error instanceof Error ? error : new Error(String(error)));
+        }
       });
   }
 

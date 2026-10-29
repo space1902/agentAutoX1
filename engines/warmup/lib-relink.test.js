@@ -27,10 +27,12 @@ function setup(id, { linked = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'relink-'));
   if (linked) {
     fs.mkdirSync(path.join(root, id));
-    fs.writeFileSync(path.join(root, id, 'creds.json'), JSON.stringify({ me: { id: '1:2@s.whatsapp.net' } }));
+    fs.writeFileSync(path.join(root, id, 'creds.json'), JSON.stringify({ me: { id: '573000000001:2@s.whatsapp.net' } }));
   }
   return root;
 }
+
+const CONFIG = { testers: ['relink-a', 'relink-b', 'relink-c'].map((id) => ({ id, phone: '3000000001' })) };
 
 const quiet = async (fn) => {
   const originals = { log: console.log, warn: console.warn };
@@ -56,7 +58,7 @@ test('a linked session that gets logged out is archived and started again once',
   };
 
   try {
-    const client = await quiet(() => startClient(id, { authRoot: root, clientFactory }));
+    const client = await quiet(() => startClient(id, { authRoot: root, clientFactory, config: CONFIG, persistPhone: () => ({ status: 'saved' }) }));
     assert.equal(created.length, 2);
     assert.equal(client, created[1]);
     assert.equal(created[0].destroyed, true);
@@ -79,12 +81,12 @@ test('a second logout in the same run is not relinked again', async () => {
   };
 
   try {
-    await assert.rejects(quiet(() => startClient(id, { authRoot: root, clientFactory })), /logged/i);
+    await assert.rejects(quiet(() => startClient(id, { authRoot: root, clientFactory, config: CONFIG, persistPhone: () => ({ status: 'saved' }) })), /logged/i);
     assert.equal(calls, 2);
     // A later attempt (the caller retries) must not relink again in this run.
     fs.mkdirSync(path.join(root, id), { recursive: true });
     fs.writeFileSync(path.join(root, id, 'creds.json'), JSON.stringify({ me: { id: 'x' } }));
-    await assert.rejects(quiet(() => startClient(id, { authRoot: root, clientFactory })), /logged/i);
+    await assert.rejects(quiet(() => startClient(id, { authRoot: root, clientFactory, config: CONFIG, persistPhone: () => ({ status: 'saved' }) })), /logged/i);
     assert.equal(calls, 3);
     assert.equal(fs.existsSync(path.join(root, id, 'creds.json')), true, 'saved session kept');
   } finally {
@@ -102,7 +104,7 @@ test('an unlinked session that gets logged out fails without archiving anything'
   };
 
   try {
-    await assert.rejects(quiet(() => startClient(id, { authRoot: root, clientFactory })), /logged/i);
+    await assert.rejects(quiet(() => startClient(id, { authRoot: root, clientFactory, config: CONFIG, persistPhone: () => ({ status: 'saved' }) })), /logged/i);
     assert.equal(calls, 1);
     assert.equal(fs.existsSync(path.join(root, LOGGED_OUT_DIR)), false);
   } finally {

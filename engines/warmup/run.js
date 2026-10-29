@@ -18,10 +18,10 @@ export async function runAll({ continuous = false, testerIds: onlyIds = null, gr
       console.log('');
     }
 
-    console.log('Step 1/2: starting the bot (scan its QR if one appears)\n');
+    console.log('Step 1/2: starting the bot (link it with the pairing code if one appears)\n');
     const { client: botClient, groupId, groupName: resolvedGroup } = await startBotSession({ groupName });
 
-    console.log('\nStep 2/2: starting the testers (scan their QR codes if they appear)\n');
+    console.log('\nStep 2/2: starting the testers (link them with the pairing codes if they appear)\n');
     await runTests({ botClient, testerIds: onlyIds, groupName: resolvedGroup, groupId });
   } catch (error) {
     console.error(error instanceof SelectionError ? error.message : error?.stack || error?.message || error);

@@ -95,6 +95,16 @@ When you press **Iniciar**, testers whose phone belongs to a pod and have no sav
    Menu (3 dots) > Dispositivos vinculados > Vincular un dispositivo > Vincular con el número de teléfono > type the code;
 5. wait until `creds.json` holds the paired account, then power the pod off again if it was off before.
 
+### Linking is always by pairing code
+
+The warm-up engine never prints a QR. When a session is not linked (never linked, or WhatsApp logged it out), `startClient` resolves the
+phone in this order: `config.json` tester `phone` > phone in the current session creds > newest `.baileys_auth/_logged_out/<id>-*` or
+`_unlinked/<id>-*` backup (only `me.id` is read) > `LINK_PHONES` (JSON map `{"tester1":"3162135114"}`, for phones the app knows).
+The 8-character code is printed as `[id] Pairing code: XXXX-XXXX`; when it expires a new one is requested (max 5 per session and run).
+A phone found in a session/backup is saved to `config.json` (timestamped backup in `backups/`, atomic write, done by the engine process itself).
+With no phone anywhere the tester is skipped with `[id] needs a phone number to link by code: set it in the app (Editar instancia / Números)`.
+Emergency escape hatch: `LINK_MODE=qr` restores the old terminal QR.
+
 Pods whose number is already linked are not touched and do not need to be on. Progress is shown per number; when a screen cannot be
 driven the dialog shows the code big, says which screen to finish by hand, and keeps the pod on while it waits.
 The dialog has **Solo simular** (dry-run): it never powers anything, never opens a WhatsApp session and only reads the screen of pods
