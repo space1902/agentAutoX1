@@ -228,4 +228,3 @@
 .agent-card-body .muted { font-size: 12px; }
 .agent-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); flex: none; }
 .agent-badge.busy { color: var(--amber); border-color: var(--amber); }
-.agent-soon { display: flex; align-items: center; padding: 0 6px; font-size: 12px; }

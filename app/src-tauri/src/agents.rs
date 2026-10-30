@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 /// Agents the engine knows (`engines/agent/registry.js`). Anything else is rejected before building arguments.
 /// Each entry: (id, short label used in messages).
-pub const AGENTS: &[(&str, &str)] = &[("analista", "Analista")];
+pub const AGENTS: &[(&str, &str)] = &[("analista", "Analista"), ("creativo", "Agente creativo")];
 /// The agent the legacy `analista_*` commands act on.
 pub const LEGACY_AGENT: &str = "analista";
 
@@ -285,7 +285,8 @@ mod tests {
     #[test]
     fn agent_ids_come_from_the_fixed_list() {
         assert_eq!(valid_agent_id("analista"), Ok("analista"));
-        for bad in ["", "creativo", "Analista", "analista ", "../analista", "analista; calc", "constructor"] {
+        assert_eq!(valid_agent_id("creativo"), Ok("creativo"));
+        for bad in ["", "Creativo", "creativo ", "creativo; calc", "../creativo", "Analista", "analista ", "../analista", "analista; calc", "constructor"] {
             assert!(valid_agent_id(bad).is_err(), "{bad:?} must be rejected");
         }
         assert!(valid_agent_id(&"x".repeat(500)).unwrap_err().len() < 80);
@@ -328,7 +329,7 @@ mod tests {
         let settings = Settings::defaults(std::path::Path::new("."));
         assert!(call(&settings, "analista", "turn", &json!({})).unwrap_err().contains("no permitido"));
         assert!(call(&settings, "analista", "rm -rf", &json!({})).unwrap_err().contains("no permitido"));
-        assert!(call(&settings, "creativo", "sessions", &json!({})).unwrap_err().contains("desconocido"));
+        assert!(call(&settings, "nadie", "sessions", &json!({})).unwrap_err().contains("desconocido"));
     }
 
     #[test]
@@ -352,6 +353,8 @@ mod tests {
         assert_eq!(busy_message("analista", "analista"), "El Analista ya está trabajando. Espera a que termine o cancélalo.");
         let other = busy_message("creativo", "analista");
         assert!(other.starts_with("El Analista ya está trabajando.") && other.contains("un agente activo a la vez"));
+        let creative = busy_message("analista", "creativo");
+        assert!(creative.starts_with("El Agente creativo ya está trabajando.") && creative.contains("un agente activo a la vez"));
     }
 
     #[test]

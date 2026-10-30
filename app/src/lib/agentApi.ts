@@ -195,11 +195,20 @@ export interface ProcStatus {
   logs: string[];
 }
 
+export type AgentTab = "chat" | "lecciones" | "recomendaciones" | "calidad" | "ajustes";
+
 export interface AgentInfo {
   id: string;
   name: string;
+  shortName?: string;
   description: string;
   icon: string;
+  /** Tabs that apply to this agent (the creativo has no ads-metrics tabs). */
+  tabs?: AgentTab[];
+  starters?: string[];
+  welcome?: { title: string; text: string };
+  /** True when the agent reads the ads database (adds the "no ads data yet" notice). */
+  usesAdsData?: boolean;
 }
 
 /** What `agent_status` reports: this agent's two process slots and which agent (if any) holds the single Claude slot. */

@@ -1,4 +1,4 @@
-import { BarChart3, Bot, Loader2, type LucideIcon } from "lucide-react";
+import { BarChart3, Bot, Clapperboard, Loader2, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import AnalistaSettingsPanel from "../components/analista/AnalistaSettings";
 import ChatPanel from "../components/analista/ChatPanel";
@@ -7,19 +7,20 @@ import LessonsPanel from "../components/analista/LessonsPanel";
 import RecommendationsPanel from "../components/analista/RecommendationsPanel";
 import { Banner, Notice } from "../components/ui";
 import { errorText } from "../lib/api";
-import { listAgents, makeAgentApi, onAnyAgentActivity, type AgentInfo } from "../lib/agentApi";
+import { listAgents, makeAgentApi, onAnyAgentActivity, type AgentInfo, type AgentTab } from "../lib/agentApi";
 
-type Tab = "chat" | "lecciones" | "recomendaciones" | "calidad" | "ajustes";
+type Tab = AgentTab;
 
 // Used until the engine answers (and if it never does), so the section is never empty.
 const FALLBACK_AGENTS: AgentInfo[] = [
-  { id: "analista", name: "Analista de publicidad", description: "Analiza tus anuncios de Meta, explica qué pasa y aprende de los resultados.", icon: "BarChart3" },
+  { id: "analista", name: "Analista de publicidad", shortName: "Analista", description: "Analiza tus anuncios de Meta, explica qué pasa y aprende de los resultados.", icon: "BarChart3", tabs: ["chat", "lecciones", "recomendaciones", "calidad", "ajustes"], usesAdsData: true },
 ];
 
 // Registry icon keys -> lucide icons.
-const ICONS: Record<string, LucideIcon> = { BarChart3 };
+const ICONS: Record<string, LucideIcon> = { BarChart3, Clapperboard };
 
-const TABS = [["chat", "Chat"], ["lecciones", "Lecciones"], ["recomendaciones", "Recomendaciones"], ["calidad", "Calidad"], ["ajustes", "Ajustes"]] as const;
+const TABS: ReadonlyArray<readonly [Tab, string]> = [["chat", "Chat"], ["lecciones", "Lecciones"], ["recomendaciones", "Recomendaciones"], ["calidad", "Calidad"], ["ajustes", "Ajustes"]];
+const ALL_TABS: Tab[] = TABS.map(([id]) => id);
 
 export default function Agentes() {
   const [agents, setAgents] = useState<AgentInfo[]>(FALLBACK_AGENTS);
@@ -33,6 +34,9 @@ export default function Agentes() {
 
   const agent = agents.find((a) => a.id === selected) ?? agents[0];
   const api = useMemo(() => makeAgentApi(agent.id), [agent.id]);
+  // Only the tabs that apply to the agent (the creativo has no ads-metrics tabs until its own lessons arrive).
+  const agentTabs = agent.tabs ?? ALL_TABS;
+  const hasLessons = agentTabs.includes("lecciones");
 
   useEffect(() => {
     void listAgents().then((r) => r.agents.length && setAgents(r.agents)).catch((e) => setError(errorText(e)));
@@ -91,14 +95,13 @@ export default function Agentes() {
             </button>
           );
         })}
-        <div className="agent-soon muted">Próximamente: Agente creativo</div>
       </div>
 
       {error && <Notice>{error}</Notice>}
       {busyOther && <Notice kind="ok">{`${busyOther.name} está trabajando. Hasta que termine no podrás lanzar otra consulta con ${agent.name}.`}</Notice>}
 
       <div className="ia-tabs" role="tablist" aria-label={`Secciones de ${agent.name}`}>
-        {TABS.map(([id, label]) => (
+        {TABS.filter(([id]) => agentTabs.includes(id)).map(([id, label]) => (
           <button key={id} role="tab" aria-selected={tab === id} className={`ia-tab ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>
             {label}
           </button>
@@ -107,11 +110,11 @@ export default function Agentes() {
 
       {/* Keyed by agent so a chat, its listeners and its drafts never leak into another agent. */}
       <div key={agent.id}>
-        {tab === "chat" && <ChatPanel api={api} learning={learning} onGoSettings={() => setTab("ajustes")} onLearningChange={bumpLearning} />}
+        {tab === "chat" && <ChatPanel api={api} agent={agent} learning={learning && hasLessons} onGoSettings={() => setTab("ajustes")} onLearningChange={bumpLearning} />}
         {tab === "lecciones" && <LessonsPanel api={api} learning={learning} refreshKey={tick} />}
         {tab === "recomendaciones" && <RecommendationsPanel api={api} refreshKey={tick} />}
         {tab === "calidad" && <QualityPanel api={api} />}
-        {tab === "ajustes" && <AnalistaSettingsPanel api={api} onSaved={(s) => setLearning(s.learning)} />}
+        {tab === "ajustes" && <AnalistaSettingsPanel api={api} agent={agent} showLearning={hasLessons} onSaved={(s) => setLearning(s.learning)} />}
       </div>
     </div>
   );

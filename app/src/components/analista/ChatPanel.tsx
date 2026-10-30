@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText } from "../../lib/api";
 import {
   type AgentApi,
+  type AgentInfo,
   formatDuration,
   formatTokens,
   STARTERS,
@@ -48,7 +49,11 @@ function UsageFooter({ meta }: { meta: AgentMessage["meta"] }) {
   return <p className="an-usage">{parts.join(" · ")}</p>;
 }
 
-export default function ChatPanel({ api, learning, onGoSettings, onLearningChange }: { api: AgentApi; learning: boolean; onGoSettings: () => void; onLearningChange: () => void }) {
+export default function ChatPanel({ api, agent, learning, onGoSettings, onLearningChange }: { api: AgentApi; agent?: AgentInfo; learning: boolean; onGoSettings: () => void; onLearningChange: () => void }) {
+  const label = agent?.shortName ?? "Analista";
+  const starters = agent?.starters?.length ? agent.starters : STARTERS;
+  const welcome = agent?.welcome ?? { title: "Pregúntame por tus anuncios y ventas", text: "Consulto tus datos reales de solo lectura, hago las cuentas con código y te explico. No cambio nada en Meta." };
+  const usesAdsData = agent?.usesAdsData ?? true;
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
@@ -192,19 +197,19 @@ export default function ChatPanel({ api, learning, onGoSettings, onLearningChang
         {status && !status.claude.found && (
           <Notice>
             No encuentro Claude Code en este equipo. Instálalo e inicia sesión, o indica la ruta de <code>claude.exe</code> en{" "}
-            <button className="btn ghost sm" onClick={onGoSettings}>Ajustes del Analista</button>.
+            <button className="btn ghost sm" onClick={onGoSettings}>Ajustes del {label}</button>.
           </Notice>
         )}
-        {status && !status.adsDb && <Notice>Todavía no hay datos de Anuncios: abre la sección Anuncios y actualiza para que el Analista tenga qué consultar.</Notice>}
+        {usesAdsData && status && !status.adsDb && <Notice>Todavía no hay datos de Anuncios: abre la sección Anuncios y actualiza para que el Analista tenga qué consultar.</Notice>}
         {error && <Notice>{error}</Notice>}
 
         <div className="an-scroll" role="log" aria-live="polite">
           {!messages.length && !live && (
             <div className="an-welcome">
-              <h2>Pregúntame por tus anuncios y ventas</h2>
-              <p className="muted">Consulto tus datos reales de solo lectura, hago las cuentas con código y te explico. No cambio nada en Meta.</p>
+              <h2>{welcome.title}</h2>
+              <p className="muted">{welcome.text}</p>
               <div className="an-starters">
-                {STARTERS.map((q) => (
+                {starters.map((q) => (
                   <button key={q} className="chip" onClick={() => void send(q)} disabled={running}>{q}</button>
                 ))}
               </div>
@@ -262,7 +267,7 @@ export default function ChatPanel({ api, learning, onGoSettings, onLearningChang
             rows={2}
             value={input}
             placeholder="Escribe tu pregunta… (Enter envía, Shift+Enter hace un salto de línea)"
-            aria-label="Pregunta para el Analista"
+            aria-label={`Pregunta para el ${label}`}
             maxLength={8000}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {

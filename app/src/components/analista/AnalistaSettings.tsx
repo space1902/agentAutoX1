@@ -1,7 +1,7 @@
 import { Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { type AgentApi, type AnalistaSettings, type AnalistaStatus } from "../../lib/agentApi";
+import { type AgentApi, type AgentInfo, type AnalistaSettings, type AnalistaStatus } from "../../lib/agentApi";
 import { Card, Notice, Pill, Skeleton } from "../ui";
 
 const MODELS = [
@@ -11,7 +11,8 @@ const MODELS = [
   { id: "haiku", label: "Haiku (rápido y liviano)" },
 ];
 
-export default function AnalistaSettingsPanel({ api, onSaved }: { api: AgentApi; onSaved: (s: AnalistaSettings) => void }) {
+export default function AnalistaSettingsPanel({ api, agent, showLearning = true, onSaved }: { api: AgentApi; agent?: AgentInfo; showLearning?: boolean; onSaved: (s: AnalistaSettings) => void }) {
+  const label = agent?.shortName ?? "Analista";
   const [status, setStatus] = useState<AnalistaStatus | null>(null);
   const [form, setForm] = useState<AnalistaSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -50,9 +51,9 @@ export default function AnalistaSettingsPanel({ api, onSaved }: { api: AgentApi;
 
   return (
     <Card className="an-settings">
-      <h2>Ajustes del Analista</h2>
+      <h2>Ajustes del {label}</h2>
       <p className="muted">
-        El Analista usa tu Claude Code instalado y la sesión que ya tienes abierta (tu plan). Nunca usa una clave de API: si el sistema tiene una, se ignora.
+        El {label} usa tu Claude Code instalado y la sesión que ya tienes abierta (tu plan). Nunca usa una clave de API: si el sistema tiene una, se ignora.
       </p>
       {error && <Notice>{error}</Notice>}
       {saved && <Notice kind="ok">Guardado.</Notice>}
@@ -83,6 +84,7 @@ export default function AnalistaSettingsPanel({ api, onSaved }: { api: AgentApi;
         <small>Solo para contexto externo (benchmarks, políticas). Siempre separa lo de la web de tus datos y cita la fuente.</small>
       </div>
 
+      {showLearning && (
       <div className="field">
         <button type="button" className="switch" role="switch" aria-checked={form.learning} onClick={() => setForm({ ...form, learning: !form.learning })}>
           <span className="knob">{form.learning ? "✓" : ""}</span> Aprendizaje {form.learning ? "activado" : "desactivado"}
@@ -91,6 +93,7 @@ export default function AnalistaSettingsPanel({ api, onSaved }: { api: AgentApi;
           Interruptor general. Apagado: no guarda recomendaciones ni mide resultados, y no usa ninguna lección en las respuestas (no borra nada).
         </small>
       </div>
+      )}
 
       <button className="btn" onClick={() => void save()} disabled={busy}>
         <Save size={14} aria-hidden /> Guardar
