@@ -17,8 +17,8 @@ import { Notice } from "../ui";
 import Markdown from "./Markdown";
 import MessageActions from "./MessageActions";
 
+// While a turn runs only the steps are shown; the commentary and the answer appear once, when the turn is done.
 interface Live {
-  text: string;
   steps: StepInfo[];
 }
 
@@ -94,14 +94,8 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
           case "turn_start":
             setActiveId(ev.sessionId);
             setRunning(true);
-            setLive({ text: "", steps: [] });
+            setLive({ steps: [] });
             void loadSessions();
-            break;
-          case "message_start":
-            setLive((l) => (l ? { ...l, text: "" } : l));
-            break;
-          case "text":
-            setLive((l) => (l ? { ...l, text: l.text + ev.delta } : l));
             break;
           case "step":
             setLive((l) => (l ? { ...l, steps: [...l.steps, { id: ev.id, tool: ev.tool, label: ev.label, ok: null, summary: "" }] } : l));
@@ -151,7 +145,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
     setCandidateIds([]);
     setMessages((m) => [...m, { id: -Date.now(), sessionId: activeRef.current ?? "", role: "user", text: body, ts: Date.now(), meta: {} }]);
     setRunning(true);
-    setLive({ text: "", steps: [] });
+    setLive({ steps: [] });
     try {
       await analista.start("turn", { sessionId: activeRef.current ?? "", text: body });
     } catch (e) {
@@ -225,7 +219,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
                 <>
                   {!!m.meta.steps?.length && (
                     <details className="an-steps-box">
-                      <summary>{m.meta.steps.length} {m.meta.steps.length === 1 ? "paso" : "pasos"} de análisis</summary>
+                      <summary>{m.meta.steps.length} {m.meta.steps.length === 1 ? "paso" : "pasos"}</summary>
                       <Steps steps={m.meta.steps} live={false} />
                     </details>
                   )}
@@ -248,7 +242,9 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
           {live && (
             <article className="an-msg assistant live">
               <Steps steps={live.steps} live />
-              {live.text ? <Markdown text={live.text} /> : !live.steps.length && <p className="muted"><Loader2 size={13} className="spin" aria-hidden /> Pensando…</p>}
+              {live.steps.every((s) => s.ok !== null) && (
+                <p className="muted"><Loader2 size={13} className="spin" aria-hidden /> {live.steps.length ? "Preparando la respuesta…" : "Pensando…"}</p>
+              )}
             </article>
           )}
           <div ref={bottom} />

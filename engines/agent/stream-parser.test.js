@@ -59,6 +59,9 @@ test('progress labels are friendly Spanish', () => {
   assert.equal(stepLabel('mcp__analista__list_views', {}), 'Revisando qué datos tengo disponibles…');
   assert.equal(stepLabel('mcp__analista__metrics', { kind: 'budget_compare', ct: 'CT 07' }), 'Comparando antes y después de la subida de presupuesto de CT 07…');
   assert.equal(stepLabel('WebSearch', { query: 'benchmark CPM Meta' }), 'Buscando en la web: benchmark CPM Meta…');
+  assert.equal(stepLabel('mcp__analista__query_sql', { sql: 'SELECT * FROM v_ads a JOIN v_sales s ON 1 WHERE x' }), 'Consultando v_ads, v_sales…');
+  assert.equal(stepLabel('mcp__analista__query_sql', { sql: 'SELECT 1' }), 'Consultando los datos…');
+  assert.equal(stepLabel('mcp__other__thing', {}), 'Trabajando en un paso del análisis…');
   assert.equal(stepLabel('WebFetch', { url: 'https://example.com/a' }), 'Leyendo example.com…');
   assert.equal(summarizeResult('metrics', '{"cambios":[1,2]}', false), '2 cambios de presupuesto');
 });

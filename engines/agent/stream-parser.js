@@ -21,6 +21,9 @@ const cut = (s, n = 70) => {
   return text.length > n ? `${text.slice(0, n - 1)}…` : text;
 };
 
+// Names of the v_* views a SQL text reads ("v_ads, v_sales"), or ''.
+const viewsIn = (sql) => [...new Set(String(sql ?? '').match(/\bv_[a-z0-9_]+/gi) ?? [])].slice(0, 3).join(', ');
+
 // Friendly Spanish progress text for a tool call.
 export function stepLabel(name, input = {}) {
   const tool = short(name);
@@ -28,7 +31,8 @@ export function stepLabel(name, input = {}) {
     case 'list_views':
       return 'Revisando qué datos tengo disponibles…';
     case 'query_sql':
-      return input.purpose ? `Consultando ${cut(String(input.purpose).replace(/^consultando\s+/i, ''))}…` : 'Consultando los datos…';
+      if (input.purpose) return `Consultando ${cut(String(input.purpose).replace(/^consultando\s+/i, ''))}…`;
+      return viewsIn(input.sql) ? `Consultando ${viewsIn(input.sql)}…` : 'Consultando los datos…';
     case 'metrics': {
       const scope = input.ct ? ` de ${input.ct}` : '';
       const what = { kpis: 'Calculando totales', table: 'Armando la tabla', daily: 'Calculando la serie diaria', countries: 'Comparando países', lifecycle: 'Revisando los días de cada anuncio', budget_compare: 'Comparando antes y después de la subida de presupuesto' }[input.kind] ?? 'Calculando métricas';
@@ -52,7 +56,8 @@ export function stepLabel(name, input = {}) {
       return host ? `Leyendo ${host}…` : 'Leyendo una página web…';
     }
     default:
-      return `Usando ${tool}…`;
+      // Unknown tool: never show a raw tool name to the user.
+      return 'Trabajando en un paso del análisis…';
   }
 }
 
