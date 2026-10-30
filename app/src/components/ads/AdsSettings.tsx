@@ -173,11 +173,6 @@ export default function AdsSettings({ detected, tokenPresent, config, onTokenCha
           <label htmlFor="ads-valid">Resultado que cuenta como venta</label>
           <input id="ads-valid" className="input" value={draft.validResult} onChange={(e) => set("validResult", e.target.value)} />
         </div>
-        <div className="field">
-          <label htmlFor="ads-auto">Actualizar hoy cada (minutos)</label>
-          <input id="ads-auto" className="input" type="number" min={0} value={draft.autoRefreshMinutes} onChange={(e) => set("autoRefreshMinutes", Number(e.target.value))} />
-          <small>0 desactiva la actualización automática.</small>
-        </div>
       </div>
 
       <h3 className="ia-sub" style={{ marginTop: 10 }}>Historial</h3>

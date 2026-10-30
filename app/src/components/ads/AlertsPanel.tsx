@@ -121,11 +121,9 @@ export default function AlertsPanel() {
       listen<MonitorStatusEvent>("ads-monitor-status", (e) => {
         setRunning(true);
         setStatus(e.payload);
-        void loadRecent();
       }),
       listen("ads-monitor-exit", () => {
         setRunning(false);
-        void loadRecent();
       }),
       listen<LinkEvent>("ads-link-status", (e) => {
         if (e.payload.type === "pairing_code" && e.payload.code) setCode(e.payload.code);
@@ -293,7 +291,10 @@ export default function AlertsPanel() {
           </div>
         </Card>
         <Card>
-          <div className="card-head"><h2 className="card-title">Alertas recientes</h2></div>
+          <div className="card-head">
+            <h2 className="card-title">Alertas recientes</h2>
+            <button className="btn ghost sm" onClick={() => void loadRecent()}>Actualizar</button>
+          </div>
           {recent.length === 0 ? (
             <p className="muted">Todavía no hay alertas.</p>
           ) : (

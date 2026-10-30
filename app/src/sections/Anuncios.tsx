@@ -1,4 +1,3 @@
-import { listen } from "@tauri-apps/api/event";
 import { AlertTriangle, Banknote, Bell, Coins, MessageCircle, Percent, RefreshCw, Target, TrendingUp, Wallet } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import AdsChart from "../components/ads/AdsChart";
@@ -24,7 +23,6 @@ import {
   toIso,
   type AdsConfig,
   type AdsStatus,
-  type Decision,
   type DecisionsData,
   type DecisionStatus,
   type Group,
@@ -75,6 +73,7 @@ export default function Anuncios() {
   const [country, setCountry] = useState("");
   const [split, setSplit] = useState(false);
   const [tracking, setTracking] = useState<TrackingItem[]>([]);
+  const [chartCt, setChartCt] = useState("");
 
   const range = preset === "custom" ? custom : presetRange(preset, today);
   const decRange = decPreset === "custom" ? decCustom : presetRange(decPreset, today);
@@ -154,16 +153,6 @@ export default function Anuncios() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // The scheduler (inside the app) announces new decisions while any section is open.
-  useEffect(() => {
-    const un = listen<{ created: Decision[] }>("ads-decisions", (e) => {
-      void loadDecisions();
-      const n = e.payload.created.length;
-      setBanner(n === 1 ? `Nueva decisión: ${e.payload.created[0].label} → ${e.payload.created[0].verdict.label}` : `${n} decisiones nuevas por revisar.`);
-    });
-    return () => void un.then((fn) => fn());
-  }, [loadDecisions]);
-
   const changeStatus = async (id: number, status: DecisionStatus) => {
     try {
       await adsApi.decisionStatus(id, status);
@@ -201,22 +190,12 @@ export default function Anuncios() {
     if (loaded) void loadReport();
   }, [preset, custom, group, country, split, loaded, loadReport]);
 
-  // "Actualizado hace X min" ticks while the section is open.
+  // "Actualizado hace X min" re-renders its text while the section is open; it never reloads data.
+  // Data refreshes only on mount, on "Actualizar" and when the range/filters change (no polling, no scheduler events).
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 30_000);
     return () => window.clearInterval(id);
   }, []);
-
-  // Today refreshes by itself (live spend) while the section is open.
-  const minutes = config?.autoRefreshMinutes ?? 15;
-  useEffect(() => {
-    if (!loaded || minutes <= 0) return;
-    const id = window.setInterval(() => {
-      const cur = latest.current;
-      if (cur.tokenPresent && cur.includesToday) void doSync();
-    }, minutes * 60_000);
-    return () => window.clearInterval(id);
-  }, [loaded, minutes, today, doSync]);
 
   const pendingCount = decisionData?.decisions.filter((d) => d.status === "pending").length ?? 0;
   const k = report?.kpis;
@@ -224,6 +203,10 @@ export default function Anuncios() {
   useEffect(() => {
     if (report && country && country !== "-" && !report.countries.some((c) => c.country === country)) setCountry("");
   }, [report, country]);
+  // The chart focuses on one CT when it is picked; a CT that left the range falls back to "all".
+  const ctOptions = report?.ctDaily ?? [];
+  const chartSeries = ctOptions.find((c) => c.ct === chartCt);
+  const chartTitle = chartSeries ? `Gasto contra valor por día · ${chartSeries.ct}` : "Gasto contra valor por día · Todas las campañas";
   const updated = report?.lastSync.meta ?? status?.lastSync.meta ?? null;
   const rangeLabel = range.from === range.to ? range.from : `${range.from} → ${range.to}`;
 
@@ -351,7 +334,7 @@ export default function Anuncios() {
           </p>
         )}
         {!rangeValid && <p className="muted">Elige un rango válido: la fecha inicial no puede ser posterior a la final.</p>}
-        {preset === "today" && <p className="muted ads-note">El gasto de hoy es en vivo: se trae directo de Meta cada vez que actualizas.</p>}
+        {preset === "today" && <p className="muted ads-note">El gasto de hoy es en vivo: se trae directo de Meta cuando pulsas «Actualizar» o entras a la sección.</p>}
       </Card>
 
       {!loaded || !k ? (
@@ -398,9 +381,18 @@ export default function Anuncios() {
 
       <Card>
         <div className="card-head">
-          <h2 className="card-title">Gasto contra valor por día</h2>
+          <h2 className="card-title">{chartTitle}</h2>
+          <label className="ads-chart-select">
+            <span className="muted">Campaña</span>
+            <select className="input" value={chartSeries ? chartSeries.ct : ""} onChange={(e) => setChartCt(e.target.value)} aria-label="Campaña del gráfico">
+              <option value="">Todas las campañas</option>
+              {ctOptions.map((c) => (
+                <option key={c.ct} value={c.ct}>{c.ct}</option>
+              ))}
+            </select>
+          </label>
         </div>
-        {report ? <AdsChart data={report.daily} /> : <Skeleton height={200} />}
+        {report ? <AdsChart data={chartSeries ? chartSeries.daily : report.daily} /> : <Skeleton height={200} />}
       </Card>
 
       <Card>

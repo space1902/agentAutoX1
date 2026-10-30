@@ -31,7 +31,12 @@
 .ads-vouchers th.num { text-align: right; }
 tr.ads-review td { background: color-mix(in srgb, var(--amber) 8%, transparent); }
 
-.ads-chart svg { width: 100%; height: auto; display: block; }
+.ads-chart { position: relative; }
+.ads-chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+.ads-chart .hover-band { fill: var(--accent); opacity: 0.08; pointer-events: none; }
+.ads-chart .roas-label { fill: var(--green); font-size: 10px; font-weight: 600; pointer-events: none; }
+.ads-tooltip { position: absolute; top: 34px; z-index: 5; display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; font-size: 12px; white-space: nowrap; pointer-events: none; background: var(--card, var(--bg)); color: var(--text); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28); }
+.ads-chart-select { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .ads-chart .grid { stroke: var(--border); stroke-width: 1; }
 .ads-chart .axis { fill: var(--muted); font-size: 11px; }
 .ads-chart .roas-axis { fill: var(--green); }

@@ -140,6 +140,8 @@ export interface Report {
   kpis: Totals;
   rows: AdRow[];
   daily: DayPoint[];
+  /** Daily series per CT (same CT grouping as the tables), for the chart selector. */
+  ctDaily: { ct: string; daily: DayPoint[] }[];
   comprobantes: Voucher[];
   reviewCount: number;
   today: string;
