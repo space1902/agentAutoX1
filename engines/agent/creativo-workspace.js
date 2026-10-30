@@ -117,7 +117,7 @@ export function buildGuardSettings({ root, pluginDir, skillsDir, nodePath = proc
   const command = `"${slash(nodePath)}" "${slash(guardFile)}" --root "${slash(root)}" --plugin "${slash(pluginDir)}" --skills "${slash(skillsDir)}"`;
   const fileDeny = DENIED_PATHS.flatMap((p) => [`Read(${p})`, `Edit(${p})`]);
   return {
-    permissions: { deny: [...fileDeny, ...BASH_DENY, 'Bash(*elevenlabs*)', 'Bash(*tts_elevenlabs*)', 'Bash(*gen_image_fal*)', 'Bash(python -c *)', 'Bash(python3 -c *)', 'Bash(python -m *)', 'Bash(py -c *)'] },
+    permissions: { deny: [...fileDeny, ...BASH_DENY, 'Skill(leona-receipts)', 'Bash(*elevenlabs*)', 'Bash(*tts_elevenlabs*)', 'Bash(*gen_image_fal*)', 'Bash(python -c *)', 'Bash(python3 -c *)', 'Bash(python -m *)', 'Bash(py -c *)'] },
     hooks: { PreToolUse: [{ matcher: 'Read|Write|Edit|MultiEdit|NotebookEdit|Glob|Grep|Bash|Skill|mcp__.*', hooks: [{ type: 'command', command, timeout: 15 }] }] },
   };
 }

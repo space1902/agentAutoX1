@@ -266,7 +266,7 @@ export function bashDecision(command, ctx) {
     if (bin === 'yt-dlp' && args.some((a) => YT_FORBIDDEN.test(a))) return deny('Esa opción de yt-dlp (cookies, credenciales o ejecutar comandos) está bloqueada.');
     for (const a of args) {
       const value = a.includes('=') && !/^[a-zA-Z]:[\\/]/.test(a) && a.startsWith('-') ? a.slice(a.indexOf('=') + 1) : a;
-      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) continue; // URL
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value === '/dev/null') continue; // URL or the null device
       if (/(^|[\\/])\.\.([\\/]|$)/.test(value)) return deny('No uses ".." para salir de la carpeta de trabajo.');
       if (looksAbsolute(value)) {
         const bad = checkPath(value, ctx, { write: bin === 'yt-dlp' || bin === 'mkdir' });

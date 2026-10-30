@@ -151,6 +151,8 @@ test('guard: Bash allows only the minimal allowlist and refuses everything dange
     'cd "Producto Bebidas" && dir',
     'mkdir -p "Producto Bebidas/videos/venezuela/nuevo"',
     'py -3.10 build.py',
+    'ls "Producto Bebidas" 2>/dev/null',
+    'ls > /dev/null',
   ];
   for (const c of ok) assert.equal(bashDecision(c, ctx).decision, 'allow', c);
 
@@ -409,4 +411,22 @@ test('prepareCreativoLaunch writes the settings file and lists the Higgsfield re
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+const fwd = (p) => p.split(String.fromCharCode(92)).join('/');
+
+test('guard: with the default data dir (inside whatsapp-bot-tester) only the plugin copy is readable, never its neighbours', () => {
+  const plugin = `${fwd(ROOT)}/whatsapp-bot-tester/agents/creativo/plugin`;
+  const nested = { root: ROOT, pluginDir: plugin, skillsDir: SKILLS, home: HOME };
+  const go = (tool_name, tool_input) => decide({ tool_name, tool_input }, nested).decision;
+  assert.equal(go('Read', { file_path: `${plugin}/skills/new-product/SKILL.md` }), 'pass');
+  assert.equal(go('Write', { file_path: `${plugin}/skills/new-product/SKILL.md`, content: '' }), 'deny');
+  assert.equal(go('Read', { file_path: `${fwd(ROOT)}/whatsapp-bot-tester/.env` }), 'deny');
+  assert.equal(go('Read', { file_path: `${fwd(ROOT)}/whatsapp-bot-tester/agents/creativo/agent.db` }), 'deny');
+  assert.equal(go('Read', { file_path: `${plugin}/../../../.env` }), 'deny');
+  const ctx = makeContext(nested);
+  const script = `${plugin}/skills/new-product/assets/check_pdf_source.py`;
+  assert.equal(bashDecision(`python "${script}" a.pdf`, ctx).decision, 'allow');
+  assert.equal(bashDecision(`python "${script}" ../../../.env`, ctx).decision, 'deny');
+  assert.equal(bashDecision(`dir ${fwd(ROOT)}/whatsapp-bot-tester`, ctx).decision, 'deny');
 });
