@@ -113,7 +113,6 @@ export async function runTurn({ dataDir, sessionId, text, emit, registerCancel, 
 
     const parser = createStreamParser();
     const steps = [];
-    let streamText = '';
     let result = null;
     let plan = null;
     let cancelled = false;
@@ -136,8 +135,6 @@ export async function runTurn({ dataDir, sessionId, text, emit, registerCancel, 
       if (process.env.AGENTAUTO_TRACE_FILE) fs.appendFileSync(process.env.AGENTAUTO_TRACE_FILE, `${line}
 `);
       for (const ev of parser.feed(line)) {
-        if (ev.type === 'message_start') streamText = '';
-        if (ev.type === 'text') streamText += ev.delta;
         if (ev.type === 'step') steps.push({ id: ev.id, tool: ev.tool, label: ev.label, ok: null, summary: '' });
         if (ev.type === 'step_done') {
           const step = steps.find((s) => s.id === ev.id);
@@ -158,8 +155,7 @@ export async function runTurn({ dataDir, sessionId, text, emit, registerCancel, 
     if (exit.spawnError) throw new Error(`No se pudo iniciar Claude Code: ${exit.spawnError.message}`);
 
     if (cancelled) {
-      const partial = streamText.trim();
-      const messageId = store.addMessage({ sessionId, role: 'assistant', text: partial || '(Respuesta cancelada)', meta: { cancelled: true, steps } });
+      const messageId = store.addMessage({ sessionId, role: 'assistant', text: '(Respuesta cancelada)', meta: { cancelled: true, steps } });
       emit({ type: 'cancelled', sessionId, messageId });
       return { ok: false, cancelled: true, sessionId, messageId };
     }

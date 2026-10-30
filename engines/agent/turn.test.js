@@ -109,7 +109,7 @@ test('a crash without a result reports the stderr tail', async () => {
   }
 });
 
-test('cancel kills only the child, keeps the partial text and emits cancelled', async () => {
+test('cancel kills only the child, stores only the cancelled notice (no partial text) and emits cancelled', async () => {
   const t = setup('hang');
   try {
     let cancel;
@@ -126,7 +126,7 @@ test('cancel kills only the child, keeps the partial text and emits cancelled', 
     assert.ok(events.some((e) => e.type === 'cancelled'));
     const store = openAgentStore(t.fx.dataDir);
     const last = store.messages(res.sessionId).at(-1);
-    assert.equal(last.text, 'Pensando...');
+    assert.equal(last.text, '(Respuesta cancelada)');
     assert.equal(last.meta.cancelled, true);
     store.close();
   } finally {
