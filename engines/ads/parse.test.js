@@ -81,3 +81,35 @@ test('maskPhone shows only the last four digits', () => {
 test('normalizeText strips accents and case', () => {
   assert.equal(normalizeText('  Pago VÁLIDO '), 'pago valido');
 });
+
+test('extractCt matches the whole CT number and normalizes it (CT10 is never CT01)', async () => {
+  const { extractCt: ct } = await import('./parse.js');
+  for (const name of ['CT1', 'CT01', 'CT 01', 'CT-1', 'CT_001', 'ct 1 - ventas', 'CT 01 Col 2']) assert.equal(ct(name), 'CT 01', name);
+  for (const name of ['CT10', 'CT 10', 'CT 10 col2', 'CT-10 - ventas', 'ct010']) assert.equal(ct(name), 'CT 10', name);
+  assert.equal(ct('CT100'), 'CT 100');
+  assert.equal(ct('CT 105 test'), 'CT 105');
+  assert.equal(ct('CT 07 Col 2 - ventas'), 'CT 07');
+  assert.notEqual(ct('CT10 Col 2'), ct('CT01 Col 2'));
+});
+
+test('extractCt needs a word boundary and digits: CTX, XCT01 and ACT01 are not CT codes', async () => {
+  const { extractCt: ct } = await import('./parse.js');
+  for (const name of ['CTX', 'XCT01', 'ACT01', 'CT', 'CT final', 'Campaña CTA 2', '']) assert.equal(ct(name), null, name);
+  assert.equal(ct('[CT-12] prueba'), 'CT 12');
+  assert.equal(ct('Bebidas · CT 03'), 'CT 03');
+});
+
+test('parseCt flags an ambiguous name like "CT 1 0" instead of silently trusting it', async () => {
+  const { parseCt } = await import('./parse.js');
+  assert.deepEqual(parseCt('CT 1 0'), { ct: 'CT 01', ambiguous: true });
+  assert.deepEqual(parseCt('CT 01 2 - ventas'), { ct: 'CT 01', ambiguous: true });
+  assert.deepEqual(parseCt('CT 10 Col 2'), { ct: 'CT 10', ambiguous: false });
+  assert.deepEqual(parseCt('CT 01 2026'), { ct: 'CT 01', ambiguous: false }, 'a year is not a second number');
+  assert.deepEqual(parseCt('Sin código'), { ct: null, ambiguous: false });
+});
+
+test('extractCt falls back to the next name when the first has no CT', async () => {
+  const { extractCt: ct } = await import('./parse.js');
+  assert.equal(ct('Campaña sin código', 'CT 04 col2 - ventas'), 'CT 04');
+  assert.equal(ct(undefined, null, 'CT-9'), 'CT 09');
+});

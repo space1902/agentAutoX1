@@ -5,6 +5,8 @@ import { COUNTRY_NAMES, adsApi, countryName, type AdsConfig, type CountrySetting
 import { Notice, Pill } from "../ui";
 
 interface Props {
+  /** Countries that have data (before the enabled-countries scope). */
+  detected: { country: string; gasto: number; ventas: number }[];
   tokenPresent: boolean;
   config: AdsConfig;
   onTokenChange: () => void;
@@ -36,7 +38,7 @@ const LIFE_NUMBERS: { key: NumKey; label: string; hint: string }[] = [
   { key: "lateDays", label: "Días de gracia si la app estaba cerrada", hint: "Pasado ese plazo la decisión ya no se emite." },
 ];
 
-export default function AdsSettings({ tokenPresent, config, onTokenChange, onConfigSaved }: Props) {
+export default function AdsSettings({ detected, tokenPresent, config, onTokenChange, onConfigSaved }: Props) {
   const [draft, setDraft] = useState<AdsConfig>(config);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
@@ -100,6 +102,15 @@ export default function AdsSettings({ tokenPresent, config, onTokenChange, onCon
       ...d,
       countries: { ...d.countries, [code]: { ...({ currency: "COP", rateToCop: 0, feePct: 0, costPerSale: 0, taxPct: 0 } as CountrySettings), ...d.countries[code], ...patch } },
     }));
+  const toggleCountry = (code: string, on: boolean) =>
+    setDraft((d) => {
+      const next = on ? [...new Set([...d.enabledCountries, code])] : d.enabledCountries.filter((c) => c !== code);
+      return next.length === 0 ? d : { ...d, enabledCountries: next };
+    });
+  const offered = [...new Set([...Object.keys(COUNTRY_NAMES).filter((c) => c !== "XX"), ...draft.enabledCountries, ...detected.map((d) => d.country)])].sort((a, b) => {
+    const rank = (c: string) => (draft.enabledCountries.includes(c) ? 0 : detected.some((d) => d.country === c) ? 1 : 2);
+    return rank(a) - rank(b) || countryName(a).localeCompare(countryName(b), "es");
+  });
   const addableCountries = Object.keys(COUNTRY_NAMES).filter((c) => !draft.countries[c]);
   const setThreshold = (key: keyof Thresholds, value: string) =>
     setDraft((d) => ({ ...d, thresholds: { ...d.thresholds, [key]: value === "" ? 0 : Number(value) } }));
@@ -177,6 +188,27 @@ export default function AdsSettings({ tokenPresent, config, onTokenChange, onCon
           <small>Vacío = se detecta solo el día más antiguo que haya en la hoja o en Meta. Si eliges una fecha anterior a la actual, se vuelve a cargar el historial desde ahí. Nada se borra nunca.</small>
         </div>
       </div>
+
+      <h3 className="ia-sub" style={{ marginTop: 10 }}>Países habilitados</h3>
+      <p className="muted ads-note">
+        Solo los países habilitados aparecen en los filtros, las tablas y los totales. Los datos de los demás se dejan fuera (se conservan en el historial). Por defecto solo Colombia.
+      </p>
+      <div className="ads-countries-enabled" role="group" aria-label="Países habilitados">
+        {offered.map((code) => {
+          const seen = detected.find((d) => d.country === code);
+          const on = draft.enabledCountries.includes(code);
+          return (
+            <label key={code} className="ads-check">
+              <input type="checkbox" checked={on} disabled={on && draft.enabledCountries.length === 1} onChange={(e) => toggleCountry(code, e.target.checked)} />
+              {code} · {countryName(code)}
+              {seen ? <span className="muted"> · con datos ({seen.ventas} ventas)</span> : null}
+            </label>
+          );
+        })}
+      </div>
+      <label className="ads-check" style={{ marginBottom: 14 }}>
+        <input type="checkbox" checked={draft.includeOtherCountries} onChange={(e) => set("includeOtherCountries", e.target.checked)} /> Incluir los demás países agrupados como «Otros países»
+      </label>
 
       <h3 className="ia-sub" style={{ marginTop: 10 }}>Países: moneda, comisión y costos</h3>
       <p className="muted ads-note">

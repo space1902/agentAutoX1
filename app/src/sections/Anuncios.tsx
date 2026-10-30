@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { Banknote, Bell, Coins, MessageCircle, Percent, RefreshCw, Target, TrendingUp, Wallet } from "lucide-react";
+import { AlertTriangle, Banknote, Bell, Coins, MessageCircle, Percent, RefreshCw, Target, TrendingUp, Wallet } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import AdsChart from "../components/ads/AdsChart";
 import AdsSettings from "../components/ads/AdsSettings";
@@ -7,6 +7,7 @@ import AdsTable from "../components/ads/AdsTable";
 import AlertsPanel from "../components/ads/AlertsPanel";
 import DecisionsPanel from "../components/ads/DecisionsPanel";
 import CountriesPanel from "../components/ads/CountriesPanel";
+import DateRangeBar from "../components/ads/DateRangeBar";
 import VouchersPanel from "../components/ads/VouchersPanel";
 import { Banner, Card, Notice, Skeleton, StatCard } from "../components/ui";
 import { errorText } from "../lib/api";
@@ -33,12 +34,6 @@ import {
   type TrackingItem,
 } from "../lib/adsApi";
 
-const PRESETS: { id: Exclude<Preset, "custom">; label: string }[] = [
-  { id: "today", label: "Hoy" },
-  { id: "yesterday", label: "Ayer" },
-  { id: "week", label: "Últimos 7 días" },
-  { id: "month", label: "Este mes" },
-];
 const GROUPS: { id: Group; label: string }[] = [
   { id: "ct", label: "CT" },
   { id: "campaign", label: "Campaña" },
@@ -61,6 +56,9 @@ export default function Anuncios() {
   const [today] = useState(() => toIso(new Date()));
   const [preset, setPreset] = useState<Preset>("today");
   const [custom, setCustom] = useState({ from: today, to: today });
+  // Decisiones keeps its OWN range (default: this month); changing it does not touch the Resumen range.
+  const [decPreset, setDecPreset] = useState<Preset>("month");
+  const [decCustom, setDecCustom] = useState({ from: today, to: today });
   const [group, setGroup] = useState<Group>("ct");
   const [report, setReport] = useState<Report | null>(null);
   const [status, setStatus] = useState<AdsStatus | null>(null);
@@ -79,6 +77,7 @@ export default function Anuncios() {
   const [tracking, setTracking] = useState<TrackingItem[]>([]);
 
   const range = preset === "custom" ? custom : presetRange(preset, today);
+  const decRange = decPreset === "custom" ? decCustom : presetRange(decPreset, today);
   const rangeValid = range.from !== "" && range.to !== "" && range.from <= range.to;
   const includesToday = range.to >= today && range.from <= today;
 
@@ -221,6 +220,10 @@ export default function Anuncios() {
 
   const pendingCount = decisionData?.decisions.filter((d) => d.status === "pending").length ?? 0;
   const k = report?.kpis;
+  // A filter on a country that is no longer enabled would show nothing: go back to "Todos".
+  useEffect(() => {
+    if (report && country && country !== "-" && !report.countries.some((c) => c.country === country)) setCountry("");
+  }, [report, country]);
   const updated = report?.lastSync.meta ?? status?.lastSync.meta ?? null;
   const rangeLabel = range.from === range.to ? range.from : `${range.from} → ${range.to}`;
 
@@ -255,7 +258,22 @@ export default function Anuncios() {
       </div>
 
       {tab === "decisiones" && (
-        <DecisionsPanel tracking={tracking} decisions={decisionData?.decisions ?? []} activitiesOk={decisionData?.activitiesOk ?? null} lifecycle={decisionData?.lifecycle ?? null} busy={evaluating} onStatus={(id, s) => void changeStatus(id, s)} onEvaluate={() => void evaluateNow()} />
+        <>
+        <Card>
+          <DateRangeBar
+            preset={decPreset}
+            range={decRange}
+            today={today}
+            minDate={report?.history.from ?? report?.history.firstData ?? null}
+            onPreset={setDecPreset}
+            onRange={(from, to) => {
+              setDecCustom({ from, to });
+              setDecPreset("custom");
+            }}
+          />
+        </Card>
+        <DecisionsPanel range={decRange} tracking={tracking} decisions={decisionData?.decisions ?? []} activitiesOk={decisionData?.activitiesOk ?? null} lifecycle={decisionData?.lifecycle ?? null} busy={evaluating} onStatus={(id, s) => void changeStatus(id, s)} onEvaluate={() => void evaluateNow()} />
+        </>
       )}
 
       {tab === "alertas" && <AlertsPanel />}
@@ -266,6 +284,7 @@ export default function Anuncios() {
             <h2 className="card-title">Configuración de Anuncios</h2>
           </div>
           <AdsSettings
+            detected={report?.detected ?? []}
             tokenPresent={tokenPresent}
             config={config}
             onTokenChange={() => void loadStatus()}
@@ -280,24 +299,17 @@ export default function Anuncios() {
       {tab === "resumen" && (
       <>
       <Card>
-        <div className="ads-controls">
-          <div className="ia-tabs" role="tablist" aria-label="Rango de fechas">
-            {PRESETS.map((p) => (
-              <button key={p.id} role="tab" aria-selected={preset === p.id} className={`ia-tab ${preset === p.id ? "active" : ""}`} onClick={() => setPreset(p.id)}>
-                {p.label}
-              </button>
-            ))}
-            <button role="tab" aria-selected={preset === "custom"} className={`ia-tab ${preset === "custom" ? "active" : ""}`} onClick={() => setPreset("custom")}>
-              Personalizado
-            </button>
-          </div>
-          {preset === "custom" && (
-            <div className="ads-dates">
-              <input className="input" type="date" aria-label="Desde" value={custom.from} min={report?.history.firstData ?? undefined} max={custom.to || undefined} onChange={(e) => setCustom((c) => ({ ...c, from: e.target.value }))} />
-              <span className="muted">a</span>
-              <input className="input" type="date" aria-label="Hasta" value={custom.to} min={custom.from || undefined} onChange={(e) => setCustom((c) => ({ ...c, to: e.target.value }))} />
-            </div>
-          )}
+        <DateRangeBar
+          preset={preset}
+          range={range}
+          today={today}
+          minDate={report?.history.from ?? report?.history.firstData ?? null}
+          onPreset={setPreset}
+          onRange={(from, to) => {
+            setCustom({ from, to });
+            setPreset("custom");
+          }}
+        >
           <div className="ads-refresh">
             <span className="muted" role="status">
               Actualizado {agoText(updated, now)}
@@ -306,8 +318,8 @@ export default function Anuncios() {
               <RefreshCw size={16} aria-hidden className={syncing ? "spin" : ""} /> {syncing ? "Actualizando…" : "Actualizar"}
             </button>
           </div>
-        </div>
-        {report && report.countries.some((c) => c.country) && (
+        </DateRangeBar>
+        {report && report.countries.filter((c) => c.country).length > 1 && (
           <div className="ads-countries-bar">
             <div className="chips" role="group" aria-label="Filtrar por país">
               <button className={`chip ads-chip ${country === "" ? "on" : ""}`} aria-pressed={country === ""} onClick={() => setCountry("")}>Todos</button>
@@ -327,6 +339,15 @@ export default function Anuncios() {
         {report?.history && (
           <p className="muted ads-note ads-history">
             Historial: desde {dmy(report.history.from)} · {report.history.days} días guardados · {report.history.vouchers} comprobantes · última sincronización {agoText(report.lastSync.meta ?? report.lastSync.sheet, now)}
+          </p>
+        )}
+        {report && report.ctIssues.length > 0 && (
+          <p className="ads-warn" role="status">
+            <AlertTriangle size={14} aria-hidden />
+            <span>
+              Nombre sin CT reconocible: {report.ctIssues.slice(0, 4).map((i) => `«${i.campaignName || i.adName}»${i.reason === "ambiguo" ? " (ambiguo)" : ""}`).join(", ")}
+              {report.ctIssues.length > 4 ? ` y ${report.ctIssues.length - 4} más` : ""}. Ponle un número de CT al nombre (por ejemplo «CT 07 Col 2») para que cuente en su CT.
+            </span>
           </p>
         )}
         {!rangeValid && <p className="muted">Elige un rango válido: la fecha inicial no puede ser posterior a la final.</p>}

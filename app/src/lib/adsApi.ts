@@ -55,6 +55,17 @@ export interface AdRow extends Totals {
   action: AdAction | null;
   raise: Raise | null;
   country: string;
+  /** The row groups campaigns whose name has no recognizable CT number. */
+  ctIssue?: boolean;
+}
+
+export interface CtIssue {
+  campaignName: string;
+  adName: string;
+  /** sin_ct: no CT number in the name; ambiguo: a split number such as "CT 1 0". */
+  reason: "sin_ct" | "ambiguo";
+  gasto: number;
+  ventas: number;
 }
 
 export interface DayPoint {
@@ -121,6 +132,9 @@ export interface Report {
   country: string;
   splitCountry: boolean;
   countries: CountryRow[];
+  /** Countries that have data at all (even if not enabled), for the settings. */
+  detected: { country: string; gasto: number; ventas: number }[];
+  ctIssues: CtIssue[];
   history: HistoryInfo;
   currency: string;
   kpis: Totals;
@@ -229,6 +243,10 @@ export interface CountrySettings {
 }
 
 export interface AdsConfig {
+  /** Countries shown in the views (default only CO). */
+  enabledCountries: string[];
+  /** Group the other countries as "Otros países" instead of leaving them out. */
+  includeOtherCountries: boolean;
   historyFrom: string;
   countries: Record<string, CountrySettings>;
   countryWords: Record<string, string[]>;
@@ -268,6 +286,7 @@ export interface TrackingItem {
   verdictDate?: string;
   raise?: Raise | null;
   entityType?: string;
+  entityId?: string;
   date?: string;
   pct?: number;
   exact?: boolean;
@@ -433,10 +452,13 @@ export const alertsApi = {
 export const COUNTRY_NAMES: Record<string, string> = {
   CO: "Colombia", MX: "México", VE: "Venezuela", PE: "Perú", EC: "Ecuador", US: "Estados Unidos", CL: "Chile", AR: "Argentina",
   BR: "Brasil", BO: "Bolivia", PY: "Paraguay", UY: "Uruguay", PA: "Panamá", CR: "Costa Rica", GT: "Guatemala", SV: "El Salvador",
-  HN: "Honduras", NI: "Nicaragua", CU: "Cuba", DO: "República Dominicana", ES: "España",
+  HN: "Honduras", NI: "Nicaragua", CU: "Cuba", DO: "República Dominicana", ES: "España", XX: "Otros países",
 };
 
 export const countryName = (code: string) => (code ? (COUNTRY_NAMES[code] ?? code) : "Sin país");
+
+/** Local calendar day of a timestamp (ms). */
+export const dayOfTs = (ts: number) => toIso(new Date(ts));
 
 export const SOURCE_LABEL: Record<string, string> = { telefono: "por teléfono", campana: "por campaña", flujo: "por flujo", manual: "manual" };
 

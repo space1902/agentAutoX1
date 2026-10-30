@@ -153,6 +153,25 @@ test('payments of an ad with no identity are kept under an unknown ad', () => {
   assert.match(row.label, /999/);
 });
 
+test('CT 10 is never counted inside CT 01 and names without a CT go to "Sin CT" with an issue list', () => {
+  const rows = [
+    ins('2026-10-28', 'P', 'Pa', 'c-1', 'CT01 Col 2', 10000, 5),
+    ins('2026-10-28', 'Q', 'Qa', 'c-10', 'CT 10 Col 2 - ventas', 20000, 5),
+    ins('2026-10-28', 'R', 'Ra', 'c-100', 'CT100', 30000, 5),
+    ins('2026-10-28', 'S', 'Sa', 'c-x', 'CTX prueba', 40000, 5),
+    ins('2026-10-28', 'T', 'Ta', 'c-amb', 'CT 1 0', 50000, 5),
+  ];
+  const ids = Object.fromEntries(rows.map((r) => [r.adId, { adName: r.adName, campaignId: r.campaignId, campaignName: r.campaignName }]));
+  const out = buildReport({ insights: rows, comprobantes: [], identities: ids, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  const byLabel = Object.fromEntries(out.rows.map((r) => [r.label, r.gasto]));
+  assert.equal(byLabel['CT 10'], 20000);
+  assert.equal(byLabel['CT 100'], 30000);
+  assert.equal(byLabel['CT 01'], 60000, 'CT01 plus the ambiguous "CT 1 0", which reads as CT 1');
+  assert.equal(byLabel['Sin CT'], 40000);
+  assert.equal(out.rows.find((r) => r.label === 'Sin CT').ctIssue, true);
+  assert.deepEqual(out.ctIssues.map((i) => [i.campaignName, i.reason]).sort(), [['CT 1 0', 'ambiguo'], ['CTX prueba', 'sin_ct']]);
+});
+
 test('empty inputs produce zeros, never NaN', () => {
   const out = run('ct', { insights: [], comprobantes: [] });
   assert.equal(out.kpis.roas, 0);

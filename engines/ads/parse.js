@@ -104,11 +104,26 @@ export function cleanAdId(value) {
   return s.replace(/\D/g, '');
 }
 
-// "CT01 - ventas" / "ct 1" / "[CT-12]" -> "CT 01" / "CT 01" / "CT 12". null when there is no code.
+// CT code of a name: "CT", optional spaces/dash/underscore, then the WHOLE digit run, with a word boundary before.
+// CT1 / CT01 / CT 01 / CT-1 -> "CT 01"; CT10 -> "CT 10"; CT100 -> "CT 100". The number is compared as an integer,
+// never as a prefix, so CT 10 can never be counted inside CT 01. { ct: null } when the name has no valid CT number.
+// ambiguous: the number is followed by another 1-2 digit token ("CT 1 0"), which could be a split number.
+const CT_PATTERN = /\bCT[\s_-]*(\d+)(?!\d)/i;
+
+export function parseCt(name) {
+  const text = String(name ?? '');
+  const m = CT_PATTERN.exec(text);
+  if (!m) return { ct: null, ambiguous: false };
+  const n = String(Number(m[1]));
+  const rest = text.slice(m.index + m[0].length);
+  return { ct: `CT ${n.padStart(2, '0')}`, ambiguous: /^[\s_-]+\d{1,2}(?!\d)/.test(rest) };
+}
+
+// First name that carries a CT code (campaign name first, then ad name...).
 export function extractCt(...names) {
   for (const name of names) {
-    const m = /(?:^|[^A-Za-z])CT\s*-?\s*(\d{1,3})(?!\d)/i.exec(String(name ?? ''));
-    if (m) return `CT ${m[1].padStart(2, '0')}`;
+    const { ct } = parseCt(name);
+    if (ct) return ct;
   }
   return null;
 }

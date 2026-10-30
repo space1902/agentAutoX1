@@ -3,7 +3,7 @@
 // and groups by CT / campaign / ad. Pure.
 import { COUNTRY_NAMES, DEFAULT_COUNTRY_TOKENS, deriveCountry, scopeCountry } from './country.js';
 import { ACTIONS, computeMetrics, suggestAction } from './metrics.js';
-import { extractCt, maskPhone, normalizeText } from './parse.js';
+import { maskPhone, normalizeText, parseCt } from './parse.js';
 import { isValidResult, matchesFlow } from './sheet.js';
 import { daysBetween, eachDate } from './time.js';
 
@@ -134,13 +134,17 @@ export function buildReport({
     const id = identityOf(adId);
     const campaignName = id?.campaignName ?? '';
     const adName = id?.adName ?? '';
+    const fromCampaign = parseCt(campaignName);
+    const parsed = fromCampaign.ct ? fromCampaign : parseCt(adName);
     return {
       adId,
       adName,
       campaignId: id?.campaignId ?? '',
       campaignName,
       known: Boolean(id),
-      ct: !adId ? NO_AD : (extractCt(campaignName, adName) ?? NO_CT),
+      ct: !adId ? NO_AD : (parsed.ct ?? NO_CT),
+      // The name could not be read as a CT ("sin_ct") or holds a split number such as "CT 1 0" ("ambiguo").
+      ctIssue: !adId || !id ? null : !parsed.ct ? 'sin_ct' : parsed.ambiguous ? 'ambiguo' : null,
     };
   };
 
@@ -174,11 +178,18 @@ export function buildReport({
     .sort((a, b) => b.gasto - a.gasto || b.valor - a.valor);
 
   const groups = new Map();
+  const issues = new Map();
   const daily = new Map(eachDate(from, to).map((d) => [d, blank(d, '')]));
   const total = zero();
   for (const e of joined.values()) {
     if (!matches(e.country)) continue;
     const info = describe(e.adId);
+    if (info.ctIssue) {
+      const issue = issues.get(info.campaignName || info.adName) ?? { campaignName: info.campaignName, adName: info.adName, reason: info.ctIssue, gasto: 0, ventas: 0 };
+      issue.gasto += e.gasto;
+      issue.ventas += e.ventas;
+      issues.set(info.campaignName || info.adName, issue);
+    }
     const g = groupOf(info, e.country);
     if (!groups.has(g.key)) {
       groups.set(g.key, {
@@ -210,6 +221,8 @@ export function buildReport({
         // Latest recent budget raise among its ads (informational: day N since the raise).
         raise: [...adIds].map((id) => raises[id]).filter(Boolean).sort((a, b) => (a.date < b.date ? 1 : -1))[0] ?? null,
         action: hasAction ? suggestAction(metrics, config.thresholds) : null,
+        // The row groups campaigns whose name has no recognizable CT number.
+        ctIssue: group === 'ct' && row.ct === NO_CT,
       };
     })
     .sort((a, b) => b.gasto - a.gasto || b.valor - a.valor);
@@ -251,6 +264,7 @@ export function buildReport({
     rows,
     countries,
     detected,
+    ctIssues: [...issues.values()].sort((a, b) => b.gasto - a.gasto),
     daily: [...daily.values()].map(({ date, gasto, valor, ventas, mensajes }) => ({ date, gasto, valor, ventas, mensajes, roas: gasto ? valor / gasto : 0 })),
     comprobantes: list,
     reviewCount: list.filter((c) => c.status !== 'valid').length,

@@ -80,7 +80,7 @@ export function buildTracking({ insights: allInsights, ads, changes, config, tod
     const owner = insights.filter((r) => r.adsetId === c.entityId || r.campaignId === c.entityId).filter((r) => r[field] === c.entityId).at(-1);
     if (!owner || !isMonitored(owner.campaignName, config.campaignPrefix)) continue;
     items.push({
-      kind: 'budget', id: c.id, label: (c.entityType === 'campaign' ? owner.campaignName : owner.adsetName) || c.entityId, entityType: c.entityType,
+      kind: 'budget', id: c.id, entityId: c.entityId, label: (c.entityType === 'campaign' ? owner.campaignName : owner.adsetName) || c.entityId, entityType: c.entityType,
       ct: extractCt(owner.campaignName, owner.adsetName), dayN: age + 1, date: c.date, pct: c.pct, exact: c.exact, checkDay: life.postBudgetNotifyDay, checkAt: life.postBudgetNotifyAt,
       checkDate: addDays(c.date, life.postBudgetNotifyDay - 1),
     });

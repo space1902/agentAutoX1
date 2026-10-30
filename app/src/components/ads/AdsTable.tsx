@@ -64,6 +64,7 @@ export default function AdsTable({ rows, group }: { rows: AdRow[]; group: Group 
             <tr key={r.key}>
               <td>
                 <strong>{r.label}</strong>
+                {r.ctIssue && <Pill tone="amber">nombre sin CT reconocible</Pill>}
                 <div className="muted ads-sub">
                   {group === "ad" && <>{r.ct} · {r.campaignName || "—"} · </>}
                   {r.action ? dayLabel(r) : "sin gasto de Meta"}

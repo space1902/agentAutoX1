@@ -1,6 +1,7 @@
-import { Check, EyeOff, RefreshCw, Undo2 } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, EyeOff, RefreshCw, Undo2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { dmy, formatInt, formatMoney, formatPct, formatRoas, toIso, type Decision, type DecisionKind, type DecisionStatus, type Lifecycle, type Totals, type TrackingItem } from "../../lib/adsApi";
+import { groupTracking } from "../../lib/adsView";
 import { Card, Pill } from "../ui";
 
 type KindFilter = "all" | DecisionKind;
@@ -71,33 +72,70 @@ function DecisionCard({ d, onStatus }: { d: Decision; onStatus: (id: number, sta
 
 const short = (iso?: string) => dmy(iso).slice(0, 5);
 
-/** Informational day counters. Verdicts only come automatically (see the cards below). */
+const raiseText = (r: { dayN: number; date: string; pct: number }) => `día ${r.dayN} desde la subida (${short(r.date)}, +${Math.round(r.pct)} %)`;
+
+function testLine(i: TrackingItem): string | null {
+  if (!i.verdictDay) return null;
+  if (i.dayN < i.verdictDay) return `Prueba: día ${i.dayN} de ${i.testDays} · veredicto el día ${i.verdictDay} (${short(i.verdictDate)}) a las ${i.verdictAt}`;
+  if (i.dayN === i.verdictDay) return `Prueba: veredicto hoy a las ${i.verdictAt}`;
+  return i.inTest ? `Prueba: día ${i.dayN} de ${i.testDays}` : null;
+}
+
+/** Informational day counters, one collapsible card per CT. Verdicts only come automatically (see the cards below). */
 function Following({ items }: { items: TrackingItem[] }) {
-  if (items.length === 0) return null;
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const groups = useMemo(() => groupTracking(items), [items]);
+  if (groups.length === 0) return null;
+  const toggle = (ct: string) =>
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(ct)) next.add(ct);
+      return next;
+    });
+  const allOpen = open.size === groups.length;
   return (
     <Card>
       <div className="card-head">
         <h2 className="card-title">Seguimiento</h2>
-        <span className="muted">Solo informativo: los veredictos llegan solos</span>
+        <button className="btn ghost sm" onClick={() => setOpen(allOpen ? new Set() : new Set(groups.map((g) => g.ct)))}>
+          {allOpen ? "Contraer todo" : "Expandir todo"}
+        </button>
       </div>
-      <div className="ads-follow">
-        {items.map((i) => {
-          const lines: string[] = [];
-          if (i.kind === "budget") {
-            lines.push(`Día ${i.dayN} desde la subida (${short(i.date)}, +${Math.round(i.pct ?? 0)} %)${i.exact ? "" : " · fecha aproximada"}`);
-            if (i.checkDay && i.dayN < i.checkDay) lines.push(`Revisión automática el día ${i.checkDay} (${short(i.checkDate)}) a las ${i.checkAt}`);
-            else if (i.checkDay && i.dayN === i.checkDay) lines.push(`Revisión automática hoy a las ${i.checkAt}`);
-          } else {
-            lines.push(`Día ${i.dayN} desde que empezó a gastar`);
-            if (i.verdictDay && i.dayN < i.verdictDay) lines.push(`Prueba: día ${i.dayN} de ${i.testDays} · veredicto el día ${i.verdictDay} (${short(i.verdictDate)}) a las ${i.verdictAt}`);
-            else if (i.verdictDay && i.dayN === i.verdictDay) lines.push(`Prueba: veredicto hoy a las ${i.verdictAt}`);
-            else if (i.inTest) lines.push(`Prueba: día ${i.dayN} de ${i.testDays}`);
-            if (i.raise) lines.push(`Día ${i.raise.dayN} desde la subida (${short(i.raise.date)}, +${Math.round(i.raise.pct)} %)`);
-          }
+      <p className="muted ads-note">Solo informativo: los veredictos llegan solos (día {items.find((i) => i.verdictDay)?.verdictDay ?? 4} de prueba y día {items.find((i) => i.checkDay)?.checkDay ?? 2} tras una subida).</p>
+      <div className="ads-follow-list">
+        {groups.map((g) => {
+          const expanded = open.has(g.ct);
+          const day = g.summary?.dayN ?? Math.max(0, ...g.ads.map((a) => a.dayN));
           return (
-            <div key={`${i.kind}-${i.id}`} className={`ads-follow-item ${i.kind}`}>
-              <strong>{i.kind === "ct" ? i.label : i.kind === "budget" ? `Presupuesto · ${i.label}` : i.label}</strong>
-              {lines.map((l) => <span key={l}>{l}</span>)}
+            <div key={g.ct} className="ads-follow-group">
+              <button className="ads-follow-head" onClick={() => toggle(g.ct)} aria-expanded={expanded}>
+                {expanded ? <ChevronDown size={15} aria-hidden /> : <ChevronRight size={15} aria-hidden />}
+                <strong>{g.ct}</strong>
+                <span className="muted">
+                  día {day} desde que empezó a gastar
+                  {g.latestRaise ? ` · ${raiseText(g.latestRaise)}` : ""}
+                  {g.inTest > 0 ? ` · ${g.inTest} en prueba` : ""}
+                </span>
+              </button>
+              {expanded && (
+                <ul className="ads-follow-rows">
+                  {g.ads.map((a) => (
+                    <li key={a.id}>
+                      <strong>{a.label}</strong>
+                      <span>día {a.dayN} desde que empezó a gastar</span>
+                      {a.raise && <span>{raiseText(a.raise)}{a.raise.exact ? "" : " · fecha aproximada"}</span>}
+                      {testLine(a) && <span>{testLine(a)}</span>}
+                    </li>
+                  ))}
+                  {g.orphanBudgets.map((b) => (
+                    <li key={b.id}>
+                      <strong>Presupuesto · {b.label}</strong>
+                      <span>{raiseText({ dayN: b.dayN, date: b.date ?? "", pct: b.pct ?? 0 })}{b.exact ? "" : " · fecha aproximada"}</span>
+                      {b.checkDay && b.dayN < b.checkDay ? <span>Revisión automática el día {b.checkDay} ({short(b.checkDate)}) a las {b.checkAt}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           );
         })}
@@ -107,6 +145,8 @@ function Following({ items }: { items: TrackingItem[] }) {
 }
 
 interface Props {
+  /** Active date range: it filters the history (pending decisions and today's always show). */
+  range: { from: string; to: string };
   tracking: TrackingItem[];
   decisions: Decision[];
   activitiesOk: boolean | null;
@@ -116,15 +156,18 @@ interface Props {
   onEvaluate: () => void;
 }
 
-export default function DecisionsPanel({ tracking, decisions, activitiesOk, lifecycle, busy, onStatus, onEvaluate }: Props) {
+export default function DecisionsPanel({ range, tracking, decisions, activitiesOk, lifecycle, busy, onStatus, onEvaluate }: Props) {
   const [kind, setKind] = useState<KindFilter>("all");
   const today = toIso(new Date());
 
-  const { current, history } = useMemo(() => {
+  const { current, history, hidden } = useMemo(() => {
     const filtered = decisions.filter((d) => kind === "all" || d.kind === kind);
     const isToday = (d: Decision) => toIso(new Date(d.createdAt)) === today;
-    return { current: filtered.filter((d) => d.status === "pending" || isToday(d)), history: filtered.filter((d) => !(d.status === "pending" || isToday(d))) };
-  }, [decisions, kind, today]);
+    // A decision belongs to the day it refers to (its due day); the history follows the selected range.
+    const inRange = (d: Decision) => d.dueDate >= range.from && d.dueDate <= range.to;
+    const live = (d: Decision) => d.status === "pending" || isToday(d);
+    return { current: filtered.filter(live), history: filtered.filter((d) => !live(d) && inRange(d)), hidden: filtered.filter((d) => !live(d) && !inRange(d)).length };
+  }, [decisions, kind, today, range.from, range.to]);
 
   return (
     <div className="dec-panel">
@@ -151,7 +194,10 @@ export default function DecisionsPanel({ tracking, decisions, activitiesOk, life
         </div>
       </Card>
 
-      {current.length === 0 && history.length === 0 && (
+      {history.length === 0 && hidden > 0 && (
+        <p className="muted ads-note">Hay {hidden} decisiones de otras fechas: cambia el rango para verlas.</p>
+      )}
+      {current.length === 0 && history.length === 0 && hidden === 0 && (
         <Card>
           <p className="muted">Todavía no hay decisiones. Aparecerán cuando un anuncio llegue al día 4 o cuando detectemos una subida de presupuesto.</p>
         </Card>
@@ -164,7 +210,7 @@ export default function DecisionsPanel({ tracking, decisions, activitiesOk, life
       )}
       {history.length > 0 && (
         <section aria-label="Historial">
-          <h3 className="ia-sub">Historial</h3>
+          <h3 className="ia-sub">Historial <span className="muted">{dmy(range.from)} → {dmy(range.to)} · {history.length} de {history.length + hidden}</span></h3>
           <div className="dec-list">{history.map((d) => <DecisionCard key={d.id} d={d} onStatus={onStatus} />)}</div>
         </section>
       )}
