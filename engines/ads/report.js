@@ -181,6 +181,8 @@ export function buildReport({
   const issues = new Map();
   const daily = new Map(eachDate(from, to).map((d) => [d, blank(d, '')]));
   const total = zero();
+  // Daily series per CT (always by CT, whatever the table grouping), so the chart can focus on one CT.
+  const ctDays = new Map();
   for (const e of joined.values()) {
     if (!matches(e.country)) continue;
     const info = describe(e.adId);
@@ -205,8 +207,17 @@ export function buildReport({
     if (info.known) row.hasAction = true;
     const day = daily.get(e.date);
     if (day) addTotals(day, e);
+    if (inRange(e.date)) {
+      if (!ctDays.has(info.ct)) ctDays.set(info.ct, new Map(eachDate(from, to).map((d) => [d, blank(d, '')])));
+      addTotals(ctDays.get(info.ct).get(e.date), e);
+    }
     addTotals(total, e);
   }
+  const dailyPoint = ({ date, gasto, valor, ventas, mensajes }) => ({ date, gasto, valor, ventas, mensajes, roas: gasto ? valor / gasto : 0 });
+  const ctDaily = [...ctDays.entries()]
+    .map(([ct, days]) => ({ ct, daily: [...days.values()].map(dailyPoint) }))
+    .filter((c) => c.daily.some((d) => d.gasto > 0 || d.valor > 0))
+    .sort((a, b) => a.ct.localeCompare(b.ct, 'es', { numeric: true }));
 
   const rows = [...groups.values()]
     .map(({ adIds, hasAction, ...row }) => {
@@ -265,7 +276,8 @@ export function buildReport({
     countries,
     detected,
     ctIssues: [...issues.values()].sort((a, b) => b.gasto - a.gasto),
-    daily: [...daily.values()].map(({ date, gasto, valor, ventas, mensajes }) => ({ date, gasto, valor, ventas, mensajes, roas: gasto ? valor / gasto : 0 })),
+    daily: [...daily.values()].map(dailyPoint),
+    ctDaily,
     comprobantes: list,
     reviewCount: list.filter((c) => c.status !== 'valid').length,
   };

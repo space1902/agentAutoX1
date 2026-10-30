@@ -178,3 +178,30 @@ test('empty inputs produce zeros, never NaN', () => {
   assert.deepEqual(out.rows, []);
   assert.equal(out.daily.length, 2);
 });
+
+test('ctDaily holds one daily series per CT with spend, value and ROAS, whatever the table grouping', () => {
+  for (const group of ['ct', 'campaign', 'ad']) {
+    const out = run(group);
+    assert.deepEqual(out.ctDaily.map((c) => c.ct), ['CT 01', 'CT 02', 'Sin anuncio']);
+    const ct1 = out.ctDaily.find((c) => c.ct === 'CT 01');
+    assert.deepEqual(ct1.daily.map((d) => d.date), ['2026-10-28', '2026-10-29']);
+    assert.equal(ct1.daily[0].gasto, 30000);
+    assert.equal(ct1.daily[0].valor, 75000);
+    assert.equal(ct1.daily[0].roas, 2.5);
+    assert.equal(ct1.daily[1].gasto, 5000);
+    assert.equal(ct1.daily[1].valor, 20000);
+    assert.equal(ct1.daily[1].roas, 4);
+    const ct2 = out.ctDaily.find((c) => c.ct === 'CT 02');
+    assert.equal(ct2.daily[1].gasto, 0);
+    assert.equal(ct2.daily[1].roas, 0);
+  }
+});
+
+test('ctDaily series add up to the total daily series and empty CTs are left out', () => {
+  const out = run('ct');
+  for (let i = 0; i < out.daily.length; i += 1) {
+    assert.equal(out.ctDaily.reduce((n, c) => n + c.daily[i].gasto, 0), out.daily[i].gasto);
+    assert.equal(out.ctDaily.reduce((n, c) => n + c.daily[i].valor, 0), out.daily[i].valor);
+  }
+  assert.deepEqual(run('ct', { insights: [], comprobantes: [] }).ctDaily, []);
+});
