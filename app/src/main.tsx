@@ -8,9 +8,15 @@ import "./styles-phase4.css";
 import "./styles-phase5.css";
 import "./styles-phase6.css";
 import App from "./App";
+import ErrorBoundary from "./components/ErrorBoundary";
+import { installGlobalErrorLogging } from "./lib/logError";
+
+installGlobalErrorLogging();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary name="la aplicación">
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 );

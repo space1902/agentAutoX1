@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type LogLine, type PairingCard } from "./lib/api";
 import { usePodCreation } from "./lib/podCreation";
 import { applyTheme, loadTheme, type Theme } from "./lib/theme";
+import ErrorBoundary from "./components/ErrorBoundary";
 import Ajustes from "./sections/Ajustes";
 import Analista from "./sections/Analista";
 import Anuncios from "./sections/Anuncios";
@@ -118,6 +119,7 @@ export default function App() {
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.22, ease: "easeOut" }}
           >
+            <ErrorBoundary key={section} name={SECTIONS.find((s) => s.id === section)?.label ?? section}>
             {section === "pods" && <MultiWhatsApp creation={podCreation} />}
             {section === "bots" && (
               <CalentadorBots running={warmup.running} profile={warmup.profile} logs={warmup.logs} pairing={warmup.pairing} onClearLogs={warmup.clearLogs} />
@@ -127,6 +129,7 @@ export default function App() {
             {section === "analista" && <Analista />}
             {section === "ia" && <IA warmupRunning={warmup.running} />}
             {section === "ajustes" && <Ajustes theme={theme} onTheme={setTheme} />}
+            </ErrorBoundary>
           </motion.div>
         </AnimatePresence>
       </main>

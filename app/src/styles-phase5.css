@@ -110,3 +110,7 @@ tr.ads-review td { background: color-mix(in srgb, var(--amber) 8%, transparent);
 .ads-follow-item.budget { border-color: color-mix(in srgb, var(--accent) 50%, transparent); }
 .ads-countries-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 14px; }
 .ads-countries-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; }
+
+.error-boundary { display: flex; flex-direction: column; gap: 12px; max-width: 640px; margin: 40px auto; }
+.error-boundary .card-title { display: flex; align-items: center; gap: 8px; color: var(--amber); }
+.error-boundary-detail { font-family: ui-monospace, Consolas, monospace; font-size: 12px; word-break: break-word; }
