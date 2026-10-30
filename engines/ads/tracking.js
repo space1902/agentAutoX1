@@ -3,6 +3,7 @@
 //  - day N since an ad (or a CT) started to spend (day 1 = first day with spend),
 //  - day N since the last budget raise (day 1 = the day of the raise) with its date and percentage,
 //  - for ads still in the test, when the automatic verdict will come.
+import { scopeCountry } from './country.js';
 import { extractCt } from './parse.js';
 import { isMonitored } from './report.js';
 import { addDays, daysBetween } from './time.js';
@@ -33,8 +34,10 @@ export function raisesByAd({ insights, changes, today, maxAgeDays = RAISE_MAX_AG
   return out;
 }
 
-export function buildTracking({ insights, ads, changes, config, today }) {
+export function buildTracking({ insights: allInsights, ads, changes, config, today }) {
   const life = config.lifecycle;
+  // Only what runs in an enabled country (rows without a country always count).
+  const insights = allInsights.filter((r) => scopeCountry(r.country ?? '', config) !== null);
   const lastSpend = {};
   const names = {};
   for (const r of insights) {
@@ -78,7 +81,7 @@ export function buildTracking({ insights, ads, changes, config, today }) {
     if (!owner || !isMonitored(owner.campaignName, config.campaignPrefix)) continue;
     items.push({
       kind: 'budget', id: c.id, label: (c.entityType === 'campaign' ? owner.campaignName : owner.adsetName) || c.entityId, entityType: c.entityType,
-      dayN: age + 1, date: c.date, pct: c.pct, exact: c.exact, checkDay: life.postBudgetNotifyDay, checkAt: life.postBudgetNotifyAt,
+      ct: extractCt(owner.campaignName, owner.adsetName), dayN: age + 1, date: c.date, pct: c.pct, exact: c.exact, checkDay: life.postBudgetNotifyDay, checkAt: life.postBudgetNotifyAt,
       checkDate: addDays(c.date, life.postBudgetNotifyDay - 1),
     });
   }

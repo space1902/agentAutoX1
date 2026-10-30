@@ -1,7 +1,7 @@
 // Report builder: joins daily Meta spend with valid payments (key = date|adId, as the Apps Script
 // trkJoin did; with a country, date|adId|country), derives metrics, per-country economics and suggested actions,
 // and groups by CT / campaign / ad. Pure.
-import { COUNTRY_NAMES, DEFAULT_COUNTRY_TOKENS, deriveCountry } from './country.js';
+import { COUNTRY_NAMES, DEFAULT_COUNTRY_TOKENS, deriveCountry, scopeCountry } from './country.js';
 import { ACTIONS, computeMetrics, suggestAction } from './metrics.js';
 import { extractCt, maskPhone, normalizeText } from './parse.js';
 import { isValidResult, matchesFlow } from './sheet.js';
@@ -87,6 +87,8 @@ export function buildReport({
   const prefix = config.campaignPrefix;
   const words = config.countryWords ?? DEFAULT_COUNTRY_TOKENS;
   const wanted = country && country !== 'all' ? country : '';
+  // "-" selects the data without a country; any other value is a country code.
+  const matches = (code) => !wanted || (wanted === '-' ? code === '' : code === wanted);
   const inRange = (d) => d >= from && d <= to;
 
   const monitoredInsights = insights.filter((r) => inRange(r.date) && isMonitored(r.campaignName, prefix));
@@ -105,7 +107,28 @@ export function buildReport({
   });
   const withCountry = new Map(attributable.map((c) => [c, saleCountry(c)]));
   const sales = attributable.filter((c) => isValidResult(c.result, config.validResult)).map((c) => ({ ...c, country: withCountry.get(c) }));
-  const joined = joinByDateAndAd({ insights: monitoredInsights, sales, convert: (s) => economics(s, config, s.country) });
+  const joinedAll = joinByDateAndAd({ insights: monitoredInsights, sales, convert: (s) => economics(s, config, s.country) });
+
+  // Countries that have data at all (before the enabled-countries scope), so the settings can offer them.
+  const detectedMap = new Map();
+  for (const e of joinedAll.values()) {
+    if (!e.country) continue;
+    const d = detectedMap.get(e.country) ?? { country: e.country, gasto: 0, ventas: 0 };
+    d.gasto += e.gasto;
+    d.ventas += e.ventas;
+    detectedMap.set(e.country, d);
+  }
+  const detected = [...detectedMap.values()].sort((a, b) => b.gasto - a.gasto || b.ventas - a.ventas);
+
+  // Only enabled countries are shown (others are left out, or grouped as "Otros países" when the user asks).
+  const joined = new Map();
+  for (const e of joinedAll.values()) {
+    const code = scopeCountry(e.country, config);
+    if (code === null) continue;
+    const key = `${e.date}|${e.adId}|${code}`;
+    if (!joined.has(key)) joined.set(key, blank(e.date, e.adId, code));
+    addTotals(joined.get(key), e);
+  }
 
   const describe = (adId) => {
     const id = identityOf(adId);
@@ -140,6 +163,7 @@ export function buildReport({
     addTotals(byCountry.get(e.country), e);
   }
   const countries = [...byCountry.entries()]
+    .filter(([, totals]) => totals.gasto > 0 || totals.ventas > 0 || totals.valor > 0)
     .map(([code, totals]) => {
       const s = countrySettings(config, code);
       return {
@@ -153,7 +177,7 @@ export function buildReport({
   const daily = new Map(eachDate(from, to).map((d) => [d, blank(d, '')]));
   const total = zero();
   for (const e of joined.values()) {
-    if (wanted && e.country !== wanted) continue;
+    if (!matches(e.country)) continue;
     const info = describe(e.adId);
     const g = groupOf(info, e.country);
     if (!groups.has(g.key)) {
@@ -192,10 +216,10 @@ export function buildReport({
 
   const list = flowRows
     .filter((c) => attributable.includes(c))
-    .filter((c) => !wanted || withCountry.get(c) === wanted)
+    .filter((c) => scopeCountry(withCountry.get(c), config) !== null && matches(scopeCountry(withCountry.get(c), config)))
     .map((c) => {
       const info = describe(c.adId);
-      const code = withCountry.get(c);
+      const code = scopeCountry(withCountry.get(c), config);
       return {
         key: c.key ?? '',
         date: c.date,
@@ -226,6 +250,7 @@ export function buildReport({
     kpis: withMetrics(total),
     rows,
     countries,
+    detected,
     daily: [...daily.values()].map(({ date, gasto, valor, ventas, mensajes }) => ({ date, gasto, valor, ventas, mensajes, roas: gasto ? valor / gasto : 0 })),
     comprobantes: list,
     reviewCount: list.filter((c) => c.status !== 'valid').length,

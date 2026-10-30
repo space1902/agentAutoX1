@@ -7,7 +7,7 @@ import { normalizeText } from './parse.js';
 export const COUNTRY_NAMES = Object.freeze({
   CO: 'Colombia', MX: 'México', VE: 'Venezuela', PE: 'Perú', EC: 'Ecuador', US: 'Estados Unidos', CL: 'Chile', AR: 'Argentina',
   BR: 'Brasil', BO: 'Bolivia', PY: 'Paraguay', UY: 'Uruguay', PA: 'Panamá', CR: 'Costa Rica', GT: 'Guatemala', SV: 'El Salvador',
-  HN: 'Honduras', NI: 'Nicaragua', CU: 'Cuba', DO: 'República Dominicana', ES: 'España',
+  HN: 'Honduras', NI: 'Nicaragua', CU: 'Cuba', DO: 'República Dominicana', ES: 'España', XX: 'Otros países',
 });
 
 // Calling code -> ISO country. "1" covers the US/Canada numbering plan (treated as US).
@@ -24,6 +24,18 @@ export const DEFAULT_COUNTRY_TOKENS = Object.freeze({
   EC: ['ec', 'ecu', 'ecuador'],
   US: ['us', 'usa', 'eeuu'],
 });
+
+// Pseudo-country that groups every country the user has not enabled (only when "incluir otros países" is on).
+export const OTHER_COUNTRIES = 'XX';
+
+// Which country a view shows a datum under: its own code when enabled, "XX" when other countries are included,
+// null when it must be left out. Data without a country is never left out (it is not a "non-enabled" country).
+export function scopeCountry(code, config) {
+  if (!code) return '';
+  const enabled = config.enabledCountries ?? ['CO'];
+  if (enabled.includes(code)) return code;
+  return config.includeOtherCountries ? OTHER_COUNTRIES : null;
+}
 
 export function countryFromPhone(value) {
   let digits = String(value ?? '').replace(/\D/g, '').replace(/^00/, '');

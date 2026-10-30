@@ -17,6 +17,10 @@ export const DEFAULT_CONFIG = Object.freeze({
   currency: 'COP',
   // First day to keep in the history ('' = detect the earliest day found in the sheet or in Meta).
   historyFrom: '',
+  // Countries shown in the views (default: only Colombia). Data of the others is left out, or grouped as
+  // "Otros países" when includeOtherCountries is on.
+  enabledCountries: Object.freeze(['CO']),
+  includeOtherCountries: false,
   // Words in a campaign name that tag its country.
   countryWords: Object.freeze(Object.fromEntries(Object.entries(DEFAULT_COUNTRY_TOKENS).map(([k, v]) => [k, Object.freeze([...v])]))),
   // Per country: currency of the sheet's Valor, exchange rate to COP (0 = not set yet), payment fee % of the value,
@@ -89,7 +93,7 @@ export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
   for (const key of Object.keys(p)) {
     if (SECRET_KEYS.test(key)) throw new ConfigError('El token de Meta no se guarda en la configuración.');
   }
-  const out = { ...base, thresholds: { ...base.thresholds }, lifecycle: { ...base.lifecycle }, countries: structuredClone(base.countries), countryWords: structuredClone(base.countryWords) };
+  const out = { ...base, thresholds: { ...base.thresholds }, lifecycle: { ...base.lifecycle }, countries: structuredClone(base.countries), enabledCountries: [...base.enabledCountries], countryWords: structuredClone(base.countryWords) };
 
   if (p.adAccountId !== undefined) {
     const raw = text(p.adAccountId, 'La cuenta publicitaria');
@@ -104,6 +108,14 @@ export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
   if (p.validResult !== undefined) out.validResult = text(p.validResult, 'El resultado válido', { max: 100 });
   if (p.flowPrefix !== undefined) out.flowPrefix = text(p.flowPrefix, 'El prefijo de flujo', { allowEmpty: true, max: 100 });
   if (p.currency !== undefined) out.currency = text(p.currency, 'La moneda', { pattern: /^[A-Za-z]{3}$/ }).toUpperCase();
+  if (p.enabledCountries !== undefined) {
+    const list = Array.isArray(p.enabledCountries) ? [...new Set(p.enabledCountries.map((c) => String(c).trim().toUpperCase()))] : null;
+    if (!list || list.length === 0 || list.length > 40 || list.some((c) => !/^[A-Z]{2}$/.test(c))) {
+      throw new ConfigError('Elige al menos un país habilitado (códigos de 2 letras como CO o MX).');
+    }
+    out.enabledCountries = list;
+  }
+  if (p.includeOtherCountries !== undefined) out.includeOtherCountries = Boolean(p.includeOtherCountries);
   if (p.historyFrom !== undefined) {
     const v = String(p.historyFrom ?? '').trim();
     if (v && !(/^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`)))) throw new ConfigError('«Historial desde» debe ser una fecha AAAA-MM-DD o quedar vacío.');

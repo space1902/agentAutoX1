@@ -74,3 +74,13 @@ test('raisesByAd maps ad sets and campaigns (CBO) to their ads and keeps the lat
   assert.equal(map.B.dayN, 2);
   assert.equal(map.A, undefined);
 });
+
+test('the follow-up respects the enabled countries and tags budget items with their CT', () => {
+  const mx = insights.map((r) => (r.adId === 'B' ? { ...r, country: 'MX' } : { ...r, country: 'CO' }));
+  const ids = buildTracking({ ...base, insights: mx }).items.filter((i) => i.kind === 'ad').map((i) => i.id);
+  assert.equal(ids.includes('B'), false, 'an ad that only runs in a non-enabled country is not followed');
+  assert.ok(ids.includes('A'));
+  const all = buildTracking({ ...base, insights: mx, config: { ...DEFAULT_CONFIG, includeOtherCountries: true } }).items.filter((i) => i.kind === 'ad').map((i) => i.id);
+  assert.ok(all.includes('B'));
+  assert.equal(buildTracking(base).items.find((i) => i.kind === 'budget').ct, 'CT 01');
+});

@@ -64,7 +64,7 @@ function kpisFor({ insights, comprobantes, identities, config, adIds, from, to }
     comprobantes: comprobantes.filter((c) => adIds.has(c.adId)),
     identities,
     ads: {},
-    config: { ...config, campaignPrefix: 'all' },
+    config: { ...config, campaignPrefix: 'all', includeOtherCountries: true },
     from,
     to,
     group: 'ad',

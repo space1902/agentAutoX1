@@ -10,7 +10,7 @@ const pay = (adId, phone, valor, extra = {}) => ({ key: `${adId}-${phone}-${valo
 const insights = [ins('A', 'CT01 Col', 'CO', 30000), ins('A', 'CT01 Col', 'MX', 10000), ins('B', 'CT02 MX', 'MX', 20000)];
 const comprobantes = [pay('A', '573001234567', 60000), pay('A', '525512345678', 500), pay('B', '', 300)];
 const identities = { A: { adName: 'Ad A', campaignId: 'cA', campaignName: 'CT01 Col' }, B: { adName: 'Ad B', campaignId: 'cB', campaignName: 'CT02 MX' } };
-const config = mergeConfig({ countries: { MX: { rateToCop: 200, feePct: 5, costPerSale: 1000, taxPct: 16 } } });
+const config = mergeConfig({ enabledCountries: ['CO', 'MX', 'VE', 'EC'], countries: { MX: { rateToCop: 200, feePct: 5, costPerSale: 1000, taxPct: 16 } } });
 const run = (over = {}) => buildReport({ insights, comprobantes, identities, config, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29', ...over });
 
 test('unfiltered totals add every country and convert values to COP', () => {
@@ -67,14 +67,14 @@ test('a stored or manual country wins over the derivation', () => {
 });
 
 test('a non-COP country without a rate is flagged and not converted', () => {
-  const r = buildReport({ insights, comprobantes, identities, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  const r = buildReport({ insights, comprobantes, identities, config: mergeConfig({ enabledCountries: ['CO', 'MX'] }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
   assert.equal(r.countries.find((c) => c.country === 'MX').rateMissing, true);
   assert.equal(r.kpis.valor, 60000 + 500 + 300);
 });
 
 test('a country with no settings at all is flagged until a rate is set (only Colombia needs none)', () => {
   const ec = [pay('A', '593987654321', 20000)];
-  const r = buildReport({ insights: [], comprobantes: ec, identities, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  const r = buildReport({ insights: [], comprobantes: ec, identities, config: mergeConfig({ enabledCountries: ['CO', 'EC'] }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
   assert.equal(r.countries.find((c) => c.country === 'EC').rateMissing, true);
   assert.equal(r.countries.find((c) => c.country === 'EC').name, 'Ecuador');
   const co = buildReport({ insights: [], comprobantes: [pay('A', '573001234567', 1)], identities, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
@@ -85,4 +85,42 @@ test('rows that left the sheet are still counted and flagged', () => {
   const r = run({ comprobantes: [pay('A', '573001234567', 1000, { gone: true })] });
   assert.equal(r.kpis.ventas, 1);
   assert.equal(r.comprobantes[0].gone, true);
+});
+
+const only = (extra = {}) => mergeConfig(extra);
+
+test('by default only Colombia is shown: other countries are left out of KPIs, tables, daily and vouchers', () => {
+  const r = buildReport({ insights, comprobantes, identities, config: only({ countries: { MX: { rateToCop: 200 } } }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  assert.deepEqual(r.countries.map((c) => c.country), ['CO']);
+  assert.equal(r.kpis.gasto, 30000, 'MX spend is left out');
+  assert.equal(r.kpis.ventas, 1);
+  assert.equal(r.kpis.valor, 60000);
+  assert.equal(r.daily[0].valor, 60000);
+  assert.ok(r.comprobantes.every((c) => c.country === 'CO'));
+  assert.deepEqual(r.detected.map((d) => d.country).sort(), ['CO', 'MX'], 'the settings can still offer the countries that have data');
+});
+
+test('"incluir otros países" groups the non-enabled ones as "Otros países" instead of hiding them', () => {
+  const r = buildReport({ insights, comprobantes, identities, config: only({ includeOtherCountries: true, countries: { MX: { rateToCop: 200 } } }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  assert.deepEqual(r.countries.map((c) => c.country).sort(), ['CO', 'XX']);
+  assert.equal(r.countries.find((c) => c.country === 'XX').name, 'Otros países');
+  assert.equal(r.kpis.gasto, 60000);
+  assert.equal(r.kpis.ventas, 3);
+  assert.equal(buildReport({ insights, comprobantes, identities, config: only({ includeOtherCountries: true }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29', country: 'XX' }).kpis.ventas, 2);
+});
+
+test('the filter "-" selects data without a country and empty countries never show as rows', () => {
+  const noCountry = [ins('A', 'CT01 Col', '', 5000)];
+  const r = buildReport({ insights: noCountry, comprobantes: [], identities, config, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29', country: '-' });
+  assert.equal(r.kpis.gasto, 5000);
+  const none = buildReport({ insights: [ins('A', 'CT01 Col', '', 0)], comprobantes: [], identities, config, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  assert.deepEqual(none.countries, [], 'a zero row is not a country');
+});
+
+test('the enabled countries setting is validated and keeps Colombia by default', () => {
+  assert.deepEqual(DEFAULT_CONFIG.enabledCountries, ['CO']);
+  assert.equal(DEFAULT_CONFIG.includeOtherCountries, false);
+  assert.deepEqual(mergeConfig({ enabledCountries: ['co', 'mx', 'MX'] }).enabledCountries, ['CO', 'MX']);
+  assert.throws(() => mergeConfig({ enabledCountries: [] }), /al menos un país/);
+  assert.throws(() => mergeConfig({ enabledCountries: ['Mexico'] }), /al menos un país/);
 });

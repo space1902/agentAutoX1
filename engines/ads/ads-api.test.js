@@ -158,8 +158,8 @@ test('sync --auto, tracking, country filter and the manual country override work
 
   const key = report.comprobantes[0]?.key;
   if (key) {
-    const set = await runAdsCommand('comprobante-country', { key, code: 'MX' }, c);
-    assert.equal(set.country, 'MX');
+    const set = await runAdsCommand('comprobante-country', { key, code: 'CO' }, c);
+    assert.equal(set.country, 'CO');
     const again = await runAdsCommand('report', { from: '2026-10-28', to: '2026-10-29', group: 'ct' }, c);
     assert.equal(again.comprobantes.find((v) => v.key === key).countrySource, 'manual');
   }
