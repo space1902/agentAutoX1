@@ -19,7 +19,7 @@ const TOKEN_ENTRY: &str = "meta-token";
 /// Env var the engine reads the token from.
 pub const TOKEN_ENV: &str = "AGENTAUTO_META_TOKEN";
 
-const ALLOWED: &[&str] = &["sync", "report", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "activities-probe"];
+const ALLOWED: &[&str] = &["sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "activities-probe"];
 const DECISION_STATUSES: &[&str] = &["pending", "done", "ignored"];
 const GROUPS: &[&str] = &["ct", "campaign", "ad"];
 
@@ -117,7 +117,7 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
     }
     if args.auto && command == "sync" {
         out.push("--auto".to_string());
-    } else if matches!(command, "sync" | "report") && (args.from.is_none() || args.to.is_none()) {
+    } else if matches!(command, "sync" | "report" | "vouchers") && (args.from.is_none() || args.to.is_none()) {
         return Err("Faltan las fechas del rango.".to_string());
     }
     if command == "decision-status" {
@@ -312,6 +312,11 @@ pub fn tracking(settings: &Settings) -> Result<Value, String> {
     run_engine(settings, "tracking", &AdsArgs::default(), None, None)
 }
 
+/// Payments of any range (the Comprobantes card has its own dates), optionally limited to one country.
+pub fn vouchers(settings: &Settings, from: &str, to: &str, country: Option<&str>) -> Result<Value, String> {
+    run_engine(settings, "vouchers", &AdsArgs { from: Some(from), to: Some(to), country, ..Default::default() }, None, None)
+}
+
 pub fn comprobante_country(settings: &Settings, key: &str, code: &str) -> Result<Value, String> {
     run_engine(settings, "comprobante-country", &AdsArgs { key: Some(key), code: Some(code), ..Default::default() }, None, None)
 }
@@ -491,6 +496,10 @@ mod tests {
         assert_eq!(&report[2..], ["report", "--from", "2026-10-01", "--to", "2026-10-29", "--group", "ct", "--country", "MX", "--split"]);
         assert!(build_args("report", &AdsArgs { from: Some("2026-10-01"), to: Some("2026-10-29"), country: Some("Mexico"), ..Default::default() }).is_err());
         let key = "0123456789abcdef0123";
+        let vouchers = build_args("vouchers", &AdsArgs { from: Some("2026-10-01"), to: Some("2026-10-29"), country: Some("-"), ..Default::default() }).unwrap();
+        assert_eq!(&vouchers[2..], ["vouchers", "--from", "2026-10-01", "--to", "2026-10-29", "--country", "-"]);
+        assert!(build_args("vouchers", &AdsArgs::default()).is_err(), "dates are required");
+        assert!(build_args("vouchers", &AdsArgs { from: Some("ayer"), to: Some("2026-10-29"), ..Default::default() }).is_err());
         assert_eq!(&build_args("comprobante-country", &AdsArgs { key: Some(key), code: Some("MX"), ..Default::default() }).unwrap()[2..], ["comprobante-country", "--key", key, "--code", "MX"]);
         assert_eq!(&build_args("comprobante-country", &AdsArgs { key: Some(key), code: Some(""), ..Default::default() }).unwrap()[2..], ["comprobante-country", "--key", key]);
         assert!(build_args("comprobante-country", &AdsArgs { key: Some("../x"), code: Some("MX"), ..Default::default() }).is_err());

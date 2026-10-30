@@ -165,3 +165,20 @@ test('sync --auto, tracking, country filter and the manual country override work
   }
   await assert.rejects(runAdsCommand('comprobante-country', { key: 'nope', code: 'MX' }, c), AdsError);
 });
+
+test('vouchers returns the same list as the report for any range, from the cache and without Meta rows', async () => {
+  const dir = tmp();
+  await runAdsCommand('sync', { from: '2026-10-28', to: '2026-10-28' }, ctx({ dataDir: dir }));
+  const offline = { dataDir: dir, env: {}, fetchImpl: async () => { throw new Error('no network'); }, now: () => Date.parse('2026-10-29T15:00:00Z') };
+  const report = await runAdsCommand('report', { from: '2026-10-28', to: '2026-10-28', group: 'ct' }, offline);
+  const v = await runAdsCommand('vouchers', { from: '2026-10-28', to: '2026-10-28' }, offline);
+  assert.deepEqual(v.range, { from: '2026-10-28', to: '2026-10-28' });
+  assert.deepEqual(v.comprobantes, report.comprobantes);
+  assert.equal(v.reviewCount, report.reviewCount);
+  assert.equal(JSON.stringify(v).includes('573001234567'), false);
+  // A range with no payments is simply empty; a wide range keeps the same two.
+  assert.equal((await runAdsCommand('vouchers', { from: '2026-10-01', to: '2026-10-27' }, offline)).comprobantes.length, 0);
+  assert.equal((await runAdsCommand('vouchers', { from: '2026-10-01', to: '2026-10-29' }, offline)).comprobantes.length, 2);
+  await assert.rejects(runAdsCommand('vouchers', { from: 'ayer', to: 'hoy' }, offline), /fecha/i);
+  await assert.rejects(runAdsCommand('vouchers', { from: '2026-10-01', to: '2026-10-02', country: 'xx' }, offline), /país/i);
+});

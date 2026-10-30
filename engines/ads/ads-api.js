@@ -19,7 +19,7 @@ import { addDays, daysBetween, isIsoDate, localParts } from './time.js';
 export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
 const GROUPS = ['ct', 'campaign', 'ad'];
-const COMMANDS = ['sync', 'report', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'activities-probe'];
+const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'activities-probe'];
 const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
 export class AdsError extends Error {}
@@ -166,6 +166,26 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
         today,
         dbPath: `${adsDir(dataDir)}/ads.db`,
       };
+    }
+
+    // vouchers: the payments list of any range (the Comprobantes card has its own dates). Same rules as the report, but
+    // without Meta data, so it is cheap.
+    if (command === 'vouchers') {
+      checkRange(args);
+      if (args.country && args.country !== true && !/^(all|-|[A-Z]{2})$/.test(args.country)) throw new AdsError('El país debe ser un código de 2 letras o «all».');
+      const { comprobantes, reviewCount, range } = buildReport({
+        insights: [],
+        comprobantes: store.comprobantesBetween(args.from, args.to),
+        identities: store.identities(),
+        ads: {},
+        config,
+        from: args.from,
+        to: args.to,
+        group: 'ct',
+        today,
+        country: args.country === true ? '' : (args.country ?? ''),
+      });
+      return { range, comprobantes, reviewCount };
     }
 
     // report

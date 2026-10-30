@@ -454,6 +454,13 @@ async fn ads_report(state: State<'_, AppState>, from: String, to: String, group:
     blocking(move || ads::report(&settings, &from, &to, &group, country.as_deref(), split.unwrap_or(false))).await
 }
 
+/// Payments of an arbitrary range for the Comprobantes card.
+#[tauri::command]
+async fn ads_vouchers(state: State<'_, AppState>, from: String, to: String, country: Option<String>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::vouchers(&settings, &from, &to, country.as_deref())).await
+}
+
 /// Incremental sync (last days + today); the first run backfills the whole history.
 #[tauri::command]
 async fn ads_sync_auto(state: State<'_, AppState>) -> Result<Value, String> {
@@ -813,6 +820,7 @@ pub fn run() {
             ollama_launch,
             ads_sync,
             ads_report,
+            ads_vouchers,
             ads_sync_auto,
             ads_tracking,
             ads_comprobante_country,

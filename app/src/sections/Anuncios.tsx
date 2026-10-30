@@ -30,6 +30,7 @@ import {
   type Report,
   type SyncResult,
   type TrackingItem,
+  type VouchersData,
 } from "../lib/adsApi";
 
 const GROUPS: { id: Group; label: string }[] = [
@@ -74,15 +75,23 @@ export default function Anuncios() {
   const [split, setSplit] = useState(false);
   const [tracking, setTracking] = useState<TrackingItem[]>([]);
   const [chartCt, setChartCt] = useState("");
+  // The Comprobantes card has its own dates. null = it follows the page range (and reuses the report's list).
+  const [vOwn, setVOwn] = useState<{ preset: Preset; custom: { from: string; to: string } } | null>(null);
+  const [vData, setVData] = useState<VouchersData | null>(null);
 
   const range = preset === "custom" ? custom : presetRange(preset, today);
   const decRange = decPreset === "custom" ? decCustom : presetRange(decPreset, today);
   const rangeValid = range.from !== "" && range.to !== "" && range.from <= range.to;
   const includesToday = range.to >= today && range.from <= today;
 
-  const latest = useRef({ range, group, rangeValid, includesToday, tokenPresent, config, country, split });
-  latest.current = { range, group, rangeValid, includesToday, tokenPresent, config, country, split };
+  const vPreset = vOwn ? vOwn.preset : preset;
+  const vRange = vOwn ? (vOwn.preset === "custom" ? vOwn.custom : presetRange(vOwn.preset, today)) : range;
+  const vValid = vRange.from !== "" && vRange.to !== "" && vRange.from <= vRange.to;
+
+  const latest = useRef({ range, group, rangeValid, includesToday, tokenPresent, config, country, split, vOwn, vRange, vValid });
+  latest.current = { range, group, rangeValid, includesToday, tokenPresent, config, country, split, vOwn, vRange, vValid };
   const seq = useRef(0);
+  const vSeq = useRef(0);
 
   const loadReport = useCallback(async () => {
     const { range: r, group: g, rangeValid: ok, country: c, split: sp } = latest.current;
@@ -93,6 +102,19 @@ export default function Anuncios() {
       if (mine === seq.current) setReport(data);
     } catch (e) {
       if (mine === seq.current) setProblems([errorText(e)]);
+    }
+  }, []);
+
+  // Payments of the card's own range, from the local cache. Only when the card has its own dates.
+  const loadVouchers = useCallback(async () => {
+    const { vOwn: own, vRange: r, vValid: ok, country: c } = latest.current;
+    if (!own || !ok) return;
+    const mine = ++vSeq.current;
+    try {
+      const data = await adsApi.vouchers(r.from, r.to, c);
+      if (mine === vSeq.current) setVData(data);
+    } catch (e) {
+      if (mine === vSeq.current) setProblems([errorText(e)]);
     }
   }, []);
 
@@ -127,11 +149,11 @@ export default function Anuncios() {
       } catch (e) {
         setProblems([errorText(e)]);
       } finally {
-        await Promise.all([loadReport(), loadStatus()]);
+        await Promise.all([loadReport(), loadStatus(), loadVouchers()]);
         setSyncing(false);
       }
     },
-    [loadReport, loadStatus],
+    [loadReport, loadStatus, loadVouchers],
   );
 
   // First load: cached report right away, then a sync when the data is stale.
@@ -165,7 +187,7 @@ export default function Anuncios() {
   const setVoucherCountry = async (key: string, code: string) => {
     try {
       await adsApi.comprobanteCountry(key, code);
-      await loadReport();
+      await Promise.all([loadReport(), loadVouchers()]);
     } catch (e) {
       setProblems([errorText(e)]);
     }
@@ -190,6 +212,11 @@ export default function Anuncios() {
     if (loaded) void loadReport();
   }, [preset, custom, group, country, split, loaded, loadReport]);
 
+  // The card's own range or the country filter changed: read the local cache (no network).
+  useEffect(() => {
+    if (loaded) void loadVouchers();
+  }, [vOwn, country, loaded, loadVouchers]);
+
   // "Actualizado hace X min" re-renders its text while the section is open; it never reloads data.
   // Data refreshes only on mount, on "Actualizar" and when the range/filters change (no polling, no scheduler events).
   useEffect(() => {
@@ -208,6 +235,8 @@ export default function Anuncios() {
   const chartSeries = ctOptions.find((c) => c.ct === chartCt);
   const chartTitle = chartSeries ? `Gasto contra valor por día · ${chartSeries.ct}` : "Gasto contra valor por día · Todas las campañas";
   const updated = report?.lastSync.meta ?? status?.lastSync.meta ?? null;
+  const ownReady = vOwn !== null && vData !== null && vData.range.from === vRange.from && vData.range.to === vRange.to;
+  const vouchers = vOwn ? (ownReady ? vData : null) : report ? { comprobantes: report.comprobantes, reviewCount: report.reviewCount } : null;
   const rangeLabel = range.from === range.to ? range.from : `${range.from} → ${range.to}`;
 
   return (
@@ -398,9 +427,17 @@ export default function Anuncios() {
       <Card>
         <div className="card-head">
           <h2 className="card-title">Comprobantes</h2>
-          <span className="muted">{report ? `${report.comprobantes.length} en el rango` : ""}</span>
+          <span className="muted">{vouchers ? `${vouchers.comprobantes.length} en el rango` : ""}</span>
         </div>
-        {report ? <VouchersPanel vouchers={report.comprobantes} reviewCount={report.reviewCount} onCountry={(key, code) => void setVoucherCountry(key, code)} /> : <Skeleton height={120} />}
+        <DateRangeBar
+          preset={vPreset}
+          range={vRange}
+          today={today}
+          minDate={report?.history.from ?? report?.history.firstData ?? null}
+          onPreset={(p) => setVOwn({ preset: p, custom: vRange })}
+          onRange={(from, to) => setVOwn({ preset: "custom", custom: { from, to } })}
+        />
+        {vouchers ? <VouchersPanel vouchers={vouchers.comprobantes} reviewCount={vouchers.reviewCount} onCountry={(key, code) => void setVoucherCountry(key, code)} /> : <Skeleton height={120} />}
       </Card>
       </>
       )}
