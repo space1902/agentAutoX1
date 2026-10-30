@@ -4,7 +4,7 @@
 //    for every ad and every CT, turned into an action with the configured thresholds.
 //  - Post-budget check: on day `postBudgetNotifyDay` (the day of the raise is day 1) at `postBudgetNotifyAt`,
 //    compare the days since the raise with the `windowDays` before it.
-import { suggestAction } from './metrics.js';
+import { isInactiveStatus, suggestAction } from './metrics.js';
 import { extractCt } from './parse.js';
 import { buildReport, isMonitored } from './report.js';
 import { addDays, daysBetween } from './time.js';
@@ -58,6 +58,14 @@ export function postBudgetVerdict(after, before, life, thresholds, change) {
   return { verdict: VERDICTS.hold, suggestedPct: null, worsen, reason: `${summary} Aún no hay suficiente para decidir: espera más datos.` };
 }
 
+// True when every ad is known and switched off in Meta (PAUSED, CAMPAIGN_PAUSED, ADSET_PAUSED, ARCHIVED, DELETED).
+// Such an entity gets no verdict: recommending to scale, lower or turn off something already off is noise.
+// Unknown statuses count as delivering, so a missing status never silences a decision.
+export function allAdsOff(adIds, ads) {
+  const ids = [...adIds];
+  return ids.length > 0 && ids.every((id) => isInactiveStatus(ads?.[id]?.effectiveStatus));
+}
+
 function kpisFor({ insights, comprobantes, identities, config, adIds, from, to }) {
   return buildReport({
     insights: insights.filter((r) => adIds.has(r.adId)),
@@ -82,6 +90,7 @@ function testDecisions({ insights, comprobantes, identities, ads, config, now, e
   const issue = (kind, entityType, entityId, label, first, adIds) => {
     const key = `${kind}:${entityId}:${first}:d${days}`;
     if (existing.has(key)) return;
+    if (allAdsOff(adIds, ads)) return;
     const { due, late } = isDue(now, addDays(first, days - 1), life.testNotifyAt, life.lateDays);
     if (!due) return;
     const range = { from: first, to: addDays(first, days - 1) };
@@ -124,7 +133,7 @@ export function dueBudgetChanges({ changes, config, now, existing }) {
   return out;
 }
 
-function budgetDecisions({ insights, comprobantes, identities, config, changes, now, existing }) {
+function budgetDecisions({ insights, comprobantes, identities, ads = {}, config, changes, now, existing }) {
   const life = config.lifecycle;
   const out = [];
   const days = life.postBudgetNotifyDay;
@@ -136,6 +145,7 @@ function budgetDecisions({ insights, comprobantes, identities, config, changes, 
     const latest = rows[rows.length - 1];
     const label = (change.entityType === 'campaign' ? latest.campaignName : latest.adsetName) || change.entityId;
     if (change.entityType === 'adset' && !isMonitored(latest.campaignName, config.campaignPrefix)) continue;
+    if (allAdsOff(adIds, ads)) continue;
 
     const range = { from: change.date, to: addDays(change.date, days - 1) };
     const beforeRange = { from: addDays(change.date, -life.windowDays), to: addDays(change.date, -1) };

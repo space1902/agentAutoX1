@@ -6,7 +6,7 @@ export const ACTION_CONVERSATION = 'onsite_conversion.messaging_conversation_sta
 const INSIGHT_FIELDS = 'campaign_name,campaign_id,adset_id,adset_name,ad_id,ad_name,spend,impressions,clicks,actions';
 const AD_FIELDS =
   'name,created_time,effective_status,campaign_id,adset_id,campaign{name,daily_budget,lifetime_budget},adset{name,daily_budget,lifetime_budget}';
-const AD_STATUSES = ['ACTIVE', 'PAUSED', 'DISAPPROVED', 'WITH_ISSUES', 'PENDING_REVIEW', 'IN_PROCESS', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'PENDING_BILLING_INFO', 'ARCHIVED'];
+const AD_STATUSES = ['ACTIVE', 'PAUSED', 'DISAPPROVED', 'WITH_ISSUES', 'PENDING_REVIEW', 'IN_PROCESS', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'PENDING_BILLING_INFO', 'ARCHIVED', 'DELETED'];
 
 const num = (v) => {
   const n = Number(v);

@@ -2,7 +2,7 @@
 // trkJoin did; with a country, date|adId|country), derives metrics, per-country economics and suggested actions,
 // and groups by CT / campaign / ad. Pure.
 import { COUNTRY_NAMES, DEFAULT_COUNTRY_TOKENS, deriveCountry, scopeCountry } from './country.js';
-import { ACTIONS, computeMetrics, suggestAction } from './metrics.js';
+import { ACTIONS, computeMetrics, isInactiveStatus, suggestAction } from './metrics.js';
 import { maskPhone, normalizeText, parseCt } from './parse.js';
 import { isValidResult, matchesFlow } from './sheet.js';
 import { daysBetween, eachDate } from './time.js';
@@ -130,8 +130,7 @@ export function buildReport({
     addTotals(joined.get(key), e);
   }
 
-  const describe = (adId) => {
-    const id = identityOf(adId);
+  const describe = (adId, id = identityOf(adId)) => {
     const campaignName = id?.campaignName ?? '';
     const adName = id?.adName ?? '';
     const fromCampaign = parseCt(campaignName);
@@ -148,7 +147,8 @@ export function buildReport({
     };
   };
 
-  const groupOf = (info, entryCountry) => {
+  // Group of an ad before the country split.
+  const baseGroupOf = (info) => {
     let g;
     if (group === 'campaign') {
       if (!info.adId) g = { key: NO_AD, label: NO_AD };
@@ -156,9 +156,27 @@ export function buildReport({
     } else if (group === 'ad') {
       g = !info.adId ? { key: NO_AD, label: NO_AD } : { key: info.adId, label: info.adName || `Anuncio ${info.adId}` };
     } else g = { key: info.ct, label: info.ct };
+    return g;
+  };
+  const groupOf = (info, entryCountry) => {
+    const g = baseGroupOf(info);
     if (splitCountry) return { key: `${g.key}|${entryCountry}`, label: `${g.label} · ${entryCountry || NO_COUNTRY}` };
     return g;
   };
+
+  // Delivery state per group, from the stored Meta status of EVERY known ad (not only the ones that spent in the range):
+  // a group is "paused" only when it has known ads and none of them is delivering.
+  const adIdentity = (adId) => identityOf(adId) ?? (ads[adId]?.name === undefined ? null : { adName: ads[adId].name, campaignId: ads[adId].campaignId ?? '', campaignName: ads[adId].campaignName ?? '' });
+  const delivery = new Map();
+  for (const [adId, ad] of Object.entries(ads)) {
+    const id = adIdentity(adId);
+    if (!ad?.effectiveStatus || !id || !isMonitored(id.campaignName, prefix)) continue;
+    const key = baseGroupOf(describe(adId, id)).key;
+    const d = delivery.get(key) ?? { total: 0, active: 0 };
+    d.total += 1;
+    if (!isInactiveStatus(ad.effectiveStatus)) d.active += 1;
+    delivery.set(key, d);
+  }
 
   // Per-country table (always over every country, whatever the filter).
   const byCountry = new Map();
@@ -196,7 +214,7 @@ export function buildReport({
     if (!groups.has(g.key)) {
       groups.set(g.key, {
         ...zero(),
-        key: g.key, label: g.label, ct: group === 'ct' ? g.label : info.ct, adId: group === 'ad' ? info.adId : '',
+        key: g.key, baseKey: baseGroupOf(info).key, label: g.label, ct: group === 'ct' ? g.label : info.ct, adId: group === 'ad' ? info.adId : '',
         adName: group === 'ad' ? info.adName : '', campaignId: group === 'ad' || group === 'campaign' ? info.campaignId : '',
         campaignName: group === 'ct' ? '' : info.campaignName, country: splitCountry ? e.country : '', hasAction: false, adIds: new Set(),
       });
@@ -220,8 +238,12 @@ export function buildReport({
     .sort((a, b) => a.ct.localeCompare(b.ct, 'es', { numeric: true }));
 
   const rows = [...groups.values()]
-    .map(({ adIds, hasAction, ...row }) => {
+    .map(({ adIds, hasAction, baseKey, ...row }) => {
       const metrics = withMetrics(row);
+      const d = delivery.get(baseKey);
+      // Paused: every known ad of the group is off in Meta and so is each ad that spent in the range.
+      const paused = Boolean(hasAction && d && d.total > 0 && d.active === 0 && [...adIds].every((id) => isInactiveStatus(ads[id]?.effectiveStatus)));
+      const suggested = hasAction ? suggestAction(metrics, config.thresholds) : null;
       const ages = [...adIds].map((id) => dayOf(ads[id], today)).filter((n) => n !== null);
       const single = group === 'ad' ? ads[row.adId] : null;
       return {
@@ -231,7 +253,10 @@ export function buildReport({
         effectiveStatus: single?.effectiveStatus ?? null,
         // Latest recent budget raise among its ads (informational: day N since the raise).
         raise: [...adIds].map((id) => raises[id]).filter(Boolean).sort((a, b) => (a.date < b.date ? 1 : -1))[0] ?? null,
-        action: hasAction ? suggestAction(metrics, config.thresholds) : null,
+        // A group that is already off in Meta shows "Apagada" instead of a recommendation (metrics are kept).
+        action: paused ? ACTIONS.paused : suggested,
+        suggestedAction: paused ? suggested : null,
+        paused,
         // The row groups campaigns whose name has no recognizable CT number.
         ctIssue: group === 'ct' && row.ct === NO_CT,
       };

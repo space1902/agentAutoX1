@@ -205,7 +205,7 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
     adsMap() {
       const rows = q('SELECT * FROM ads').all();
       return Object.fromEntries(
-        rows.map((r) => [r.ad_id, { name: r.name, createdTime: r.created_time, effectiveStatus: r.effective_status, campaignId: r.campaign_id, adsetId: r.adset_id, firstSpendDate: r.first_spend_date }]),
+        rows.map((r) => [r.ad_id, { name: r.name, createdTime: r.created_time, effectiveStatus: r.effective_status, campaignId: r.campaign_id, campaignName: r.campaign_name, adsetId: r.adset_id, firstSpendDate: r.first_spend_date }]),
       );
     },
 

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { computeChanges } from './budget.js';
 import { DEFAULT_CONFIG, mergeConfig } from './config.js';
-import { evaluateDue, isDue, postBudgetVerdict, testVerdict } from './decisions.js';
+import { allAdsOff, evaluateDue, isDue, postBudgetVerdict, testVerdict } from './decisions.js';
 import { addDays } from './time.js';
 
 const T = DEFAULT_CONFIG.thresholds;
@@ -167,4 +167,41 @@ test('post-budget notes the previous change of the same entity', () => {
   assert.equal(b.extra.previous.date, '2026-10-20');
   assert.equal(b.extra.daysSincePrevious, 7);
   assert.match(b.reason, /último cambio/i);
+});
+
+// ---------------------------------------------------------------- already-paused entities get no verdict
+
+test('allAdsOff needs every ad known and off; unknown statuses count as delivering', () => {
+  assert.equal(allAdsOff(['A', 'B'], { A: { effectiveStatus: 'PAUSED' }, B: { effectiveStatus: 'CAMPAIGN_PAUSED' } }), true);
+  assert.equal(allAdsOff(['A', 'B'], { A: { effectiveStatus: 'PAUSED' }, B: { effectiveStatus: 'ACTIVE' } }), false);
+  assert.equal(allAdsOff(['A', 'B'], { A: { effectiveStatus: 'PAUSED' } }), false);
+  assert.equal(allAdsOff(['A'], { A: { effectiveStatus: 'DISAPPROVED' } }), false);
+  assert.equal(allAdsOff([], {}), false);
+});
+
+test('no test verdict for an ad or CT whose ads are all paused at verdict time; others still get theirs', () => {
+  const paused = { A: { firstSpendDate: '2026-10-25', effectiveStatus: 'ADSET_PAUSED' } };
+  assert.equal(evaluateDue(base({ ads: paused, now: clock('2026-10-28', 20) })).length, 0);
+  const active = { A: { firstSpendDate: '2026-10-25', effectiveStatus: 'ACTIVE' } };
+  assert.equal(evaluateDue(base({ ads: active, now: clock('2026-10-28', 20) })).length, 2);
+});
+
+test('a CT with one active ad keeps its CT verdict while the paused ad gets none', () => {
+  const s = testScenario();
+  const two = {
+    ...s,
+    insights: [...s.insights, ...days('2026-10-25', 4).map((d) => ins(d, 'B', 10000))],
+    identities: { ...s.identities, B: { adName: 'Ad B', campaignId: 'c1', campaignName: 'CT01 - ventas' } },
+    ads: { A: { firstSpendDate: '2026-10-25', effectiveStatus: 'PAUSED' }, B: { firstSpendDate: '2026-10-25', effectiveStatus: 'ACTIVE' } },
+  };
+  const out = evaluateDue({ ...two, config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-28', 20) });
+  assert.deepEqual(out.filter((d) => d.kind === 'test').map((d) => d.entityId), ['B']);
+  assert.equal(out.filter((d) => d.kind === 'ct_test').length, 1);
+});
+
+test('no post-budget verdict (Subir/Bajar) for an ad set whose ads are all paused', () => {
+  const s = budgetScenario({ afterVentas: 0, afterGasto: 30000 });
+  const run = (status) => evaluateDue({ ...s, ads: { X: { firstSpendDate: '2026-10-01', effectiveStatus: status } }, config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-28', 20) });
+  assert.equal(run('ACTIVE').filter((d) => d.kind === 'budget').length, 1);
+  assert.equal(run('PAUSED').filter((d) => d.kind === 'budget').length, 0);
 });

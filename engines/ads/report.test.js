@@ -79,7 +79,11 @@ test('group by CT merges campaigns of the same code and keeps unattributed payme
   assert.equal(byLabel['CT 01'].ventas, 3);
   assert.equal(byLabel['CT 01'].valor, 95000);
   assert.equal(byLabel['CT 01'].action.label, 'Escalar');
-  assert.equal(byLabel['CT 02'].action.label, 'Vigilar');
+  // Its only ad (C) is PAUSED in Meta: no recommendation, the metrics stay.
+  assert.equal(byLabel['CT 02'].action.label, 'Apagada');
+  assert.equal(byLabel['CT 02'].paused, true);
+  assert.equal(byLabel['CT 02'].suggestedAction.label, 'Vigilar');
+  assert.equal(byLabel['CT 02'].gasto, 30000);
   assert.equal(byLabel['Sin anuncio'].action, null);
   assert.equal(byLabel['Sin anuncio'].valor, 14000);
 });
@@ -204,4 +208,45 @@ test('ctDaily series add up to the total daily series and empty CTs are left out
     assert.equal(out.ctDaily.reduce((n, c) => n + c.daily[i].valor, 0), out.daily[i].valor);
   }
   assert.deepEqual(run('ct', { insights: [], comprobantes: [] }).ctDaily, []);
+});
+
+// ---------------------------------------------------------------- delivery state ("Apagada")
+
+test('a CT whose ads are all off in Meta shows Apagada; with one active ad the recommendation stays', () => {
+  const rows = (status) => run('ct', { ads: { ...ads, A: { ...ads.A, effectiveStatus: status.A }, B: { ...ads.B, effectiveStatus: status.B } } }).rows;
+  const ct1 = (status) => rows(status).find((r) => r.label === 'CT 01');
+  assert.equal(ct1({ A: 'PAUSED', B: 'CAMPAIGN_PAUSED' }).action.label, 'Apagada');
+  assert.equal(ct1({ A: 'ARCHIVED', B: 'ADSET_PAUSED' }).paused, true);
+  assert.equal(ct1({ A: 'PAUSED', B: 'ACTIVE' }).paused, false);
+  assert.equal(ct1({ A: 'PAUSED', B: 'ACTIVE' }).action.label, 'Escalar');
+  // Problems are not a deliberate stop.
+  assert.equal(ct1({ A: 'PAUSED', B: 'DISAPPROVED' }).paused, false);
+  assert.equal(ct1({ A: 'PAUSED', B: 'PAUSED' }).gasto, 35000, 'metrics are kept');
+});
+
+test('a CT with an active ad that has no spend in the range is not paused (status of every known ad counts)', () => {
+  const extra = { ...ads, A: { ...ads.A, effectiveStatus: 'PAUSED' }, B: { ...ads.B, effectiveStatus: 'PAUSED' }, N: { name: 'Nuevo', campaignId: 'c1', campaignName: 'CT01 - ventas', effectiveStatus: 'ACTIVE' } };
+  assert.equal(run('ct', { ads: extra }).rows.find((r) => r.label === 'CT 01').paused, false);
+});
+
+test('a spending ad with unknown status keeps the recommendation', () => {
+  const partial = { A: { ...ads.A, effectiveStatus: 'PAUSED' }, B: { ...ads.B, effectiveStatus: '' } };
+  assert.equal(run('ct', { ads: partial }).rows.find((r) => r.label === 'CT 01').paused, false);
+});
+
+test('campaign and ad tables show Apagada per entity', () => {
+  const off = { ...ads, A: { ...ads.A, effectiveStatus: 'CAMPAIGN_PAUSED' }, B: { ...ads.B, effectiveStatus: 'ACTIVE' } };
+  const byCampaign = run('campaign', { ads: off }).rows;
+  assert.equal(byCampaign.find((r) => r.campaignId === 'c2').paused, true, 'C is PAUSED');
+  assert.equal(byCampaign.find((r) => r.campaignId === 'c1').paused, false, 'B is still active');
+  const byAd = run('ad', { ads: off }).rows;
+  assert.equal(byAd.find((r) => r.adId === 'A').action.label, 'Apagada');
+  assert.equal(byAd.find((r) => r.adId === 'B').paused, false);
+});
+
+test('Apagada also applies when the CT is split by country', () => {
+  const off = { ...ads, A: { ...ads.A, effectiveStatus: 'PAUSED' }, B: { ...ads.B, effectiveStatus: 'PAUSED' } };
+  const rows = run('ct', { ads: off, splitCountry: true }).rows.filter((r) => r.label.startsWith('CT 01'));
+  assert.ok(rows.length >= 1);
+  assert.ok(rows.every((r) => r.paused));
 });

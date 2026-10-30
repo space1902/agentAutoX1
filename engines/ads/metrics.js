@@ -20,7 +20,14 @@ export const ACTIONS = Object.freeze({
   keep: { key: 'keep', label: 'Mantener', tone: 'gray' },
   watch: { key: 'watch', label: 'Vigilar', tone: 'amber' },
   off: { key: 'off', label: 'Apagar', tone: 'red' },
+  // Not a recommendation: the campaign / ad is already switched off in Meta.
+  paused: { key: 'paused', label: 'Apagada', tone: 'gray' },
 });
+
+// Meta effective_status values that mean "not delivering because somebody turned it off (or it is gone)".
+// Statuses such as DISAPPROVED or WITH_ISSUES are NOT here: those are problems, not a deliberate stop.
+export const INACTIVE_STATUSES = Object.freeze(['PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'ARCHIVED', 'DELETED']);
+export const isInactiveStatus = (status) => INACTIVE_STATUSES.includes(String(status ?? '').toUpperCase());
 
 export function suggestAction({ gasto, roas, ventas }, t) {
   if (gasto < t.minSpend) return ACTIONS.wait;

@@ -16,7 +16,7 @@ const insightRow = (date, adId, spend) => ({
 const HEADER = '"Registrado el","Resultado","Teléfono cliente","Nombre cliente","Valor","Banco","Nombre pagador","Fecha comprobante","Flujo","ID anuncio","URL anuncio"';
 const sheetRow = (date, valor) => `"${date} 10:00:00","Pago válido","573001234567","Ana","${valor}","Nequi","Ana","${date} 09:58","Bebidas - aporte","5255001","u"`;
 
-function world({ activities = [], dailyBudget = '5000000', failActivities = false } = {}) {
+function world({ activities = [], dailyBudget = '5000000', failActivities = false, status = 'ACTIVE' } = {}) {
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(String(url));
@@ -27,7 +27,7 @@ function world({ activities = [], dailyBudget = '5000000', failActivities = fals
     if (u.pathname.endsWith('/activities')) return failActivities ? json({ error: { code: 200, message: 'no' } }, 403) : json({ data: activities });
     if (u.pathname.endsWith('/insights')) return json({ data: ['25', '26', '27', '28'].map((d) => insightRow(`2026-10-${d}`, '5255001', 10000)) });
     if (u.pathname.endsWith('/ads')) {
-      return json({ data: [{ id: '5255001', name: 'Ad 5255001', created_time: '2026-10-25T08:00:00-0500', effective_status: 'ACTIVE', campaign_id: 'c1', adset_id: 's1', campaign: { name: 'CT01 - ventas' }, adset: { name: 'Set 1', daily_budget: dailyBudget } }] });
+      return json({ data: [{ id: '5255001', name: 'Ad 5255001', created_time: '2026-10-25T08:00:00-0500', effective_status: status, campaign_id: 'c1', adset_id: 's1', campaign: { name: 'CT01 - ventas' }, adset: { name: 'Set 1', daily_budget: dailyBudget } }] });
     }
     return json({ name: 'X1', timezone_name: 'America/Bogota', currency: 'COP' });
   };
@@ -122,4 +122,16 @@ test('an activity log failure does not break the tick (snapshots are the fallbac
   assert.equal(out.snapshot, true);
   assert.equal(store.budgetHistory('adset', 's1').length, 1);
   assert.match(out.warnings.join(' '), /actividad/i);
+});
+
+test('the status refreshed by the due-time sync silences verdicts of what was paused since the last snapshot', async () => {
+  const store = createStore();
+  store.upsertInsights([{ date: '2026-10-25', adId: '5255001', adName: 'Ad 5255001', campaignId: 'c1', campaignName: 'CT01 - ventas', adsetId: 's1', adsetName: 'Set 1', gasto: 10000, impressions: 1, clicks: 1, mensajes: 10 }], 1);
+  // The cache still says ACTIVE; Meta now says CAMPAIGN_PAUSED.
+  store.upsertAds([{ adId: '5255001', name: 'Ad', createdTime: '2026-10-25T08:00:00-0500', effectiveStatus: 'ACTIVE', campaignId: 'c1', campaignName: 'CT01 - ventas', adsetId: 's1', adsetName: 'Set 1' }], 1);
+  store.refreshFirstSpend();
+  const out = await runTick({ store, config: DEFAULT_CONFIG, token: TOKEN, fetchImpl: world({ status: 'CAMPAIGN_PAUSED' }).fetchImpl, now: at(DAY4_2005) });
+  assert.equal(store.adsMap()['5255001'].effectiveStatus, 'CAMPAIGN_PAUSED');
+  assert.equal(out.created.length, 0);
+  assert.equal(store.decisions().length, 0);
 });

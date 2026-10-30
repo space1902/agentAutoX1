@@ -181,3 +181,25 @@ test('lookbackPlan skips ads that started inside the range, already have spend, 
   assert.deepEqual(plan, { ids: ['1'], since: '2026-10-20', until: '2026-10-27' });
   assert.equal(lookbackPlan({ ads: [], first: {}, checked: [], from: '2026-10-28', prefix: 'CT', today: '2026-10-29' }), null);
 });
+
+test('every sync re-reads the delivery status of the ads (including deleted ones) and stores it', async () => {
+  const store = createStore();
+  await runSync({ ...base, store, fetchImpl: fakeFetch() });
+  assert.equal(store.adsMap().A.effectiveStatus, 'ACTIVE');
+
+  const requests = [];
+  const paused = async (url, init) => {
+    const u = new URL(url);
+    if (u.pathname.endsWith('/ads')) {
+      requests.push(u);
+      return json({ data: [{ id: 'A', name: 'Ad A', created_time: '2026-10-25T10:00:00-0500', effective_status: 'CAMPAIGN_PAUSED', campaign_id: 'c1', adset_id: 's1', campaign: { name: 'CT01 - ventas', id: 'c1' }, adset: { name: 'Set', id: 's1' } }] });
+    }
+    return fakeFetch()(url, init);
+  };
+  const out = await runSync({ ...base, store, fetchImpl: paused });
+  assert.equal(out.meta.ok, true);
+  assert.equal(store.adsMap().A.effectiveStatus, 'CAMPAIGN_PAUSED');
+  assert.equal(store.adsMap().A.campaignName, 'CT01 - ventas');
+  assert.match(requests[0].searchParams.get('effective_status'), /DELETED/);
+  assert.match(requests[0].searchParams.get('fields'), /effective_status/);
+});
