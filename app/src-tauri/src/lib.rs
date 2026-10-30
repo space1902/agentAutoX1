@@ -1,7 +1,7 @@
 mod ads;
 mod applog;
 mod alerts;
-mod analista;
+mod agents;
 mod ai;
 mod data;
 mod embed;
@@ -39,7 +39,7 @@ struct AppState {
     last_on_file: PathBuf,
     embedder: Mutex<Option<Arc<embed::Embedder<embed::win::RealWin>>>>,
     alerts: alerts::Alerts,
-    analista: analista::Analista,
+    agents: agents::Agents,
 }
 
 /// Profile the app is running right now (the engine refuses to edit it).
@@ -520,32 +520,56 @@ async fn ads_tick_now(app: AppHandle, state: State<'_, AppState>) -> Result<Valu
     Ok(result)
 }
 
-// ---- Analista (chat agent on the local Claude Code)
+// ---- Agentes (chat agents on the local Claude Code; the engine's registry lists them)
+
+/// One-shot command of an agent. `agent_id` is checked against the fixed list before anything runs.
+#[tauri::command]
+async fn agent_call(state: State<'_, AppState>, agent_id: String, command: String, payload: Value) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || agents::call(&settings, &agent_id, &command, &payload)).await
+}
+
+/// Starts a streaming command (`turn` or `eval-run`); events arrive as `agent-status` / `agent-eval-status` (with
+/// `agentId` inside), plus the legacy `analista-*` names for the Analista.
+#[tauri::command]
+async fn agent_start(app: AppHandle, state: State<'_, AppState>, agent_id: String, command: String, payload: Value) -> Result<u32, String> {
+    let settings = state.current();
+    let agents = state.agents.clone();
+    let emit = event_emitter(&app);
+    blocking(move || agents.start(&settings, &agent_id, &command, &payload, emit)).await
+}
+
+#[tauri::command]
+async fn agent_cancel(state: State<'_, AppState>, agent_id: String) -> Result<(), String> {
+    let agents = state.agents.clone();
+    blocking(move || agents.cancel(&agent_id)).await
+}
+
+#[tauri::command]
+fn agent_status(state: State<'_, AppState>, agent_id: String) -> Result<Value, String> {
+    state.agents.status(&agent_id)
+}
+
+// Aliases kept for one phase: they act on the Analista.
 
 #[tauri::command]
 async fn analista_call(state: State<'_, AppState>, command: String, payload: Value) -> Result<Value, String> {
-    let settings = state.current();
-    blocking(move || analista::call(&settings, &command, &payload)).await
+    agent_call(state, agents::LEGACY_AGENT.to_string(), command, payload).await
 }
 
-/// Starts a streaming command (`turn` or `eval-run`); events arrive as `analista-status` / `analista-eval-status`.
 #[tauri::command]
 async fn analista_start(app: AppHandle, state: State<'_, AppState>, command: String, payload: Value) -> Result<u32, String> {
-    let settings = state.current();
-    let analista = state.analista.clone();
-    let emit = event_emitter(&app);
-    blocking(move || analista.start(&settings, &command, &payload, emit)).await
+    agent_start(app, state, agents::LEGACY_AGENT.to_string(), command, payload).await
 }
 
 #[tauri::command]
 async fn analista_cancel(state: State<'_, AppState>) -> Result<(), String> {
-    let analista = state.analista.clone();
-    blocking(move || analista.cancel()).await
+    agent_cancel(state, agents::LEGACY_AGENT.to_string()).await
 }
 
 #[tauri::command]
-fn analista_status(state: State<'_, AppState>) -> Value {
-    serde_json::json!({ "chat": state.analista.chat.status(), "eval": state.analista.eval.status() })
+fn analista_status(state: State<'_, AppState>) -> Result<Value, String> {
+    agent_status(state, agents::LEGACY_AGENT.to_string())
 }
 
 // ---- Alertas panel
@@ -737,7 +761,7 @@ pub fn run() {
                 last_on_file,
                 embedder: Mutex::new(None),
                 alerts: alerts::Alerts::default(),
-                analista: analista::Analista::default(),
+                agents: agents::Agents::default(),
             });
             Ok(())
         })
@@ -760,7 +784,9 @@ pub fn run() {
                 }
                 state.keep_stop.store(true, Ordering::SeqCst);
                 // The alerts monitor and the WhatsApp linking close their session cleanly (their own pid only).
-                for proc in [&state.alerts.monitor, &state.alerts.link, &state.analista.chat, &state.analista.eval] {
+                let mut procs = vec![state.alerts.monitor.clone(), state.alerts.link.clone()];
+                procs.extend(state.agents.all_procs());
+                for proc in &procs {
                     if proc.is_running() {
                         let _ = proc.stop();
                     }
@@ -847,6 +873,10 @@ pub fn run() {
             ads_token_clear,
             ads_token_test,
             ads_token_import_from_monitor,
+            agent_call,
+            agent_start,
+            agent_cancel,
+            agent_status,
             analista_call,
             analista_start,
             analista_cancel,
