@@ -52,7 +52,12 @@ export interface AdRow extends Totals {
   ageDays: number | null;
   firstSpendDate: string | null;
   effectiveStatus: string | null;
+  /** "Apagada" when every campaign / ad of the row is already off in Meta; otherwise the computed recommendation. */
   action: AdAction | null;
+  /** The recommendation that was replaced by "Apagada" (informational). */
+  suggestedAction?: AdAction | null;
+  /** Every known ad of the row is off in Meta (paused, archived, deleted...). */
+  paused?: boolean;
   raise: Raise | null;
   country: string;
   /** The row groups campaigns whose name has no recognizable CT number. */
@@ -99,6 +104,13 @@ export interface Voucher {
   countrySource: string;
   /** The row is no longer in the sheet (kept in the history). */
   gone: boolean;
+}
+
+/** Result of `ads_vouchers`: the payments of one range (the Comprobantes card has its own dates). */
+export interface VouchersData {
+  range: { from: string; to: string };
+  comprobantes: Voucher[];
+  reviewCount: number;
 }
 
 export interface CountryRow extends Totals {
@@ -302,6 +314,7 @@ export const adsApi = {
   syncAuto: () => invoke<SyncResult>("ads_sync_auto"),
   report: (from: string, to: string, group: Group, country = "", split = false) =>
     invoke<Report>("ads_report", { from, to, group, country: country || null, split }),
+  vouchers: (from: string, to: string, country = "") => invoke<VouchersData>("ads_vouchers", { from, to, country: country || null }),
   tracking: () => invoke<{ today: string; items: TrackingItem[] }>("ads_tracking"),
   comprobanteCountry: (key: string, code: string) => invoke<{ key: string; country: string }>("ads_comprobante_country", { key, code }),
   status: () => invoke<AdsStatus>("ads_status"),

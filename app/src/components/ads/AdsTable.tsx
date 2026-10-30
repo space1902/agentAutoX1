@@ -68,8 +68,9 @@ export default function AdsTable({ rows, group }: { rows: AdRow[]; group: Group 
                 <div className="muted ads-sub">
                   {group === "ad" && <>{r.ct} · {r.campaignName || "—"} · </>}
                   {r.action ? dayLabel(r) : "sin gasto de Meta"}
+                  {r.paused ? " · apagada" : ""}
                   {r.raise ? ` · día ${r.raise.dayN} desde la subida (${dmy(r.raise.date).slice(0, 5)}, +${Math.round(r.raise.pct)} %)` : ""}
-                  {r.effectiveStatus && r.effectiveStatus !== "ACTIVE" ? ` · ${r.effectiveStatus.toLowerCase()}` : ""}
+                  {!r.paused && r.effectiveStatus && r.effectiveStatus !== "ACTIVE" ? ` · ${r.effectiveStatus.toLowerCase()}` : ""}
                 </div>
               </td>
               <td className="num">{formatMoney(r.gasto)}</td>
