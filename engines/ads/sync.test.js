@@ -200,6 +200,7 @@ test('every sync re-reads the delivery status of the ads (including deleted ones
   assert.equal(out.meta.ok, true);
   assert.equal(store.adsMap().A.effectiveStatus, 'CAMPAIGN_PAUSED');
   assert.equal(store.adsMap().A.campaignName, 'CT01 - ventas');
-  assert.match(requests[0].searchParams.get('effective_status'), /DELETED/);
+  // Meta rejects DELETED in this filter (error 100 "Invalid parameter").
+  assert.doesNotMatch(requests[0].searchParams.get('effective_status'), /DELETED/);
   assert.match(requests[0].searchParams.get('fields'), /effective_status/);
 });
