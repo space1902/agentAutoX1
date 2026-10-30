@@ -33,16 +33,21 @@ test('the Analista claude args are byte-for-byte what they were before the regis
   assert.deepEqual(bare, GOLDEN.nomodel);
 });
 
-test('the registry only holds the Analista and rejects unknown ids', () => {
-  assert.deepEqual(AGENT_IDS, ['analista']);
+test('the registry holds the Analista and the Agente creativo and rejects unknown ids', () => {
+  assert.deepEqual(AGENT_IDS, ['analista', 'creativo']);
   assert.equal(getAgent().id, 'analista');
   assert.equal(getAgent('').id, 'analista');
-  assert.throws(() => getAgent('creativo'), /desconocido/);
+  assert.equal(getAgent('creativo').id, 'creativo');
   assert.throws(() => getAgent('constructor'), /desconocido/);
   assert.throws(() => getAgent('../x'), /desconocido/);
-  assert.deepEqual(publicAgents().map((a) => a.id), ['analista']);
+  assert.deepEqual(publicAgents().map((a) => a.id), ['analista', 'creativo']);
   assert.equal(publicAgents()[0].name, 'Analista de publicidad');
-  assert.ok(Object.values(publicAgents()[0]).every((v) => typeof v === 'string'));
+  assert.equal(publicAgents()[1].name, 'Agente creativo');
+  assert.deepEqual(publicAgents()[1].tabs, ['chat', 'ajustes']);
+  assert.ok(publicAgents()[0].tabs.includes('recomendaciones'));
+  // The UI gets plain data only: no functions or paths.
+  assert.ok(!JSON.stringify(publicAgents()).includes('\\'));
+  assert.ok(publicAgents().every((a) => Object.values(a).every((v) => typeof v !== 'function')));
 });
 
 test('paths: the Analista stays in the legacy folder, other agents go under agents/<id>', () => {
@@ -117,10 +122,12 @@ test('createStreamParser takes the step label from the agent', () => {
 test('agent-api rejects unknown agents and lists the registry', async () => {
   const fx = makeDataDir();
   try {
-    await assert.rejects(runCommand('sessions', {}, { dataDir: fx.dataDir, agentId: 'creativo' }), AgentError);
+    await assert.rejects(runCommand('sessions', {}, { dataDir: fx.dataDir, agentId: 'nope' }), AgentError);
     assert.equal((await runCommand('agents-list', {}, { dataDir: fx.dataDir })).agents[0].id, 'analista');
     assert.deepEqual((await runCommand('sessions', {}, { dataDir: fx.dataDir, agentId: 'analista' })).sessions, []);
     await assert.rejects(runCommand('eval-bank', {}, { dataDir: fx.dataDir, agentId: 'nope' }), AgentError);
+    await assert.rejects(runCommand('learning-run', {}, { dataDir: fx.dataDir, agentId: 'creativo' }), /solo existe para el Analista/);
+    assert.deepEqual((await runCommand('sessions', {}, { dataDir: fx.dataDir, agentId: 'creativo' })).sessions, []);
   } finally {
     fx.cleanup();
   }

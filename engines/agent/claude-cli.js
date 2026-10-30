@@ -87,10 +87,13 @@ export const mcpToolName = (tool, server = SERVER_NAME) => `mcp__${server}__${to
  * Isolation: only OUR MCP server (--strict-mcp-config), only the allowlisted tools (--tools + --allowedTools, anything
  * else is denied without asking), no user/local settings or skills, no persisted system prompt.
  * `agent` is a registry entry (default: the Analista) and supplies the MCP server name and the built-in tool allowlist.
+ * `extra` (from agent.launch) adds a plugin dir, a settings file (deny rules + guard hook) and more allowed tools.
  */
-export function buildClaudeArgs({ agent = AGENTS.analista, mcpConfigFile, toolNames, web, model, resume, appendSystemPrompt }) {
+export function buildClaudeArgs({ agent = AGENTS.analista, mcpConfigFile, toolNames, web, model, resume, appendSystemPrompt, extra = {} }) {
   const builtins = agent.builtinTools.filter((t) => web || !WEB_TOOLS.includes(t));
-  const allowed = [...toolNames.map((t) => mcpToolName(t, agent.mcpServer)), ...builtins];
+  // An agent with `bashPatterns` gets those patterns instead of an unrestricted `Bash` in the allowlist.
+  const granted = agent.bashPatterns ? [...builtins.filter((t) => t !== 'Bash'), ...(builtins.includes('Bash') ? agent.bashPatterns : [])] : builtins;
+  const allowed = [...toolNames.map((t) => mcpToolName(t, agent.mcpServer)), ...granted, ...(extra.allowedTools ?? [])];
   const args = [
     '-p',
     '--output-format', 'stream-json',
@@ -103,6 +106,8 @@ export function buildClaudeArgs({ agent = AGENTS.analista, mcpConfigFile, toolNa
     '--disallowedTools', ALL_BUILTINS.filter((t) => !agent.builtinTools.includes(t)).join(','),
     '--permission-mode', 'dontAsk',
     '--setting-sources', 'project',
+    ...(extra.pluginDir ? ['--plugin-dir', extra.pluginDir] : []),
+    ...(extra.settingsFile ? ['--settings', extra.settingsFile] : []),
     ...(agent.skills.length ? [] : ['--disable-slash-commands']),
     '--system-prompt-snapshot', 'off',
     '--append-system-prompt', appendSystemPrompt,

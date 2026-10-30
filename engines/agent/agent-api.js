@@ -16,6 +16,8 @@ export class AgentError extends Error {}
 export const STREAMING = ['turn', 'eval-run'];
 const COMMANDS = ['agents-list', 'status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail'];
 
+const ADS_ONLY = ['queries', 'recommendations', 'learning-run', 'eval-runs', 'eval-run-detail'];
+
 const need = (cond, message) => {
   if (!cond) throw new AgentError(message);
 };
@@ -75,6 +77,8 @@ export async function runCommand(command, payload, { dataDir, agentId }) {
     const ds = loadDataset(dataDir);
     return { questions: bankForUi(ds), estimate: estimateRun(ds), today: ds.today };
   }
+  // Ads-metrics commands only make sense for the agent that reads the ads database.
+  need(!ADS_ONLY.includes(command) || agent.usesAdsData, 'Ese comando solo existe para el Analista.');
   const store = openAgentStore(dataDir, undefined, agent);
   try {
     if (command === 'eval-runs') return { runs: store.evalRuns() };

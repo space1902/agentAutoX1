@@ -18,27 +18,33 @@ const TITLE_MAX = 60;
 export function ensureWorkspace(dataDir, settings, agent = getAgent()) {
   const dir = agent.cwd(dataDir);
   fs.mkdirSync(dir, { recursive: true });
-  // Rewritten every turn so it always matches this version of the app.
-  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), agent.workspaceMd(settings), 'utf8');
+  // Rewritten every turn so it always matches this version of the app. Agents that work inside the user's own folders
+  // (workspaceMd null) never get a file written there.
+  if (agent.workspaceMd) fs.writeFileSync(path.join(dir, 'CLAUDE.md'), agent.workspaceMd(settings), 'utf8');
   return dir;
 }
 
-export function writeMcpConfig(dataDir, { turnId, sessionId, question, learning, toolsEnv = {} }, agent = getAgent()) {
+export function writeMcpConfig(dataDir, { turnId, sessionId, question, learning, toolsEnv = {}, extraServers = {} }, agent = getAgent()) {
   const file = path.join(agentDir(dataDir, agent), `mcp-${turnId}.json`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const config = {
     mcpServers: {
-      [agent.mcpServer]: {
-        command: process.execPath,
-        args: ['--disable-warning=ExperimentalWarning', agent.mcpServerFile],
-        env: {
-          AGENTAUTO_DATA_DIR: dataDir,
-          AGENTAUTO_SESSION_ID: sessionId,
-          AGENTAUTO_QUESTION: String(question ?? '').slice(0, 500),
-          AGENTAUTO_LEARNING: learning ? '1' : '0',
-          ...toolsEnv,
-        },
-      },
+      ...(agent.mcpServer
+        ? {
+            [agent.mcpServer]: {
+              command: process.execPath,
+              args: ['--disable-warning=ExperimentalWarning', agent.mcpServerFile],
+              env: {
+                AGENTAUTO_DATA_DIR: dataDir,
+                AGENTAUTO_SESSION_ID: sessionId,
+                AGENTAUTO_QUESTION: String(question ?? '').slice(0, 500),
+                AGENTAUTO_LEARNING: learning ? '1' : '0',
+                ...toolsEnv,
+              },
+            },
+          }
+        : {}),
+      ...extraServers,
     },
   };
   fs.writeFileSync(file, JSON.stringify(config), 'utf8');
@@ -98,12 +104,13 @@ export async function runTurn({ dataDir, agentId, sessionId, text, emit, registe
     }
 
     ensureWorkspace(dataDir, cfg, agent);
-    mcpFile = writeMcpConfig(dataDir, { turnId, sessionId, question: text, learning: cfg.learning }, agent);
+    const launch = agent.launch?.({ dataDir }) ?? {};
+    mcpFile = writeMcpConfig(dataDir, { turnId, sessionId, question: text, learning: cfg.learning, extraServers: launch.mcpServers }, agent);
     const lessons = cfg.learning && hooks.lessons ? hooks.lessons({ store }) : [];
     const args = [
       ...located.prefixArgs,
       ...buildClaudeArgs({
-        agent, mcpConfigFile: mcpFile, toolNames: agent.toolNames(cfg), web: cfg.web, model: cfg.model, resume: session.claudeSessionId,
+        agent, mcpConfigFile: mcpFile, toolNames: agent.toolNames(cfg), web: cfg.web, model: cfg.model, resume: session.claudeSessionId, extra: launch,
         appendSystemPrompt: agent.systemPrompt({ dataDir, now: now(), lessons, settings: cfg }),
       }),
     ];
@@ -115,7 +122,7 @@ export async function runTurn({ dataDir, agentId, sessionId, text, emit, registe
     let cancelled = false;
     let stderrTail = '';
 
-    const child = spawnFn(located.command, args, { cwd: agent.cwd(dataDir), env: childEnv(process.env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawnFn(located.command, args, { cwd: agent.cwd(dataDir), env: agent.sanitizeEnv ? agent.sanitizeEnv(childEnv(process.env)) : childEnv(process.env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     registerCancel?.(() => {
       cancelled = true;
       killTree(child);
