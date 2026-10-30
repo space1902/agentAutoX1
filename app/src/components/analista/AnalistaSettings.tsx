@@ -1,7 +1,7 @@
 import { Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { analista, type AnalistaSettings, type AnalistaStatus } from "../../lib/analistaApi";
+import { type AgentApi, type AnalistaSettings, type AnalistaStatus } from "../../lib/agentApi";
 import { Card, Notice, Pill, Skeleton } from "../ui";
 
 const MODELS = [
@@ -11,7 +11,7 @@ const MODELS = [
   { id: "haiku", label: "Haiku (rápido y liviano)" },
 ];
 
-export default function AnalistaSettingsPanel({ onSaved }: { onSaved: (s: AnalistaSettings) => void }) {
+export default function AnalistaSettingsPanel({ api, onSaved }: { api: AgentApi; onSaved: (s: AnalistaSettings) => void }) {
   const [status, setStatus] = useState<AnalistaStatus | null>(null);
   const [form, setForm] = useState<AnalistaSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -19,7 +19,7 @@ export default function AnalistaSettingsPanel({ onSaved }: { onSaved: (s: Analis
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    analista
+    api
       .status()
       .then((s) => {
         setStatus(s);
@@ -36,9 +36,9 @@ export default function AnalistaSettingsPanel({ onSaved }: { onSaved: (s: Analis
     setError(null);
     setSaved(false);
     try {
-      const res = await analista.saveSettings(form);
+      const res = await api.saveSettings(form);
       setForm(res.settings);
-      setStatus(await analista.status());
+      setStatus(await api.status());
       onSaved(res.settings);
       setSaved(true);
     } catch (e) {

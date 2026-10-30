@@ -1,28 +1,28 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence, motion } from "framer-motion";
-import { BarChart3, Bot, Cpu, Flame, Hash, LogOut, MessageCircleMore, Settings as SettingsIcon, Smartphone, type LucideIcon } from "lucide-react";
+import { BarChart3, BrainCircuit, Cpu, Flame, Hash, LogOut, MessageCircleMore, Settings as SettingsIcon, Smartphone, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api, type LogLine, type PairingCard } from "./lib/api";
 import { usePodCreation } from "./lib/podCreation";
 import { applyTheme, loadTheme, type Theme } from "./lib/theme";
 import ErrorBoundary from "./components/ErrorBoundary";
 import Ajustes from "./sections/Ajustes";
-import Analista from "./sections/Analista";
+import Agentes from "./sections/Agentes";
 import Anuncios from "./sections/Anuncios";
 import IA from "./sections/IA";
 import CalentadorBots from "./sections/CalentadorBots";
 import MultiWhatsApp from "./sections/MultiWhatsApp";
 import Numeros from "./sections/Numeros";
 
-type SectionId = "pods" | "bots" | "numeros" | "anuncios" | "analista" | "ia" | "ajustes";
+type SectionId = "pods" | "bots" | "numeros" | "anuncios" | "agentes" | "ia" | "ajustes";
 
 const SECTIONS: { id: SectionId; label: string; icon: LucideIcon }[] = [
   { id: "pods", label: "MultiWhatsApp", icon: Smartphone },
   { id: "bots", label: "Calentador Bots", icon: Flame },
   { id: "numeros", label: "Números", icon: Hash },
   { id: "anuncios", label: "Anuncios", icon: BarChart3 },
-  { id: "analista", label: "Analista", icon: Bot },
+  { id: "agentes", label: "Agentes", icon: BrainCircuit },
   { id: "ia", label: "IA", icon: Cpu },
   { id: "ajustes", label: "Ajustes", icon: SettingsIcon },
 ];
@@ -126,7 +126,7 @@ export default function App() {
             )}
             {section === "numeros" && <Numeros />}
             {section === "anuncios" && <Anuncios />}
-            {section === "analista" && <Analista />}
+            {section === "agentes" && <Agentes />}
             {section === "ia" && <IA warmupRunning={warmup.running} />}
             {section === "ajustes" && <Ajustes theme={theme} onTheme={setTheme} />}
             </ErrorBoundary>

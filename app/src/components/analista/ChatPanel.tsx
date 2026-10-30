@@ -2,7 +2,7 @@ import { AlertTriangle, Check, Loader2, MessageSquarePlus, Send, Square, Trash2,
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText } from "../../lib/api";
 import {
-  analista,
+  type AgentApi,
   formatDuration,
   formatTokens,
   STARTERS,
@@ -12,7 +12,7 @@ import {
   type PlanInfo,
   type StepInfo,
   type TurnEvent,
-} from "../../lib/analistaApi";
+} from "../../lib/agentApi";
 import { Notice } from "../ui";
 import Markdown from "./Markdown";
 import MessageActions from "./MessageActions";
@@ -48,7 +48,7 @@ function UsageFooter({ meta }: { meta: AgentMessage["meta"] }) {
   return <p className="an-usage">{parts.join(" · ")}</p>;
 }
 
-export default function ChatPanel({ learning, onGoSettings, onLearningChange }: { learning: boolean; onGoSettings: () => void; onLearningChange: () => void }) {
+export default function ChatPanel({ api, learning, onGoSettings, onLearningChange }: { api: AgentApi; learning: boolean; onGoSettings: () => void; onLearningChange: () => void }) {
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
@@ -64,7 +64,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
 
   const loadSessions = useCallback(async () => {
     try {
-      setSessions((await analista.sessions()).sessions);
+      setSessions((await api.sessions()).sessions);
     } catch (e) {
       setError(errorText(e));
     }
@@ -75,7 +75,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
     setCandidateIds([]);
     if (!id) return setMessages([]);
     try {
-      setMessages((await analista.messages(id)).messages);
+      setMessages((await api.messages(id)).messages);
     } catch (e) {
       setError(errorText(e));
     }
@@ -83,13 +83,13 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
 
   useEffect(() => {
     void loadSessions();
-    void analista.status().then(setStatus).catch((e) => setError(errorText(e)));
-    void analista.running().then((s) => setRunning(s.chat.running)).catch(() => undefined);
+    void api.status().then(setStatus).catch((e) => setError(errorText(e)));
+    void api.running().then((s) => setRunning(s.chat.running)).catch(() => undefined);
   }, [loadSessions]);
 
   useEffect(() => {
     const unlisten = [
-      analista.onTurn((ev: TurnEvent) => {
+      api.onTurn((ev: TurnEvent) => {
         switch (ev.type) {
           case "turn_start":
             setActiveId(ev.sessionId);
@@ -125,7 +125,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
             break;
         }
       }),
-      analista.onExit(() => {
+      api.onExit(() => {
         setRunning(false);
         void loadSessions();
       }),
@@ -147,7 +147,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
     setRunning(true);
     setLive({ steps: [] });
     try {
-      await analista.start("turn", { sessionId: activeRef.current ?? "", text: body });
+      await api.start("turn", { sessionId: activeRef.current ?? "", text: body });
     } catch (e) {
       setError(errorText(e));
       setRunning(false);
@@ -157,7 +157,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
 
   async function remove(id: string) {
     try {
-      await analista.deleteSession(id);
+      await api.deleteSession(id);
       if (activeId === id) await openSession(null);
       await loadSessions();
     } catch (e) {
@@ -232,7 +232,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
                   {m.meta.cancelled && <p className="an-warn">Respuesta cancelada.</p>}
                   <UsageFooter meta={m.meta} />
                   {learning && !m.meta.cancelled && (
-                    <MessageActions message={m} candidateIds={m.id === lastAssistant?.id ? candidateIds : []} onChanged={onLearningChange} onRated={(rating) => setMessages((all) => all.map((x) => (x.id === m.id ? { ...x, meta: { ...x.meta, rating } } : x)))} />
+                    <MessageActions api={api} message={m} candidateIds={m.id === lastAssistant?.id ? candidateIds : []} onChanged={onLearningChange} onRated={(rating) => setMessages((all) => all.map((x) => (x.id === m.id ? { ...x, meta: { ...x.meta, rating } } : x)))} />
                   )}
                 </>
               )}
@@ -274,7 +274,7 @@ export default function ChatPanel({ learning, onGoSettings, onLearningChange }: 
             disabled={running}
           />
           {running ? (
-            <button type="button" className="btn danger" onClick={() => void analista.cancel().catch((e) => setError(errorText(e)))}>
+            <button type="button" className="btn danger" onClick={() => void api.cancel().catch((e) => setError(errorText(e)))}>
               <Square size={14} aria-hidden /> Cancelar
             </button>
           ) : (

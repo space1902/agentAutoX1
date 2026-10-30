@@ -1,7 +1,7 @@
 import { Play, Square } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { analista, type EvalEstimate, type EvalEvent, type EvalQuestion, type EvalResult, type EvalRun } from "../../lib/analistaApi";
+import { type AgentApi, type EvalEstimate, type EvalEvent, type EvalQuestion, type EvalResult, type EvalRun } from "../../lib/agentApi";
 import { Card, Notice, Pill, Skeleton, type PillTone } from "../ui";
 
 const CATEGORY: Record<string, string> = { numeric: "Cifra", judged: "Criterio", scope: "Fuera de alcance", refuse: "No inventar" };
@@ -25,7 +25,7 @@ function Trend({ runs }: { runs: EvalRun[] }) {
   );
 }
 
-export default function QualityPanel() {
+export default function QualityPanel({ api }: { api: AgentApi }) {
   const [bank, setBank] = useState<EvalQuestion[] | null>(null);
   const [estimate, setEstimate] = useState<EvalEstimate | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -37,14 +37,14 @@ export default function QualityPanel() {
 
   const loadRuns = useCallback(async () => {
     try {
-      setRuns((await analista.evalRuns()).runs);
+      setRuns((await api.evalRuns()).runs);
     } catch (e) {
       setError(errorText(e));
     }
   }, []);
 
   useEffect(() => {
-    analista
+    api
       .evalBank()
       .then((r) => {
         setBank(r.questions);
@@ -53,26 +53,26 @@ export default function QualityPanel() {
       })
       .catch((e) => setError(errorText(e)));
     void loadRuns();
-    void analista.running().then((s) => setRunning(s.eval.running)).catch(() => undefined);
+    void api.running().then((s) => setRunning(s.eval.running)).catch(() => undefined);
   }, [loadRuns]);
 
   useEffect(() => {
     const unlisten = [
-      analista.onEval((ev: EvalEvent) => {
+      api.onEval((ev: EvalEvent) => {
         if (ev.type === "eval_start") setRunning(true);
         if (ev.type === "eval_progress") setProgress({ index: ev.index, total: ev.total, question: ev.question, phase: ev.phase });
         if (ev.type === "eval_done") {
           setRunning(false);
           setProgress(null);
           void loadRuns();
-          void analista.evalDetail(ev.runId).then(setDetail).catch(() => undefined);
+          void api.evalDetail(ev.runId).then(setDetail).catch(() => undefined);
         }
         if (ev.type === "error") {
           setError(ev.error);
           setRunning(false);
         }
       }),
-      analista.onEvalExit(() => {
+      api.onEvalExit(() => {
         setRunning(false);
         setProgress(null);
         void loadRuns();
@@ -97,7 +97,7 @@ export default function QualityPanel() {
     setDetail(null);
     setRunning(true);
     try {
-      await analista.start("eval-run", { ids: chosen.map((q) => q.id) });
+      await api.start("eval-run", { ids: chosen.map((q) => q.id) });
     } catch (e) {
       setError(errorText(e));
       setRunning(false);
@@ -106,7 +106,7 @@ export default function QualityPanel() {
 
   async function open(run: EvalRun) {
     try {
-      setDetail(await analista.evalDetail(run.id));
+      setDetail(await api.evalDetail(run.id));
     } catch (e) {
       setError(errorText(e));
     }
@@ -152,7 +152,7 @@ export default function QualityPanel() {
             Se harán <strong>{claudeRuns}</strong> {claudeRuns === 1 ? "consulta" : "consultas"} a Claude{judgeRuns ? ` + hasta ${judgeRuns} del juez` : ""}. {estimate && estimate.skipped ? `${estimate.skipped} no aplican con tus datos actuales.` : ""}
           </p>
           {running ? (
-            <button className="btn danger" onClick={() => void analista.cancel().catch((e) => setError(errorText(e)))}>
+            <button className="btn danger" onClick={() => void api.cancel().catch((e) => setError(errorText(e)))}>
               <Square size={14} aria-hidden /> Cancelar
             </button>
           ) : (

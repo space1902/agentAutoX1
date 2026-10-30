@@ -1,15 +1,17 @@
 import { Check, MessageSquareWarning, ThumbsDown, ThumbsUp, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { analista, type AgentMessage, type Lesson } from "../../lib/analistaApi";
+import { type AgentApi, type AgentMessage, type Lesson } from "../../lib/agentApi";
 
 /** Feedback under an answer (👍 / 👎 / "Esto está mal") and the "¿Aprendo esto?" fence for new lesson candidates. */
 export default function MessageActions({
+  api,
   message,
   candidateIds,
   onChanged,
   onRated,
 }: {
+  api: AgentApi;
   message: AgentMessage;
   candidateIds: number[];
   onChanged: () => void;
@@ -23,7 +25,7 @@ export default function MessageActions({
 
   useEffect(() => {
     if (!candidateIds.length) return setPending([]);
-    void analista
+    void api
       .lessons(candidateIds)
       .then((r) => setPending(r.lessons.filter((l) => l.status === "candidate")))
       .catch(() => setPending([]));
@@ -32,7 +34,7 @@ export default function MessageActions({
   async function rate(kind: "up" | "down" | "wrong", text?: string) {
     setError(null);
     try {
-      const res = await analista.feedback(message.id, kind, text);
+      const res = await api.feedback(message.id, kind, text);
       onRated(res.rating === 1 ? 1 : -1);
       setWrong(false);
       setComment("");
@@ -45,7 +47,7 @@ export default function MessageActions({
   async function decide(lesson: Lesson, action: "certify" | "reject") {
     setError(null);
     try {
-      await analista.setLesson(lesson.id, action);
+      await api.setLesson(lesson.id, action);
       setPending((all) => all.filter((l) => l.id !== lesson.id));
       onChanged();
     } catch (e) {

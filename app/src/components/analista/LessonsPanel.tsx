@@ -1,7 +1,7 @@
 import { Check, Pencil, RotateCcw, Save, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { analista, type LearningSummary, type Lesson, type LessonStatus } from "../../lib/analistaApi";
+import { type AgentApi, type LearningSummary, type Lesson, type LessonStatus } from "../../lib/agentApi";
 import { Card, Notice, Pill, Skeleton } from "../ui";
 
 const GROUPS: { status: LessonStatus; title: string; empty: string }[] = [
@@ -13,7 +13,7 @@ const GROUPS: { status: LessonStatus; title: string; empty: string }[] = [
 const KIND = { rule: "Resultado real", preference: "Tu preferencia", agent: "Propuesta del Analista" } as const;
 const dmy = (ms: number) => new Date(ms).toLocaleDateString("es-CO");
 
-export default function LessonsPanel({ learning, refreshKey }: { learning: boolean; refreshKey: number }) {
+export default function LessonsPanel({ api, learning, refreshKey }: { api: AgentApi; learning: boolean; refreshKey: number }) {
   const [lessons, setLessons] = useState<Lesson[] | null>(null);
   const [summary, setSummary] = useState<LearningSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -21,7 +21,7 @@ export default function LessonsPanel({ learning, refreshKey }: { learning: boole
 
   const load = useCallback(async () => {
     try {
-      const res = await analista.lessons();
+      const res = await api.lessons();
       setLessons(res.lessons);
       setSummary(res.summary);
     } catch (e) {
@@ -36,7 +36,7 @@ export default function LessonsPanel({ learning, refreshKey }: { learning: boole
   async function act(l: Lesson, action: "certify" | "reject" | "revoke" | "restore") {
     setError(null);
     try {
-      await analista.setLesson(l.id, action);
+      await api.setLesson(l.id, action);
       await load();
     } catch (e) {
       setError(errorText(e));
@@ -47,7 +47,7 @@ export default function LessonsPanel({ learning, refreshKey }: { learning: boole
     if (!editing) return;
     setError(null);
     try {
-      await analista.editLesson(editing.id, editing.text);
+      await api.editLesson(editing.id, editing.text);
       setEditing(null);
       await load();
     } catch (e) {

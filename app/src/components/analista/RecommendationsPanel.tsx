@@ -1,7 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { analista, type RecMetrics, type Recommendation } from "../../lib/analistaApi";
+import { type AgentApi, type RecMetrics, type Recommendation } from "../../lib/agentApi";
 import { Card, Notice, Pill, Skeleton, type PillTone } from "../ui";
 
 const ACTION: Record<string, string> = { escalar: "Escalar", subir_presupuesto: "Subir presupuesto", duplicar: "Duplicar", mantener: "Mantener", bajar: "Bajar", apagar: "Apagar" };
@@ -24,7 +24,7 @@ function Metrics({ m }: { m?: RecMetrics }) {
   );
 }
 
-export default function RecommendationsPanel({ refreshKey }: { refreshKey: number }) {
+export default function RecommendationsPanel({ api, refreshKey }: { api: AgentApi; refreshKey: number }) {
   const [recs, setRecs] = useState<Recommendation[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -32,7 +32,7 @@ export default function RecommendationsPanel({ refreshKey }: { refreshKey: numbe
 
   const load = useCallback(async () => {
     try {
-      setRecs((await analista.recommendations()).recommendations);
+      setRecs((await api.recommendations()).recommendations);
     } catch (e) {
       setError(errorText(e));
     }
@@ -47,7 +47,7 @@ export default function RecommendationsPanel({ refreshKey }: { refreshKey: numbe
     setError(null);
     setNote(null);
     try {
-      const res = await analista.measureNow();
+      const res = await api.measureNow();
       setNote(res.evaluated ? `Se midieron ${res.evaluated} recomendaciones.` : "No había recomendaciones listas para medir (se miden cuando pasan los días indicados).");
       await load();
     } catch (e) {
