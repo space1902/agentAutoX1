@@ -4,38 +4,33 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { fileURLToPath } from 'node:url';
 
 import { openAgentStore } from './agent-db.js';
 import { buildClaudeArgs, childEnv, locateClaude } from './claude-cli.js';
 import { ungroundedFigures, uniqueRaw } from './grounding.js';
-import { systemPromptAppend, workspaceClaudeMd } from './knowledge.js';
-import { accountToday } from './metrics.js';
-import { analistaDir, workspaceDir } from './paths.js';
+import { agentDir } from './paths.js';
+import { getAgent } from './registry.js';
 import { loadSettings } from './settings.js';
 import { createStreamParser } from './stream-parser.js';
-import { BASE_TOOL_NAMES, LEARNING_TOOL_NAMES } from './tools.js';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const MCP_SERVER_FILE = path.join(HERE, 'ads-mcp.js');
 const TITLE_MAX = 60;
 
-export function ensureWorkspace(dataDir, settings) {
-  const dir = workspaceDir(dataDir);
+export function ensureWorkspace(dataDir, settings, agent = getAgent()) {
+  const dir = agent.cwd(dataDir);
   fs.mkdirSync(dir, { recursive: true });
   // Rewritten every turn so it always matches this version of the app.
-  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), workspaceClaudeMd({ web: settings.web, learning: settings.learning }), 'utf8');
+  fs.writeFileSync(path.join(dir, 'CLAUDE.md'), agent.workspaceMd(settings), 'utf8');
   return dir;
 }
 
-export function writeMcpConfig(dataDir, { turnId, sessionId, question, learning, toolsEnv = {} }) {
-  const file = path.join(analistaDir(dataDir), `mcp-${turnId}.json`);
+export function writeMcpConfig(dataDir, { turnId, sessionId, question, learning, toolsEnv = {} }, agent = getAgent()) {
+  const file = path.join(agentDir(dataDir, agent), `mcp-${turnId}.json`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const config = {
     mcpServers: {
-      analista: {
+      [agent.mcpServer]: {
         command: process.execPath,
-        args: ['--disable-warning=ExperimentalWarning', MCP_SERVER_FILE],
+        args: ['--disable-warning=ExperimentalWarning', agent.mcpServerFile],
         env: {
           AGENTAUTO_DATA_DIR: dataDir,
           AGENTAUTO_SESSION_ID: sessionId,
@@ -69,6 +64,7 @@ const titleOf = (text) => {
 /**
  * @param {object} o
  * @param {string} o.dataDir
+ * @param {string} [o.agentId] registry id (default: analista)
  * @param {string} [o.sessionId] existing chat (a new one is created when missing)
  * @param {string} o.text user message
  * @param {(event: object) => void} o.emit
@@ -77,10 +73,11 @@ const titleOf = (text) => {
  * @param {object} [o.hooks] learning hooks (see learning.js)
  * @returns {Promise<{ ok: boolean, sessionId: string, messageId?: number, cancelled?: boolean, error?: string }>}
  */
-export async function runTurn({ dataDir, sessionId, text, emit, registerCancel, claude, settings, now = Date.now, spawnFn = spawn, locate = locateClaude, store: given, hooks = {} }) {
-  const store = given ?? openAgentStore(dataDir);
+export async function runTurn({ dataDir, agentId, sessionId, text, emit, registerCancel, claude, settings, now = Date.now, spawnFn = spawn, locate = locateClaude, store: given, hooks = {} }) {
+  const agent = getAgent(agentId);
+  const store = given ?? openAgentStore(dataDir, undefined, agent);
   const own = !given;
-  const cfg = settings ?? loadSettings(dataDir);
+  const cfg = settings ?? loadSettings(dataDir, agent);
   const turnId = `${now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   let mcpFile = null;
   try {
@@ -97,28 +94,28 @@ export async function runTurn({ dataDir, sessionId, text, emit, registerCancel, 
 
     const located = claude ?? locate({ override: cfg.claudePath });
     if (!located) {
-      throw new Error('No encuentro Claude Code en este equipo. Instálalo (claude.ai/download) o indica la ruta de claude.exe en los ajustes del Analista.');
+      throw new Error(`No encuentro Claude Code en este equipo. Instálalo (claude.ai/download) o indica la ruta de claude.exe en los ajustes del ${agent.shortName}.`);
     }
 
-    ensureWorkspace(dataDir, cfg);
-    mcpFile = writeMcpConfig(dataDir, { turnId, sessionId, question: text, learning: cfg.learning });
+    ensureWorkspace(dataDir, cfg, agent);
+    mcpFile = writeMcpConfig(dataDir, { turnId, sessionId, question: text, learning: cfg.learning }, agent);
     const lessons = cfg.learning && hooks.lessons ? hooks.lessons({ store }) : [];
     const args = [
       ...located.prefixArgs,
       ...buildClaudeArgs({
-        mcpConfigFile: mcpFile, toolNames: [...BASE_TOOL_NAMES, ...(cfg.learning ? LEARNING_TOOL_NAMES : [])], web: cfg.web, model: cfg.model, resume: session.claudeSessionId,
-        appendSystemPrompt: systemPromptAppend({ today: accountToday(dataDir, now()), lessons, web: cfg.web, learning: cfg.learning }),
+        agent, mcpConfigFile: mcpFile, toolNames: agent.toolNames(cfg), web: cfg.web, model: cfg.model, resume: session.claudeSessionId,
+        appendSystemPrompt: agent.systemPrompt({ dataDir, now: now(), lessons, settings: cfg }),
       }),
     ];
 
-    const parser = createStreamParser();
+    const parser = createStreamParser({ stepLabel: agent.stepLabel });
     const steps = [];
     let result = null;
     let plan = null;
     let cancelled = false;
     let stderrTail = '';
 
-    const child = spawnFn(located.command, args, { cwd: workspaceDir(dataDir), env: childEnv(process.env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawnFn(located.command, args, { cwd: agent.cwd(dataDir), env: childEnv(process.env), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     registerCancel?.(() => {
       cancelled = true;
       killTree(child);
@@ -170,7 +167,7 @@ export async function runTurn({ dataDir, sessionId, text, emit, registerCancel, 
 
     const answer = (result.text || parser.lastAssistantText || '').trim();
     const sources = [text, ...store.sourcesForSession(sessionId), ...parser.toolResults.map((r) => r.text)];
-    const figures = ungroundedFigures(answer, sources);
+    const figures = agent.grounding ? ungroundedFigures(answer, sources) : [];
     for (const r of parser.toolResults) store.addSource({ sessionId, tool: r.tool, text: r.text });
     if (result.claudeSessionId) store.setClaudeSessionId(sessionId, result.claudeSessionId);
     const meta = {

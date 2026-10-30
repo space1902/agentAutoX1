@@ -10,6 +10,7 @@
 //   { type: 'plan', status, fiveHour, resetsAt }      plan usage window reported by the CLI (subscription limits)
 //   { type: 'result', ok, text, claudeSessionId, durationMs, turns, usage, subtype, error? }
 
+// Name of the Analista's MCP server (other agents declare their own in the registry).
 export const SERVER_NAME = 'analista';
 
 const short = (name) => {
@@ -24,7 +25,7 @@ const cut = (s, n = 70) => {
 // Names of the v_* views a SQL text reads ("v_ads, v_sales"), or ''.
 const viewsIn = (sql) => [...new Set(String(sql ?? '').match(/\bv_[a-z0-9_]+/gi) ?? [])].slice(0, 3).join(', ');
 
-// Friendly Spanish progress text for a tool call.
+// Friendly Spanish progress text for a tool call (the Analista's; each agent brings its own in the registry).
 export function stepLabel(name, input = {}) {
   const tool = short(name);
   switch (tool) {
@@ -105,7 +106,7 @@ export function friendlyError(message) {
   return cut(text, 300) || 'Claude Code terminó con un error.';
 }
 
-export function createStreamParser() {
+export function createStreamParser({ stepLabel: labelOf = stepLabel } = {}) {
   const pendingTools = new Map(); // tool_use id -> tool name
   const toolResults = []; // { id, tool, text, isError }
   let claudeSessionId = null;
@@ -150,7 +151,7 @@ export function createStreamParser() {
           for (const b of blocks) {
             if (b.type !== 'tool_use') continue;
             pendingTools.set(b.id, b.name);
-            events.push({ type: 'step', id: b.id, tool: short(b.name), label: stepLabel(b.name, b.input) });
+            events.push({ type: 'step', id: b.id, tool: short(b.name), label: labelOf(b.name, b.input) });
           }
           return events;
         }

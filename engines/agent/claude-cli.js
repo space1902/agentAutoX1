@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { AGENTS } from './registry.js';
 import { SERVER_NAME } from './stream-parser.js';
 
 // Variables that would switch Claude Code to a paid API / another provider, or make it think it is nested inside
@@ -71,18 +72,25 @@ export function locateClaude({ override = '', env = process.env, platform = proc
   return null;
 }
 
-// Built-in tools the agent must never have, even if a setting file tried to allow them.
-export const DISALLOWED_BUILTINS = ['Bash', 'PowerShell', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Read', 'Glob', 'Grep', 'Task', 'Agent', 'TodoWrite', 'KillShell', 'BashOutput', 'SlashCommand', 'Skill'];
+// Every built-in tool Claude Code may offer that an agent could be denied. An agent is denied all of them except the
+// ones its registry entry lists in `builtinTools` (the Analista lists none, so its denied list is exactly this one).
+export const ALL_BUILTINS = ['Bash', 'PowerShell', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Read', 'Glob', 'Grep', 'Task', 'Agent', 'TodoWrite', 'KillShell', 'BashOutput', 'SlashCommand', 'Skill'];
+export const DISALLOWED_BUILTINS = ALL_BUILTINS;
 
-export const mcpToolName = (tool) => `mcp__${SERVER_NAME}__${tool}`;
+// Web tools are also gated by the per-agent `web` setting.
+const WEB_TOOLS = ['WebSearch', 'WebFetch'];
+
+export const mcpToolName = (tool, server = SERVER_NAME) => `mcp__${server}__${tool}`;
 
 /**
  * Argument list for one headless turn. The prompt travels through stdin (no quoting or length problems).
  * Isolation: only OUR MCP server (--strict-mcp-config), only the allowlisted tools (--tools + --allowedTools, anything
  * else is denied without asking), no user/local settings or skills, no persisted system prompt.
+ * `agent` is a registry entry (default: the Analista) and supplies the MCP server name and the built-in tool allowlist.
  */
-export function buildClaudeArgs({ mcpConfigFile, toolNames, web, model, resume, appendSystemPrompt }) {
-  const allowed = [...toolNames.map(mcpToolName), ...(web ? ['WebSearch', 'WebFetch'] : [])];
+export function buildClaudeArgs({ agent = AGENTS.analista, mcpConfigFile, toolNames, web, model, resume, appendSystemPrompt }) {
+  const builtins = agent.builtinTools.filter((t) => web || !WEB_TOOLS.includes(t));
+  const allowed = [...toolNames.map((t) => mcpToolName(t, agent.mcpServer)), ...builtins];
   const args = [
     '-p',
     '--output-format', 'stream-json',
@@ -90,12 +98,12 @@ export function buildClaudeArgs({ mcpConfigFile, toolNames, web, model, resume, 
     '--include-partial-messages',
     '--mcp-config', mcpConfigFile,
     '--strict-mcp-config',
-    '--tools', web ? 'WebSearch,WebFetch' : '',
+    '--tools', builtins.join(','),
     '--allowedTools', allowed.join(','),
-    '--disallowedTools', DISALLOWED_BUILTINS.join(','),
+    '--disallowedTools', ALL_BUILTINS.filter((t) => !agent.builtinTools.includes(t)).join(','),
     '--permission-mode', 'dontAsk',
     '--setting-sources', 'project',
-    '--disable-slash-commands',
+    ...(agent.skills.length ? [] : ['--disable-slash-commands']),
     '--system-prompt-snapshot', 'off',
     '--append-system-prompt', appendSystemPrompt,
   ];

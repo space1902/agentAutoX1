@@ -262,6 +262,7 @@ export function createAgentStore(file = ':memory:', { now = Date.now } = {}) {
   return store;
 }
 
-export function openAgentStore(dataDir, options) {
-  return createAgentStore(agentDbPath(dataDir), options);
+// `agent` = id or registry entry; omitted = the Analista (legacy <data>/analista/agent.db, opened as-is).
+export function openAgentStore(dataDir, options, agent) {
+  return createAgentStore(agentDbPath(dataDir, agent), options);
 }

@@ -1,11 +1,12 @@
-// Command layer of the Analista (used by agent-cli.js and the tests).
+// Command layer of the agents (used by agent-cli.js and the tests). Every command takes an `agentId` (default: analista).
 import fs from 'node:fs';
 
 import { openAgentStore } from './agent-db.js';
 import { locateClaude } from './claude-cli.js';
-import { adsDbPath, agentDbPath, workspaceDir } from './paths.js';
+import { adsDbPath, agentDbPath } from './paths.js';
+import { getAgent, publicAgents, UnknownAgentError } from './registry.js';
 import { loadSettings, saveSettings, SettingsError } from './settings.js';
-import { editLesson, learningSummary, makeHooks, recordFeedback, runLearningCycle, setLessonStatus } from './learning.js';
+import { editLesson, learningSummary, recordFeedback, runLearningCycle, setLessonStatus } from './learning.js';
 import { runTurn } from './turn.js';
 import { bankForUi, estimateRun, runEval } from './evals/runner.js';
 import { loadDataset } from './metrics.js';
@@ -13,53 +14,68 @@ import { loadDataset } from './metrics.js';
 export class AgentError extends Error {}
 
 export const STREAMING = ['turn', 'eval-run'];
-const COMMANDS = ['status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail'];
+const COMMANDS = ['agents-list', 'status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail'];
 
 const need = (cond, message) => {
   if (!cond) throw new AgentError(message);
 };
 
-export async function runStreaming(command, payload, { dataDir, emit, registerCancel, hooks }) {
+// Registry lookup that reports an unknown id as a regular command error.
+function resolveAgent(agentId) {
+  try {
+    return getAgent(agentId);
+  } catch (error) {
+    if (error instanceof UnknownAgentError) throw new AgentError(error.message);
+    throw error;
+  }
+}
+
+export async function runStreaming(command, payload, { dataDir, emit, registerCancel, hooks, agentId }) {
+  const agent = resolveAgent(agentId);
   if (command === 'turn') {
     need(typeof payload.text === 'string' && payload.text.trim(), 'Escribe una pregunta.');
     need(payload.text.length <= 8000, 'La pregunta es demasiado larga (máximo 8000 caracteres).');
-    const learning = loadSettings(dataDir).learning;
-    return runTurn({ dataDir, sessionId: payload.sessionId || undefined, text: payload.text, emit, registerCancel, hooks: hooks ?? (learning ? makeHooks() : {}) });
+    const learning = loadSettings(dataDir, agent).learning;
+    return runTurn({ dataDir, agentId: agent.id, sessionId: payload.sessionId || undefined, text: payload.text, emit, registerCancel, hooks: hooks ?? (learning ? agent.makeHooks() : {}) });
   }
   if (command === 'eval-run') {
+    need(agent.id === 'analista', 'Las evaluaciones solo existen para el Analista.');
     const ids = Array.isArray(payload.ids) ? payload.ids.map(String) : undefined;
     return runEval({ dataDir, ids, emit, registerCancel });
   }
   throw new AgentError(`Comando del Analista no permitido: ${command}.`);
 }
 
-export async function runCommand(command, payload, { dataDir }) {
+export async function runCommand(command, payload, { dataDir, agentId }) {
   need(COMMANDS.includes(command), `Comando del Analista no permitido: ${command}.`);
-  if (command === 'settings-get') return { settings: loadSettings(dataDir) };
+  if (command === 'agents-list') return { agents: publicAgents() };
+  const agent = resolveAgent(agentId);
+  if (command === 'settings-get') return { settings: loadSettings(dataDir, agent) };
   if (command === 'settings-set') {
     try {
-      return { settings: saveSettings(dataDir, payload ?? {}) };
+      return { settings: saveSettings(dataDir, payload ?? {}, agent) };
     } catch (error) {
       if (error instanceof SettingsError) throw new AgentError(error.message);
       throw error;
     }
   }
   if (command === 'status') {
-    const settings = loadSettings(dataDir);
+    const settings = loadSettings(dataDir, agent);
     const claude = locateClaude({ override: settings.claudePath });
     return {
       claude: claude ? { found: true, path: claude.path } : { found: false, path: null },
       adsDb: fs.existsSync(adsDbPath(dataDir)),
-      agentDb: fs.existsSync(agentDbPath(dataDir)),
-      workspace: workspaceDir(dataDir),
+      agentDb: fs.existsSync(agentDbPath(dataDir, agent)),
+      workspace: agent.cwd(dataDir),
       settings,
     };
   }
   if (command === 'eval-bank') {
+    need(agent.id === 'analista', 'Las evaluaciones solo existen para el Analista.');
     const ds = loadDataset(dataDir);
     return { questions: bankForUi(ds), estimate: estimateRun(ds), today: ds.today };
   }
-  const store = openAgentStore(dataDir);
+  const store = openAgentStore(dataDir, undefined, agent);
   try {
     if (command === 'eval-runs') return { runs: store.evalRuns() };
     if (command === 'eval-run-detail') return { run: store.evalRuns(500).find((r) => r.id === Number(payload.runId)) ?? null, results: store.evalResults(Number(payload.runId)) };
@@ -101,7 +117,7 @@ export async function runCommand(command, payload, { dataDir }) {
     }
     if (command === 'recommendations') return { recommendations: store.recommendations(Number(payload.limit) || 200) };
     if (command === 'learning-run') {
-      need(loadSettings(dataDir).learning, 'El aprendizaje está desactivado en los ajustes.');
+      need(loadSettings(dataDir, agent).learning, 'El aprendizaje está desactivado en los ajustes.');
       return runLearningCycle({ dataDir, store, force: true });
     }
     if (command === 'queries') return { queries: store.recentQueries(Math.min(Number(payload.limit) || 50, 200)) };

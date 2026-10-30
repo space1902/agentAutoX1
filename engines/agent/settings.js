@@ -1,4 +1,4 @@
-// Analista settings (<data dir>/analista/settings.json). Never holds secrets: the agent runs on the Claude Code login.
+// Agent settings (<data dir>/analista/settings.json for the Analista, <data dir>/agents/<id>/settings.json for the rest). Never holds secrets: the agent runs on the Claude Code login.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -36,17 +36,17 @@ export function mergeSettings(partial = {}, base = DEFAULT_SETTINGS) {
   return out;
 }
 
-export function loadSettings(dataDir) {
+export function loadSettings(dataDir, agent) {
   try {
-    return mergeSettings(JSON.parse(fs.readFileSync(settingsPath(dataDir), 'utf8').replace(/^﻿/, '')));
+    return mergeSettings(JSON.parse(fs.readFileSync(settingsPath(dataDir, agent), 'utf8').replace(/^﻿/, '')));
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
 }
 
-export function saveSettings(dataDir, partial) {
-  const next = mergeSettings(partial, loadSettings(dataDir));
-  const file = settingsPath(dataDir);
+export function saveSettings(dataDir, partial, agent) {
+  const next = mergeSettings(partial, loadSettings(dataDir, agent));
+  const file = settingsPath(dataDir, agent);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
