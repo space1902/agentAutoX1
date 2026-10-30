@@ -1,4 +1,5 @@
 mod ads;
+mod applog;
 mod alerts;
 mod analista;
 mod ai;
@@ -20,7 +21,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use settings::Settings;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -66,13 +67,19 @@ fn overview(settings: &Settings, command: &str) -> Result<Overview, String> {
 
 impl AppState {
     fn current(&self) -> Settings {
-        self.settings.lock().unwrap().clone()
+        crate::util::lock(&self.settings).clone()
     }
 }
 
 /// Runs blocking work (PowerShell, file IO, waits) off the async runtime threads.
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(f).await.map_err(|e| e.to_string())?
+}
+
+/// Errors the UI could not handle (render errors, unhandled rejections) end up in the application log.
+#[tauri::command]
+fn log_client_error(kind: String, message: String, stack: Option<String>) {
+    applog::log_client(&kind, &message, stack.as_deref());
 }
 
 #[tauri::command]
@@ -92,7 +99,8 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Setti
     merged.keep_alive = state.current().keep_alive;
     merged.embed_view = state.current().embed_view;
     merged.save(&state.settings_file)?;
-    *state.settings.lock().unwrap() = merged.clone();
+    *crate::util::lock(&state.settings) = merged.clone();
+    applog::set_data_dir(Path::new(&merged.data_dir));
     Ok(merged)
 }
 
@@ -176,7 +184,7 @@ fn set_keep_alive(state: State<'_, AppState>, enabled: bool) -> Result<keepalive
     let mut next = state.current();
     next.keep_alive = enabled;
     next.save(&state.settings_file)?;
-    *state.settings.lock().unwrap() = next;
+    *crate::util::lock(&state.settings) = next;
     state.keepalive.set_enabled(enabled);
     Ok(state.keepalive.status())
 }
@@ -188,7 +196,7 @@ fn embedder_for(window: &tauri::WebviewWindow, state: &AppState) -> Result<Arc<e
     if !state.current().embed_view {
         return Err("La vista embebida está desactivada (función experimental).".into());
     }
-    let mut slot = state.embedder.lock().unwrap();
+    let mut slot = crate::util::lock(&state.embedder);
     if let Some(existing) = slot.as_ref() {
         return Ok(existing.clone());
     }
@@ -203,9 +211,9 @@ fn set_embed_view(state: State<'_, AppState>, enabled: bool) -> Result<Settings,
     let mut next = state.current();
     next.embed_view = enabled;
     next.save(&state.settings_file)?;
-    *state.settings.lock().unwrap() = next.clone();
+    *crate::util::lock(&state.settings) = next.clone();
     if !enabled {
-        if let Some(embedder) = state.embedder.lock().unwrap().take() {
+        if let Some(embedder) = crate::util::lock(&state.embedder).take() {
             embedder.detach_all();
         }
     }
@@ -684,6 +692,9 @@ pub fn run() {
             let root = settings::find_project_root();
             let settings_file = app.path().app_config_dir()?.join("settings.json");
             let settings = Settings::load(&settings_file, &root);
+            applog::set_data_dir(Path::new(&settings.data_dir));
+            applog::install_panic_hook();
+            applog::log("start", &format!("agentAutoX1 {} pid {}", env!("CARGO_PKG_VERSION"), std::process::id()));
             let last_on_file = app.path().app_config_dir()?.join("pods-last-on.json");
             let notifier = app.handle().clone();
             let keepalive = Arc::new(keepalive::Scheduler::new(
@@ -727,7 +738,7 @@ pub fn run() {
             // An owned BlueStacks window does not travel with the app window: keep it glued to its placeholder.
             if let tauri::WindowEvent::Moved(_) = event {
                 let state = window.state::<AppState>();
-                let embedder = state.embedder.lock().unwrap().clone();
+                let embedder = crate::util::lock(&state.embedder).clone();
                 if let Some(embedder) = embedder {
                     embedder.follow();
                 }
@@ -737,7 +748,7 @@ pub fn run() {
                 let state = window.state::<AppState>();
                 // A pod turned on by the keep-alive check must be turned off before the app goes away.
                 // Embedded BlueStacks windows must go back to top level or they would die with the app window.
-                if let Some(embedder) = state.embedder.lock().unwrap().take() {
+                if let Some(embedder) = crate::util::lock(&state.embedder).take() {
                     embedder.detach_all();
                 }
                 state.keep_stop.store(true, Ordering::SeqCst);
@@ -759,6 +770,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            log_client_error,
             get_settings,
             get_default_settings,
             save_settings,

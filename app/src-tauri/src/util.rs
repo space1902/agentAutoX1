@@ -1,6 +1,13 @@
 //! Small helpers shared by the command modules.
 
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
+
+/// Locks a mutex even when a thread panicked while holding it: the data is plain state, and taking the app down
+/// because of an old panic would turn one failure into a restart.
+pub fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Windows flag: do not flash a console window for child processes.
 #[cfg(windows)]
@@ -89,6 +96,20 @@ mod tests {
         assert_eq!(phone_key("573042374349"), phone_key("304 237 4349"));
         assert_eq!(phone_key("+57 304 237 4349"), "3042374349");
         assert_eq!(phone_key("abc"), "");
+    }
+
+    #[test]
+    fn a_poisoned_mutex_is_still_usable() {
+        let m = std::sync::Arc::new(Mutex::new(1));
+        let m2 = m.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap();
+            panic!("poison it");
+        })
+        .join();
+        assert!(m.lock().is_err());
+        *lock(&m) += 1;
+        assert_eq!(*lock(&m), 2);
     }
 
     #[test]

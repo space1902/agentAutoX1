@@ -101,17 +101,17 @@ pub struct ProcStatus {
 
 impl Proc {
     pub fn status(&self) -> ProcStatus {
-        let g = self.0.lock().unwrap();
+        let g = crate::util::lock(&self.0);
         ProcStatus { running: g.pid.is_some(), pid: g.pid, logs: g.logs.iter().cloned().collect(), status: g.status.clone() }
     }
 
     pub fn is_running(&self) -> bool {
-        self.0.lock().unwrap().pid.is_some()
+        crate::util::lock(&self.0).pid.is_some()
     }
 
     fn push_log(&self, emit: &Emit, event: &str, line: String) {
         {
-            let mut g = self.0.lock().unwrap();
+            let mut g = crate::util::lock(&self.0);
             if g.logs.len() >= MAX_LOG_LINES {
                 g.logs.pop_front();
             }
@@ -124,7 +124,7 @@ impl Proc {
     /// `<prefix>-status`, `<prefix>-exit`.
     pub fn spawn(&self, mut cmd: std::process::Command, prefix: &'static str, emit: Emit) -> Result<u32, String> {
         {
-            let mut g = self.0.lock().unwrap();
+            let mut g = crate::util::lock(&self.0);
             if g.pid.is_some() {
                 return Err("Ya está en marcha.".to_string());
             }
@@ -135,12 +135,12 @@ impl Proc {
         let mut child = match cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
             Ok(c) => c,
             Err(e) => {
-                self.0.lock().unwrap().pid = None;
+                crate::util::lock(&self.0).pid = None;
                 return Err(format!("No se pudo iniciar Node: {e}"));
             }
         };
         let pid = child.id();
-        self.0.lock().unwrap().pid = Some(pid);
+        crate::util::lock(&self.0).pid = Some(pid);
 
         let log_event: Arc<str> = Arc::from(format!("{prefix}-log"));
         let mut readers = Vec::new();
@@ -169,7 +169,7 @@ impl Proc {
             for r in readers {
                 let _ = r.join();
             }
-            proc.0.lock().unwrap().pid = None;
+            crate::util::lock(&proc.0).pid = None;
             emit(&format!("{prefix}-exit"), json!({ "code": code }));
         });
         Ok(pid)
@@ -179,7 +179,7 @@ impl Proc {
         match value.get("type").and_then(Value::as_str) {
             Some("log") => self.push_log(emit, log_event, value.get("line").and_then(Value::as_str).unwrap_or_default().to_string()),
             Some("status") => {
-                self.0.lock().unwrap().status = Some(value.clone());
+                crate::util::lock(&self.0).status = Some(value.clone());
                 emit(&format!("{prefix}-status"), value);
             }
             Some("fatal") | Some("error") => {
@@ -194,7 +194,7 @@ impl Proc {
     /// Ctrl+Break so the engine closes WhatsApp cleanly, then `taskkill /T` of this pid, then `/F` as the last resort.
     /// Only the pid of THIS child is ever touched.
     pub fn stop(&self) -> Result<(), String> {
-        let pid = match self.0.lock().unwrap().pid {
+        let pid = match crate::util::lock(&self.0).pid {
             Some(p) if p != 0 => p,
             _ => return Err("No hay nada en marcha.".to_string()),
         };
@@ -212,12 +212,12 @@ impl Proc {
     fn wait_exit(&self, pid: u32, limit: Duration) -> bool {
         let start = Instant::now();
         while start.elapsed() < limit {
-            if self.0.lock().unwrap().pid != Some(pid) {
+            if crate::util::lock(&self.0).pid != Some(pid) {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(150));
         }
-        self.0.lock().unwrap().pid != Some(pid)
+        crate::util::lock(&self.0).pid != Some(pid)
     }
 }
 
@@ -296,7 +296,7 @@ mod tests {
     fn collector() -> (Emit, Arc<Mutex<Vec<(String, Value)>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
-        (Arc::new(move |name: &str, payload: Value| sink.lock().unwrap().push((name.to_string(), payload))), events)
+        (Arc::new(move |name: &str, payload: Value| crate::util::lock(&sink).push((name.to_string(), payload))), events)
     }
 
     fn temp(name: &str) -> PathBuf {
@@ -388,7 +388,7 @@ mod tests {
         let settings = Settings::defaults(Path::new("C:/x"));
         let (emit, _) = collector();
         assert!(alerts.start_link(&settings, "12", emit.clone()).is_err());
-        alerts.monitor.0.lock().unwrap().pid = Some(1);
+        crate::util::lock(&alerts.monitor.0).pid = Some(1);
         assert!(alerts.start_link(&settings, "573001234567", emit).unwrap_err().contains("Detén el monitor"));
     }
 
@@ -419,7 +419,7 @@ mod tests {
         assert!(status.logs.iter().any(|l| l == "hola"));
         assert!(status.logs.iter().any(|l| l == "texto suelto"));
         assert!(status.logs.iter().any(|l| l == "cerrando"), "the SIGBREAK handler ran: {:?}", status.logs);
-        let events = events.lock().unwrap();
+        let events = crate::util::lock(&events);
         assert!(events.iter().any(|(n, v)| n == "ads-monitor-status" && v["code"] == "ABCD-1234"));
         assert!(events.iter().any(|(n, _)| n == "ads-monitor-exit"));
         assert!(proc.stop().is_err(), "nothing left to stop");

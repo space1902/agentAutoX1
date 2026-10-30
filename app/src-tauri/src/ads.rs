@@ -395,9 +395,13 @@ pub fn spawn_scheduler(app: AppHandle, settings: Arc<Mutex<Settings>>, stop: Arc
         let mut wait = FIRST_TICK_AFTER;
         while sleep_unless_stopped(wait, &stop) {
             wait = TICK_EVERY;
-            let current = settings.lock().unwrap().clone();
-            if let Ok(result) = tick(&current, false) {
-                announce(&app, &result);
+            let current = crate::util::lock(&settings).clone();
+            // A panic in one step must not kill the scheduler (it is logged by the panic hook).
+            let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(&current, false)));
+            match step {
+                Ok(Ok(result)) => announce(&app, &result),
+                Ok(Err(_)) => {}
+                Err(_) => crate::applog::log("scheduler", "un paso del programador falló; se reintenta en el siguiente ciclo"),
             }
         }
     });
