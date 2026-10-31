@@ -82,7 +82,8 @@ export interface DayPoint {
   roas: number;
 }
 
-export type VoucherStatus = "valid" | "invalid" | "review";
+/** valid = valid in the sheet; accepted = accepted by hand in the app; review / invalid = pending. */
+export type VoucherStatus = "valid" | "accepted" | "invalid" | "review";
 
 export interface Voucher {
   date: string;
@@ -104,6 +105,8 @@ export interface Voucher {
   countrySource: string;
   /** The row is no longer in the sheet (kept in the history). */
   gone: boolean;
+  /** Accepted by hand in the app (the sheet is never changed). */
+  accepted: boolean;
 }
 
 /** Result of `ads_vouchers`: the payments of one range (the Comprobantes card has its own dates). */
@@ -317,6 +320,8 @@ export const adsApi = {
   vouchers: (from: string, to: string, country = "") => invoke<VouchersData>("ads_vouchers", { from, to, country: country || null }),
   tracking: () => invoke<{ today: string; items: TrackingItem[] }>("ads_tracking"),
   comprobanteCountry: (key: string, code: string) => invoke<{ key: string; country: string }>("ads_comprobante_country", { key, code }),
+  /** Accepts a payment by hand (or takes it back with `undo`); only the local database changes. */
+  comprobanteAccept: (key: string, undo = false) => invoke<{ key: string; accepted: boolean }>("ads_comprobante_accept", { key, undo }),
   status: () => invoke<AdsStatus>("ads_status"),
   configGet: () => invoke<{ config: AdsConfig; defaults: AdsConfig }>("ads_config_get"),
   configSet: (config: Partial<AdsConfig>) => invoke<{ config: AdsConfig }>("ads_config_set", { config }),

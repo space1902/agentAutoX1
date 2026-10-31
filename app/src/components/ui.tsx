@@ -51,7 +51,7 @@ export function StatCard({
   icon: LucideIcon;
   label: string;
   value: ReactNode;
-  caption: string;
+  caption: ReactNode;
 }) {
   return (
     <Card className="stat">

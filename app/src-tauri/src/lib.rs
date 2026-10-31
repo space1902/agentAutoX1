@@ -481,6 +481,13 @@ async fn ads_comprobante_country(state: State<'_, AppState>, key: String, code: 
     blocking(move || ads::comprobante_country(&settings, &key, &code)).await
 }
 
+/// Accepts a payment by hand (or undoes it). The sheet is never modified.
+#[tauri::command]
+async fn ads_comprobante_accept(state: State<'_, AppState>, key: String, undo: bool) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::comprobante_accept(&settings, &key, undo)).await
+}
+
 #[tauri::command]
 async fn ads_status(state: State<'_, AppState>) -> Result<Value, String> {
     let settings = state.current();
@@ -850,6 +857,7 @@ pub fn run() {
             ads_sync_auto,
             ads_tracking,
             ads_comprobante_country,
+            ads_comprobante_accept,
             ads_status,
             ads_config_get,
             ads_config_set,

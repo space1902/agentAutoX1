@@ -7,7 +7,7 @@ import AlertsPanel from "../components/ads/AlertsPanel";
 import DecisionsPanel from "../components/ads/DecisionsPanel";
 import CountriesPanel from "../components/ads/CountriesPanel";
 import DateRangeBar from "../components/ads/DateRangeBar";
-import VouchersPanel from "../components/ads/VouchersPanel";
+import VouchersPanel, { type VoucherFilter } from "../components/ads/VouchersPanel";
 import { Banner, Card, Notice, Skeleton, StatCard } from "../components/ui";
 import { errorText } from "../lib/api";
 import {
@@ -78,6 +78,7 @@ export default function Anuncios() {
   // The Comprobantes card has its own dates. null = it follows the page range (and reuses the report's list).
   const [vOwn, setVOwn] = useState<{ preset: Preset; custom: { from: string; to: string } } | null>(null);
   const [vData, setVData] = useState<VouchersData | null>(null);
+  const [vFilter, setVFilter] = useState<VoucherFilter>("all");
 
   const range = preset === "custom" ? custom : presetRange(preset, today);
   const decRange = decPreset === "custom" ? decCustom : presetRange(decPreset, today);
@@ -191,6 +192,23 @@ export default function Anuncios() {
     } catch (e) {
       setProblems([errorText(e)]);
     }
+  };
+
+  // Accept a payment by hand (or undo it). Only the app changes; reload the cached report on this action.
+  const acceptVoucher = async (key: string, undo: boolean) => {
+    try {
+      await adsApi.comprobanteAccept(key, undo);
+      await Promise.all([loadReport(), loadVouchers()]);
+    } catch (e) {
+      setProblems([errorText(e)]);
+    }
+  };
+
+  // "N por revisar" jumps to the Comprobantes card, following the page range, filtered to the pending ones.
+  const showPending = () => {
+    setVOwn(null);
+    setVFilter("review");
+    window.setTimeout(() => document.getElementById("ads-comprobantes")?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   };
 
   const evaluateNow = async () => {
@@ -371,7 +389,14 @@ export default function Anuncios() {
       ) : (
         <div className="stats">
           <StatCard icon={Wallet} label="Gasto" value={formatMoney(k.gasto)} caption={rangeLabel} />
-          <StatCard icon={Target} label="Ventas (pagos)" value={formatInt(k.ventas)} caption={`${report?.reviewCount ?? 0} por revisar`} />
+          <StatCard icon={Target} label="Ventas (pagos)" value={formatInt(k.ventas)} caption={
+              (report?.reviewCount ?? 0) > 0 ? (
+                <button className="ads-sort" onClick={showPending} title="Ver los comprobantes por revisar">{report?.reviewCount} por revisar</button>
+              ) : (
+                "0 por revisar"
+              )
+            }
+          />
           <StatCard icon={Banknote} label="Valor" value={formatMoney(k.valor)} caption={`Resultado ${formatMoney(k.resultado)}`} />
           <StatCard icon={TrendingUp} label="ROAS" value={k.gasto > 0 ? formatRoas(k.roas) : "—"} caption="Valor / gasto" />
           <StatCard icon={Coins} label="Costo por venta" value={k.ventas > 0 && k.gasto > 0 ? formatMoney(k.costoVenta) : "—"} caption="Gasto / ventas" />
@@ -424,7 +449,7 @@ export default function Anuncios() {
         {report ? <AdsChart data={chartSeries ? chartSeries.daily : report.daily} /> : <Skeleton height={200} />}
       </Card>
 
-      <Card>
+      <Card id="ads-comprobantes">
         <div className="card-head">
           <h2 className="card-title">Comprobantes</h2>
           <span className="muted">{vouchers ? `${vouchers.comprobantes.length} en el rango` : ""}</span>
@@ -437,7 +462,7 @@ export default function Anuncios() {
           onPreset={(p) => setVOwn({ preset: p, custom: vRange })}
           onRange={(from, to) => setVOwn({ preset: "custom", custom: { from, to } })}
         />
-        {vouchers ? <VouchersPanel vouchers={vouchers.comprobantes} reviewCount={vouchers.reviewCount} onCountry={(key, code) => void setVoucherCountry(key, code)} /> : <Skeleton height={120} />}
+        {vouchers ? <VouchersPanel vouchers={vouchers.comprobantes} filter={vFilter} onFilter={setVFilter} onCountry={(key, code) => void setVoucherCountry(key, code)} onAccept={acceptVoucher} /> : <Skeleton height={120} />}
       </Card>
       </>
       )}

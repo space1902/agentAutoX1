@@ -19,7 +19,7 @@ const TOKEN_ENTRY: &str = "meta-token";
 /// Env var the engine reads the token from.
 pub const TOKEN_ENV: &str = "AGENTAUTO_META_TOKEN";
 
-const ALLOWED: &[&str] = &["sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "activities-probe"];
+const ALLOWED: &[&str] = &["sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "comprobante-accept", "activities-probe"];
 const DECISION_STATUSES: &[&str] = &["pending", "done", "ignored"];
 const GROUPS: &[&str] = &["ct", "campaign", "ad"];
 
@@ -63,6 +63,8 @@ pub struct AdsArgs<'a> {
     /// `comprobante-country --key K --code MX` (an empty code removes the override).
     pub key: Option<&'a str>,
     pub code: Option<&'a str>,
+    /// `comprobante-accept --key K [--undo]`: accept a payment by hand, or take the acceptance back.
+    pub undo: bool,
     /// `activities-probe --since D`.
     pub since: Option<&'a str>,
 }
@@ -107,6 +109,16 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
         out.extend(["--key".to_string(), key.to_string()]);
         if !code.is_empty() {
             out.extend(["--code".to_string(), code.to_string()]);
+        }
+    }
+    if command == "comprobante-accept" {
+        let key = args.key.unwrap_or_default();
+        if key.len() != 20 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("El comprobante no es válido.".to_string());
+        }
+        out.extend(["--key".to_string(), key.to_string()]);
+        if args.undo {
+            out.push("--undo".to_string());
         }
     }
     if let Some(since) = args.since {
@@ -321,6 +333,11 @@ pub fn comprobante_country(settings: &Settings, key: &str, code: &str) -> Result
     run_engine(settings, "comprobante-country", &AdsArgs { key: Some(key), code: Some(code), ..Default::default() }, None, None)
 }
 
+/// Accepts a payment by hand (or takes it back with `undo`). Only the local database changes; the sheet is never written.
+pub fn comprobante_accept(settings: &Settings, key: &str, undo: bool) -> Result<Value, String> {
+    run_engine(settings, "comprobante-accept", &AdsArgs { key: Some(key), undo, ..Default::default() }, None, None)
+}
+
 pub fn status(settings: &Settings) -> Result<Value, String> {
     let token = stored_token()?;
     run_engine(settings, "status", &AdsArgs::default(), None, token.as_deref())
@@ -504,6 +521,10 @@ mod tests {
         assert_eq!(&build_args("comprobante-country", &AdsArgs { key: Some(key), code: Some(""), ..Default::default() }).unwrap()[2..], ["comprobante-country", "--key", key]);
         assert!(build_args("comprobante-country", &AdsArgs { key: Some("../x"), code: Some("MX"), ..Default::default() }).is_err());
         assert!(build_args("comprobante-country", &AdsArgs { key: Some(key), code: Some("mx; calc"), ..Default::default() }).is_err());
+        assert_eq!(&build_args("comprobante-accept", &AdsArgs { key: Some(key), ..Default::default() }).unwrap()[2..], ["comprobante-accept", "--key", key]);
+        assert_eq!(&build_args("comprobante-accept", &AdsArgs { key: Some(key), undo: true, ..Default::default() }).unwrap()[2..], ["comprobante-accept", "--key", key, "--undo"]);
+        assert!(build_args("comprobante-accept", &AdsArgs { key: Some("../x"), ..Default::default() }).is_err());
+        assert!(build_args("comprobante-accept", &AdsArgs::default()).is_err());
         assert!(build_args("activities-probe", &AdsArgs { since: Some("ayer"), ..Default::default() }).is_err());
     }
 
