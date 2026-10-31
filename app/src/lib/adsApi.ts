@@ -12,7 +12,11 @@ export interface AdAction {
 }
 
 export interface Totals {
+  /** Ad spend WITH Meta's IVA (what Meta really charges). Every derived metric uses it. */
   gasto: number;
+  /** Raw spend as the Meta API reports it (without IVA) and the IVA amount (gasto = spendNet + vat). Absent in decisions stored before the IVA setting. */
+  spendNet?: number;
+  vat?: number;
   mensajes: number;
   valor: number;
   ventas: number;
@@ -76,6 +80,8 @@ export interface CtIssue {
 export interface DayPoint {
   date: string;
   gasto: number;
+  spendNet?: number;
+  vat?: number;
   valor: number;
   ventas: number;
   mensajes: number;
@@ -158,6 +164,8 @@ export interface Report {
   ctIssues: CtIssue[];
   history: HistoryInfo;
   currency: string;
+  /** IVA (%) added to Meta's spend. */
+  spendVatPct?: number;
   kpis: Totals;
   rows: AdRow[];
   daily: DayPoint[];
@@ -281,6 +289,8 @@ export interface AdsConfig {
   validResult: string;
   flowPrefix: string;
   currency: string;
+  /** IVA (%) Meta charges on top of the ad spend; the API reports spend without it. Not the per-country taxPct. */
+  spendVatPct: number;
   autoRefreshMinutes: number;
   thresholds: Thresholds;
   lifecycle: Lifecycle;
@@ -363,6 +373,8 @@ export function presetRange(preset: Exclude<Preset, "custom">, today: string): {
 
 export const formatMoney = (value: number) =>
   new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(Math.round(value));
+/** IVA amount of a spend figure (0 when the payload does not carry it). */
+export const vatOf = (x: { vat?: number }) => (Number.isFinite(x.vat) ? (x.vat as number) : 0);
 export const formatRoas = (value: number) => `${value.toFixed(2).replace(".", ",")}x`;
 export const formatPct = (fraction: number) => `${(fraction * 100).toFixed(1).replace(".", ",")} %`;
 export const formatInt = (value: number) => new Intl.NumberFormat("es-CO").format(Math.round(value));

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { formatMoney, formatRoas, type DayPoint } from "../../lib/adsApi";
+import { formatMoney, formatRoas, vatOf, type DayPoint } from "../../lib/adsApi";
 
 const W = 860;
 const H = 260;
@@ -47,7 +47,7 @@ export default function AdsChart({ data }: { data: DayPoint[] }) {
   return (
     <div className="ads-chart">
       <div className="ads-legend" aria-hidden>
-        <span><i className="sw gasto" /> Gasto</span>
+        <span><i className="sw gasto" /> Gasto (con IVA)</span>
         <span><i className="sw valor" /> Valor (pagos)</span>
         <span><i className="sw roas" /> ROAS</span>
       </div>
@@ -77,7 +77,8 @@ export default function AdsChart({ data }: { data: DayPoint[] }) {
       {active && (
         <div className="ads-tooltip" role="status" style={{ left: `${leftPct}%`, transform: flip ? "translateX(calc(-100% - 12px))" : "translateX(12px)" }}>
           <strong>{active.date.split("-").reverse().join("/")}</strong>
-          <span>Gasto: {formatMoney(active.gasto)}</span>
+          <span>Gasto (con IVA): {formatMoney(active.gasto)}</span>
+          <span className="muted">IVA: {formatMoney(vatOf(active))}</span>
           <span>Valor (pagos): {formatMoney(active.valor)}</span>
           <span>ROAS: {active.gasto > 0 ? formatRoas(active.roas) : "—"}</span>
         </div>

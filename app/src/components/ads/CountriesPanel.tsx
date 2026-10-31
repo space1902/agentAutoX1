@@ -1,5 +1,5 @@
 import { AlertTriangle } from "lucide-react";
-import { formatInt, formatMoney, formatPct, formatRoas, type CountryRow } from "../../lib/adsApi";
+import { formatInt, formatMoney, formatPct, formatRoas, vatOf, type CountryRow } from "../../lib/adsApi";
 
 /** Per-country economics: spend (by delivery country), sales (by customer country), value in COP and margin. */
 export default function CountriesPanel({ countries, selected, onSelect }: { countries: CountryRow[]; selected: string; onSelect: (code: string) => void }) {
@@ -36,7 +36,10 @@ export default function CountriesPanel({ countries, selected, onSelect }: { coun
                   </button>
                   <div className="muted ads-sub">{c.currency}{c.currency !== "COP" ? ` · 1 = ${formatMoney(c.rateToCop)}` : ""}</div>
                 </td>
-                <td className="num">{formatMoney(c.gasto)}</td>
+                <td className="num">
+                  {formatMoney(c.gasto)}
+                  {vatOf(c) > 0 && <div className="muted ads-vat">IVA {formatMoney(vatOf(c))}</div>}
+                </td>
                 <td className="num">{formatInt(c.ventas)}</td>
                 <td className="num">{formatMoney(c.valor)}</td>
                 <td className="num">{formatMoney(c.comisiones)}</td>

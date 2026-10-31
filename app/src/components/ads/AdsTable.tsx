@@ -1,6 +1,6 @@
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { useMemo, useState } from "react";
-import { dayLabel, dmy, formatInt, formatMoney, formatPct, formatRoas, type AdRow, type Group } from "../../lib/adsApi";
+import { dayLabel, dmy, formatInt, formatMoney, formatPct, formatRoas, vatOf, type AdRow, type Group } from "../../lib/adsApi";
 import { Pill } from "../ui";
 
 type SortKey = "label" | "gasto" | "mensajes" | "ventas" | "valor" | "roas" | "costoVenta" | "conversion" | "margen";
@@ -73,7 +73,10 @@ export default function AdsTable({ rows, group }: { rows: AdRow[]; group: Group 
                   {!r.paused && r.effectiveStatus && r.effectiveStatus !== "ACTIVE" ? ` · ${r.effectiveStatus.toLowerCase()}` : ""}
                 </div>
               </td>
-              <td className="num">{formatMoney(r.gasto)}</td>
+              <td className="num">
+                {formatMoney(r.gasto)}
+                {vatOf(r) > 0 && <div className="muted ads-vat">IVA {formatMoney(vatOf(r))}</div>}
+              </td>
               <td className="num">{formatInt(r.mensajes)}</td>
               <td className="num">{formatInt(r.ventas)}</td>
               <td className="num">{formatMoney(r.valor)}</td>

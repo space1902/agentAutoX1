@@ -207,7 +207,7 @@ export default function AdsSettings({ detected, tokenPresent, config, onTokenCha
 
       <h3 className="ia-sub" style={{ marginTop: 10 }}>Países: moneda, comisión y costos</h3>
       <p className="muted ads-note">
-        El gasto de Meta ya viene en COP. El valor de cada pago se convierte a COP con la tasa; la comisión y el impuesto son un % del valor ya convertido y el costo es por venta (en COP). Margen bruto = valor − gasto − comisiones − costos − impuestos.
+        El gasto de Meta ya viene en COP (sin IVA; el IVA se configura abajo). El valor de cada pago se convierte a COP con la tasa; la comisión y el impuesto son un % del valor ya convertido y el costo es por venta (en COP). Margen bruto = valor − gasto (con IVA) − comisiones − costos − impuestos.
       </p>
       {Object.keys(draft.countries).sort().map((code) => {
         const c = draft.countries[code];
@@ -245,6 +245,15 @@ export default function AdsSettings({ detected, tokenPresent, config, onTokenCha
           </select>
         </div>
       )}
+
+      <h3 className="ia-sub" style={{ marginTop: 10 }}>IVA del gasto en Meta</h3>
+      <div className="ia-grid">
+        <div className="field">
+          <label htmlFor="spend-vat">IVA sobre el gasto en Meta (%)</label>
+          <input id="spend-vat" className="input" type="number" min={0} max={100} step="any" value={draft.spendVatPct} onChange={(e) => set("spendVatPct", e.target.value === "" ? 0 : Number(e.target.value))} />
+          <small>Meta cobra este IVA además de lo que reporta su API. Se suma al gasto en toda la app y el ROAS, el costo por venta y las decisiones lo usan. Es distinto del impuesto por país de arriba, que va sobre el valor de las ventas.</small>
+        </div>
+      </div>
 
       <h3 className="ia-sub" style={{ marginTop: 10 }}>Reglas de la acción sugerida</h3>
       <div className="ia-grid">

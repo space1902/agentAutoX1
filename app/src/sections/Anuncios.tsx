@@ -21,6 +21,7 @@ import {
   formatRoas,
   presetRange,
   toIso,
+  vatOf,
   type AdsConfig,
   type AdsStatus,
   type DecisionsData,
@@ -388,7 +389,7 @@ export default function Anuncios() {
         <Skeleton height={110} />
       ) : (
         <div className="stats">
-          <StatCard icon={Wallet} label="Gasto" value={formatMoney(k.gasto)} caption={rangeLabel} />
+          <StatCard icon={Wallet} label="Gasto" value={formatMoney(k.gasto)} caption={<>{vatOf(k) > 0 && <span className="ads-vat-line">IVA: {formatMoney(vatOf(k))}<br /></span>}{rangeLabel}</>} />
           <StatCard icon={Target} label="Ventas (pagos)" value={formatInt(k.ventas)} caption={
               (report?.reviewCount ?? 0) > 0 ? (
                 <button className="ads-sort" onClick={showPending} title="Ver los comprobantes por revisar">{report?.reviewCount} por revisar</button>

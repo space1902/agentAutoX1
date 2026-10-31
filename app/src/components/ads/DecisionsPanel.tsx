@@ -17,7 +17,7 @@ const FILTERS: { id: KindFilter; label: string }[] = [
 function Metrics({ m }: { m: Totals }) {
   return (
     <dl className="dec-metrics">
-      <div><dt>Gasto</dt><dd>{formatMoney(m.gasto)}</dd></div>
+      <div><dt>Gasto (con IVA)</dt><dd>{formatMoney(m.gasto)}</dd></div>
       <div><dt>Mensajes</dt><dd>{formatInt(m.mensajes)}</dd></div>
       <div><dt>Ventas</dt><dd>{formatInt(m.ventas)}</dd></div>
       <div><dt>Valor</dt><dd>{formatMoney(m.valor)}</dd></div>
