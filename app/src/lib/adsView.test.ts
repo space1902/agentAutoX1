@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { groupTracking, rangeProblem } from "./adsView.ts";
+import { formatVoucherPhone, groupTracking, rangeProblem } from "./adsView.ts";
 
 test("rangeProblem accepts a valid range and explains each invalid one", () => {
   assert.equal(rangeProblem("2026-10-21", "2026-10-29", "2026-09-23", "2026-10-29"), null);
@@ -51,4 +51,13 @@ test("ads are listed oldest first and ads in the test are counted", () => {
   const g = groupTracking([ad("b", "CT 02", 2), ad("a", "CT 02", 9), ad("c", "CT 02", 4)])[0];
   assert.deepEqual(g.ads.map((a) => a.id), ["a", "c", "b"]);
   assert.equal(g.inTest, 2);
+});
+
+test("formatVoucherPhone groups the digits and adds the country code", () => {
+  assert.equal(formatVoucherPhone("573001234567"), "+57 300 123 4567");
+  assert.equal(formatVoucherPhone("+57 300 123 4567"), "+57 300 123 4567");
+  assert.equal(formatVoucherPhone("584141234567"), "+58 414 123 4567");
+  assert.equal(formatVoucherPhone("3001234567"), "300 123 4567");
+  assert.equal(formatVoucherPhone(""), "");
+  assert.equal(formatVoucherPhone("sin número"), "");
 });

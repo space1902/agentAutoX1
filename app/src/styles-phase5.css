@@ -141,3 +141,7 @@ tr.ads-review td { background: color-mix(in srgb, var(--amber) 8%, transparent);
 .ads-follow-rows li span { font-size: 12px; color: var(--muted); }
 .ads-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; max-width: 280px; }
 .ads-confirm .ads-sub { flex-basis: 100%; margin: 0; }
+
+.ads-client { display: flex; flex-direction: column; gap: 2px; min-width: 150px; max-width: 220px; }
+.ads-client strong { overflow-wrap: anywhere; }
+.ads-client-phone { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-variant-numeric: tabular-nums; }

@@ -97,6 +97,12 @@ export interface Voucher {
   result: string;
   status: VoucherStatus;
   phoneMasked: string;
+  /** Raw phone from the sheet; shown only in the Comprobantes card. */
+  phone: string;
+  /** Contact name in the WhatsApp/Leona chat. */
+  clientName: string;
+  /** Account holder printed on the bank voucher. */
+  payerName: string;
   key: string;
   valorCop: number;
   /** ISO country code; empty when it could not be derived. */

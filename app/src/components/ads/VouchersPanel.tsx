@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { COUNTRY_NAMES, SOURCE_LABEL, countryName, formatMoney, type Voucher, type VoucherStatus } from "../../lib/adsApi";
+import { formatVoucherPhone, phoneDigits } from "../../lib/adsView";
 import { Pill } from "../ui";
 
 export type VoucherFilter = "all" | "valid" | "review" | "accepted";
@@ -16,6 +17,35 @@ interface Props {
   onCountry: (key: string, code: string) => void;
   /** Accepts a payment by hand (or undoes it). Only the app changes, never the sheet. */
   onAccept: (key: string, undo: boolean) => Promise<void>;
+}
+
+function ClientCell({ v }: { v: Voucher }) {
+  const [copied, setCopied] = useState(false);
+  const phone = formatVoucherPhone(v.phone);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(`+${phoneDigits(v.phone)}`);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard unavailable: the number stays selectable */
+    }
+  };
+  const payer = v.payerName && v.payerName !== v.clientName ? v.payerName : "";
+  return (
+    <div className="ads-client">
+      <strong>{v.clientName || "Sin nombre"}</strong>
+      <span className="ads-client-phone">
+        <span>{phone || "Sin teléfono"}</span>
+        {phone && (
+          <button className="btn ghost sm" onClick={() => void copy()} aria-label="Copiar teléfono" title="Copiar teléfono">
+            {copied ? "Copiado" : "Copiar"}
+          </button>
+        )}
+      </span>
+      {payer && <span className="muted ads-sub" title="Titular de la cuenta que aparece en el comprobante">Pagó: {payer}</span>}
+    </div>
+  );
 }
 
 export default function VouchersPanel({ vouchers, filter, onFilter, onCountry, onAccept }: Props) {
@@ -93,7 +123,7 @@ export default function VouchersPanel({ vouchers, filter, onFilter, onCountry, o
                   <td>{v.bank || "—"}</td>
                   <td>{v.flow || "—"}</td>
                   <td>{v.ct}{v.adName ? <span className="muted"> · {v.adName}</span> : null}</td>
-                  <td className="muted">{v.phoneMasked || "—"}</td>
+                  <td><ClientCell v={v} /></td>
                   <td>
                     <select
                       className="input ads-country-select"

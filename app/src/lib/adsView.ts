@@ -51,3 +51,19 @@ export function groupTracking(items: TrackingItem[]): CtGroup[] {
   }
   return [...groups.values()].sort((x, y) => ctNumber(x.ct) - ctNumber(y.ct) || x.ct.localeCompare(y.ct));
 }
+
+// Longest-first country calling codes the ads run in; anything else is shown as "+digits" grouped by three.
+const CALLING_CODES = ["593", "591", "595", "598", "57", "52", "58", "51", "54", "56", "55", "34", "1"];
+
+/** "+57 300 123 4567" for a raw sheet phone ("573001234567", "+57 300 123 4567"...); "" when there are no digits. */
+export function formatVoucherPhone(raw: string | null | undefined): string {
+  const digits = String(raw ?? "").replace(/\D/g, "");
+  if (!digits) return "";
+  const code = digits.length > 10 ? CALLING_CODES.find((c) => digits.startsWith(c)) : undefined;
+  const national = code ? digits.slice(code.length) : digits;
+  const groups = national.match(/^(\d{1,3})(\d{1,3})?(\d+)?$/)?.slice(1).filter(Boolean) ?? [national];
+  return `${code || digits.length > 10 ? "+" : ""}${code ? `${code} ` : ""}${groups.join(" ")}`.trim();
+}
+
+/** Digits of a phone as typed in the sheet. */
+export const phoneDigits = (raw: string | null | undefined) => String(raw ?? "").replace(/\D/g, "");
