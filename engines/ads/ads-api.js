@@ -19,7 +19,7 @@ import { addDays, daysBetween, isIsoDate, localParts } from './time.js';
 export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
 const GROUPS = ['ct', 'campaign', 'ad'];
-const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'activities-probe'];
+const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-accept', 'activities-probe'];
 const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
 export class AdsError extends Error {}
@@ -139,6 +139,13 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       }
       store.setCountryOverride(args.key, args.code === true ? '' : (args.code ?? ''), now());
       return { key: args.key, country: args.code === true ? '' : (args.code ?? '') };
+    }
+    // Accept (or undo with --undo) a payment by hand. Only the local database changes; the sheet is never written.
+    if (command === 'comprobante-accept') {
+      if (!/^[0-9a-f]{20}$/.test(String(args.key ?? ''))) throw new AdsError('El comprobante no es válido.');
+      const accepted = !(args.undo === true || args.undo === 'true');
+      if (!store.setAccepted(args.key, accepted, now())) throw new AdsError('No encuentro ese comprobante.');
+      return { key: args.key, accepted };
     }
     if (command === 'activities-probe') {
       if (!token) throw new AdsError('Falta el token de Meta.');

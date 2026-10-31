@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { adsDir, loadConfig } from '../config.js';
 import { fetchSheetCsv, parseComprobantes } from '../sheet.js';
-import { openStoreAt } from '../store.js';
+import { keyRows, openStoreAt } from '../store.js';
 import { loadAlertsConfig } from './alerts-config.js';
 import { MetaApi } from './meta-api.js';
 import { Monitor } from './monitor.js';
@@ -76,7 +76,12 @@ export async function startMonitor({ dataDir, env = process.env, emit = line, no
 
   const sheetRows = config.salesSource === 'meta'
     ? null
-    : async () => parseComprobantes(await fetchSheetCsv({ sheetId: adsConfig.sheetId, tab: adsConfig.sheetTab, fetchImpl })).rows;
+    : async () => {
+      const rows = parseComprobantes(await fetchSheetCsv({ sheetId: adsConfig.sheetId, tab: adsConfig.sheetTab, fetchImpl })).rows;
+      // Payments the user accepted by hand in the app count like valid ones (the sheet itself is never changed).
+      const accepted = adsStore.acceptedKeys();
+      return accepted.size ? keyRows(rows).map((r) => ({ ...r, accepted: accepted.has(r.key) })) : rows;
+    };
 
   const monitor = new Monitor({
     api, store, config: { ...config, flowPrefix: adsConfig.flowPrefix, validResult: adsConfig.validResult }, accountId: adsConfig.adAccountId,

@@ -1,5 +1,5 @@
 // Sales signal from the payments sheet (the real source of truth), shaped for the alerts monitor.
-// A sale is a valid payment of the configured flow; its moment is "Registrado el" (when it arrived), not the
+// A sale is a valid payment (or one accepted by hand in the app: `accepted`) of the configured flow; its moment is "Registrado el" (when it arrived), not the
 // voucher date. Pure functions over the rows returned by ../sheet.js.
 import { parseDateToIso } from '../parse.js';
 import { isValidResult, matchesFlow } from '../sheet.js';
@@ -20,7 +20,7 @@ export function registeredParts(text) {
 function validSales(rows, { flowPrefix, validResult }) {
   const out = [];
   for (const r of rows) {
-    if (!isValidResult(r.result, validResult) || !matchesFlow(r.flow, flowPrefix)) continue;
+    if (!(r.accepted || isValidResult(r.result, validResult)) || !matchesFlow(r.flow, flowPrefix)) continue;
     const when = registeredParts(r.registered);
     if (when) out.push({ ...when, adId: r.adId || UNATTRIBUTED });
   }

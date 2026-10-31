@@ -58,9 +58,14 @@ export function joinByDateAndAd({ insights, sales, convert = (s) => ({ valor: s.
   return map;
 }
 
-function resultStatus(result, validResult) {
-  if (isValidResult(result, validResult)) return 'valid';
-  return normalizeText(result).includes('invalido') ? 'invalid' : 'review';
+// A payment counts as a sale when the sheet says so or when the user accepted it by hand (the sheet is never changed).
+const countsAsSale = (c, validResult) => Boolean(c.accepted) || isValidResult(c.result, validResult);
+
+// valid = sheet says valid; accepted = not valid in the sheet but accepted by hand; invalid / review = pending.
+function resultStatus(c, validResult) {
+  if (isValidResult(c.result, validResult)) return 'valid';
+  if (c.accepted) return 'accepted';
+  return normalizeText(c.result).includes('invalido') ? 'invalid' : 'review';
 }
 
 // "Day N": the first day with spend is day 1. null when the ad has not spent yet.
@@ -106,7 +111,7 @@ export function buildReport({
     return !id || isMonitored(id.campaignName, prefix);
   });
   const withCountry = new Map(attributable.map((c) => [c, saleCountry(c)]));
-  const sales = attributable.filter((c) => isValidResult(c.result, config.validResult)).map((c) => ({ ...c, country: withCountry.get(c) }));
+  const sales = attributable.filter((c) => countsAsSale(c, config.validResult)).map((c) => ({ ...c, country: withCountry.get(c) }));
   const joinedAll = joinByDateAndAd({ insights: monitoredInsights, sales, convert: (s) => economics(s, config, s.country) });
 
   // Countries that have data at all (before the enabled-countries scope), so the settings can offer them.
@@ -281,7 +286,8 @@ export function buildReport({
         adName: info.adName,
         ct: info.ct,
         result: c.result,
-        status: resultStatus(c.result, config.validResult),
+        status: resultStatus(c, config.validResult),
+        accepted: Boolean(c.accepted),
         phoneMasked: maskPhone(c.phone),
         country: code,
         countrySource: c.country ? (c.countrySource || 'telefono') : deriveCountry({ phone: c.phone, campaignName: identityOf(c.adId)?.campaignName, flow: c.flow }, words).source,
@@ -304,7 +310,8 @@ export function buildReport({
     daily: [...daily.values()].map(dailyPoint),
     ctDaily,
     comprobantes: list,
-    reviewCount: list.filter((c) => c.status !== 'valid').length,
+    // Pending: not valid in the sheet and not accepted by hand (within the range and the enabled countries).
+    reviewCount: list.filter((c) => c.status === 'review' || c.status === 'invalid').length,
   };
 }
 

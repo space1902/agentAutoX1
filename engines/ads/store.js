@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS comprobantes (
 CREATE INDEX IF NOT EXISTS comprobantes_date ON comprobantes (date);
 -- Manual country of a payment, kept apart so a re-sync never overwrites it.
 CREATE TABLE IF NOT EXISTS comprobante_overrides (key TEXT PRIMARY KEY, country TEXT NOT NULL, updated_at INTEGER NOT NULL);
+-- Payments the user accepted by hand although the sheet's result is not the valid one. Never written to the sheet;
+-- kept apart so a re-sync never overwrites it. Redundant (but harmless) once the sheet itself says "Pago válido".
+CREATE TABLE IF NOT EXISTS comprobante_accepts (key TEXT PRIMARY KEY, accepted_at INTEGER NOT NULL);
 -- Exact budget changes read from the account activity log (when Meta exposes it).
 CREATE TABLE IF NOT EXISTS budget_events (
   entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, time INTEGER NOT NULL, date TEXT NOT NULL,
@@ -58,6 +61,17 @@ CREATE TABLE IF NOT EXISTS wa_outbox (
 // the result or the ad id are NOT part of it, so a corrected row keeps its history.
 export function comprobanteKey(row, occurrence = 0) {
   return createHash('sha1').update(`${row.registered}|${row.phone}#${occurrence}`).digest('hex').slice(0, 20);
+}
+
+// Rows with their stable `key` (same rule as syncComprobantes), for callers that read the sheet directly.
+export function keyRows(rows) {
+  const seen = new Map();
+  return rows.map((c) => {
+    const base = `${c.registered}|${c.phone}`;
+    const n = seen.get(base) ?? 0;
+    seen.set(base, n + 1);
+    return { ...c, key: c.key ?? comprobanteKey(c, n) };
+  });
 }
 
 const columns = (db, table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
@@ -267,11 +281,20 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
       if (!country) q('DELETE FROM comprobante_overrides WHERE key = ?').run(key);
       else q('INSERT INTO comprobante_overrides (key, country, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET country = excluded.country, updated_at = excluded.updated_at').run(key, country, now);
     },
+    // Accept (or undo) a payment by hand. Returns false when the payment is not stored.
+    setAccepted(key, accepted, now) {
+      if (!q('SELECT 1 FROM comprobantes WHERE key = ?').get(key)) return false;
+      if (accepted) q('INSERT INTO comprobante_accepts (key, accepted_at) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, now);
+      else q('DELETE FROM comprobante_accepts WHERE key = ?').run(key);
+      return true;
+    },
+    acceptedKeys: () => new Set(q('SELECT key FROM comprobante_accepts').all().map((r) => r.key)),
     comprobantesBetween: (from, to) =>
-      q(`SELECT c.*, o.country AS override_country FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key
+      q(`SELECT c.*, o.country AS override_country, a.key AS accepted_key FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key
+        LEFT JOIN comprobante_accepts a ON a.key = c.key
         WHERE c.date >= ? AND c.date <= ? ORDER BY c.date, c.id`).all(from, to).map((r) => ({
         key: r.key, registered: r.registered, date: r.date, result: r.result, phone: r.phone, valor: r.valor, bank: r.bank, flow: r.flow,
-        adId: r.ad_id, adLossy: r.ad_lossy === 1, adUrl: r.ad_url, gone: r.missing_since != null,
+        adId: r.ad_id, adLossy: r.ad_lossy === 1, adUrl: r.ad_url, gone: r.missing_since != null, accepted: r.accepted_key != null,
         country: r.override_country ?? r.country, countrySource: r.override_country ? 'manual' : r.country_source,
       })),
 
