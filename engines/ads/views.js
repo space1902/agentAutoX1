@@ -36,9 +36,9 @@ export const VIEWS = {
     ],
   },
   v_sales: {
-    description: 'Pagos válidos (comprobantes) con su país y CT. Incluye los de resultado «Pago válido» y los que el usuario aceptó a mano en la app (accepted_manually = 1); una fila = una venta.',
+    description: 'Pagos válidos (comprobantes) con su país y CT. Incluye el nombre del cliente. Incluye los de resultado «Pago válido» y los que el usuario aceptó a mano en la app (accepted_manually = 1); una fila = una venta.',
     sql: `SELECT c.date AS date, ${COUNTRY('COALESCE(o.country, c.country)')} AS country, COALESCE(t.ct, 'Sin CT') AS ct, c.ad_id AS ad_id,
-      c.valor AS value, c.valor * COALESCE(r.rate_to_cop, 1) AS value_cop, c.flow AS flow, c.result AS result, c.bank AS bank,
+      c.valor AS value, c.valor * COALESCE(r.rate_to_cop, 1) AS value_cop, c.flow AS flow, c.result AS result, c.bank AS bank, c.client_name AS client_name,
       CASE WHEN a.key IS NOT NULL AND c.result NOT LIKE 'pago v_lido' THEN 1 ELSE 0 END AS accepted_manually
       FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key LEFT JOIN comprobante_accepts a ON a.key = c.key LEFT JOIN ad_ct t ON t.ad_id = c.ad_id
       LEFT JOIN country_rates r ON r.country = COALESCE(o.country, c.country)
@@ -53,6 +53,7 @@ export const VIEWS = {
       ['flow', 'Flujo de venta del chat.'],
       ['result', 'Resultado del comprobante en la hoja: «Pago válido» o, si se aceptó a mano, el que tenía (por ejemplo «Nombre a revisar»).'],
       ['bank', 'Banco o método de pago.'],
+      ['client_name', 'Nombre del cliente en el chat de WhatsApp/Leona (vacío si la hoja no lo trae). No es el titular de la cuenta bancaria.'],
       ['accepted_manually', '1 si el pago no estaba como válido en la hoja y el usuario lo aceptó a mano en la app; 0 si no.'],
     ],
   },

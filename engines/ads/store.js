@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS comprobantes (
   id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, registered TEXT NOT NULL, result TEXT NOT NULL, phone TEXT NOT NULL,
   valor REAL NOT NULL, bank TEXT NOT NULL, flow TEXT NOT NULL, ad_id TEXT NOT NULL, ad_lossy INTEGER NOT NULL,
   ad_url TEXT NOT NULL, synced_at INTEGER NOT NULL,
-  key TEXT, first_seen INTEGER, missing_since INTEGER, country TEXT NOT NULL DEFAULT '', country_source TEXT NOT NULL DEFAULT ''
+  key TEXT, first_seen INTEGER, missing_since INTEGER, country TEXT NOT NULL DEFAULT '', country_source TEXT NOT NULL DEFAULT '',
+  client_name TEXT NOT NULL DEFAULT '', payer_name TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS comprobantes_date ON comprobantes (date);
 -- Manual country of a payment, kept apart so a re-sync never overwrites it.
@@ -98,6 +99,7 @@ function migrate(db) {
   for (const [name, ddl] of [
     ['key', 'key TEXT'], ['first_seen', 'first_seen INTEGER'], ['missing_since', 'missing_since INTEGER'],
     ['country', "country TEXT NOT NULL DEFAULT ''"], ['country_source', "country_source TEXT NOT NULL DEFAULT ''"],
+    ['client_name', "client_name TEXT NOT NULL DEFAULT ''"], ['payer_name', "payer_name TEXT NOT NULL DEFAULT ''"],
   ]) {
     if (!cols.includes(name)) db.exec(`ALTER TABLE comprobantes ADD COLUMN ${ddl}`);
   }
@@ -252,10 +254,10 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
     // history is never deleted.
     syncComprobantes(rows, now) {
       const find = q('SELECT id FROM comprobantes WHERE key = ?');
-      const insert = q(`INSERT INTO comprobantes (key, date, registered, result, phone, valor, bank, flow, ad_id, ad_lossy, ad_url, synced_at, first_seen)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      const insert = q(`INSERT INTO comprobantes (key, date, registered, result, phone, valor, bank, flow, ad_id, ad_lossy, ad_url, client_name, payer_name, synced_at, first_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const update = q(`UPDATE comprobantes SET date = ?, registered = ?, result = ?, phone = ?, valor = ?, bank = ?, flow = ?, ad_id = ?, ad_lossy = ?,
-        ad_url = ?, synced_at = ?, missing_since = NULL WHERE key = ?`);
+        ad_url = ?, client_name = ?, payer_name = ?, synced_at = ?, missing_since = NULL WHERE key = ?`);
       const markGone = q('UPDATE comprobantes SET missing_since = ? WHERE missing_since IS NULL AND key NOT IN (SELECT value FROM json_each(?))');
       tx(() => {
         const seen = new Map();
@@ -266,7 +268,7 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
           seen.set(base, n + 1);
           const key = c.key ?? comprobanteKey(c, n);
           keys.push(key);
-          const args = [c.date, c.registered, c.result, c.phone, c.valor, c.bank, c.flow, c.adId, c.adLossy ? 1 : 0, c.adUrl, now];
+          const args = [c.date, c.registered, c.result, c.phone, c.valor, c.bank, c.flow, c.adId, c.adLossy ? 1 : 0, c.adUrl, c.clientName ?? '', c.payerName ?? '', now];
           if (find.get(key)) update.run(...args, key);
           else insert.run(key, ...args, now);
         }
@@ -294,7 +296,7 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
         LEFT JOIN comprobante_accepts a ON a.key = c.key
         WHERE c.date >= ? AND c.date <= ? ORDER BY c.date, c.id`).all(from, to).map((r) => ({
         key: r.key, registered: r.registered, date: r.date, result: r.result, phone: r.phone, valor: r.valor, bank: r.bank, flow: r.flow,
-        adId: r.ad_id, adLossy: r.ad_lossy === 1, adUrl: r.ad_url, gone: r.missing_since != null, accepted: r.accepted_key != null,
+        adId: r.ad_id, adLossy: r.ad_lossy === 1, adUrl: r.ad_url, clientName: r.client_name, payerName: r.payer_name, gone: r.missing_since != null, accepted: r.accepted_key != null,
         country: r.override_country ?? r.country, countrySource: r.override_country ? 'manual' : r.country_source,
       })),
 

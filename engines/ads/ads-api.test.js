@@ -54,7 +54,7 @@ test('sync then report returns KPIs, rows with actions, daily series and masked 
   assert.equal(report.rows[0].firstSpendDate, '2026-10-28');
   assert.equal(report.comprobantes.length, 2);
   assert.equal(report.reviewCount, 1);
-  assert.equal(JSON.stringify(report).includes('573001234567'), false);
+  assert.ok(report.comprobantes.some((c) => c.phone === '573001234567' && c.phoneMasked === '••••4567'));
   assert.equal(report.today, '2026-10-29');
   assert.equal(report.lastSync.meta, Date.parse('2026-10-29T15:00:00Z'));
   assert.equal(report.currency, 'COP');
@@ -175,7 +175,7 @@ test('vouchers returns the same list as the report for any range, from the cache
   assert.deepEqual(v.range, { from: '2026-10-28', to: '2026-10-28' });
   assert.deepEqual(v.comprobantes, report.comprobantes);
   assert.equal(v.reviewCount, report.reviewCount);
-  assert.equal(JSON.stringify(v).includes('573001234567'), false);
+  assert.equal(v.comprobantes[0].phone, '573001234567', 'the Comprobantes card shows the full phone');
   // A range with no payments is simply empty; a wide range keeps the same two.
   assert.equal((await runAdsCommand('vouchers', { from: '2026-10-01', to: '2026-10-27' }, offline)).comprobantes.length, 0);
   assert.equal((await runAdsCommand('vouchers', { from: '2026-10-01', to: '2026-10-29' }, offline)).comprobantes.length, 2);

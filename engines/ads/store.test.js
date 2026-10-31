@@ -143,6 +143,28 @@ test('an old database (no country, no keys) is migrated in place', () => {
   s.close();
 });
 
+test('the names are migrated into an old comprobantes table and a re-sync backfills them', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ads-names-'));
+  const file = path.join(dir, 'old.db');
+  const old = new DatabaseSync(file);
+  old.exec(`CREATE TABLE comprobantes (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, registered TEXT NOT NULL, result TEXT NOT NULL, phone TEXT NOT NULL,
+      valor REAL NOT NULL, bank TEXT NOT NULL, flow TEXT NOT NULL, ad_id TEXT NOT NULL, ad_lossy INTEGER NOT NULL, ad_url TEXT NOT NULL, synced_at INTEGER NOT NULL);`);
+  old.prepare("INSERT INTO comprobantes (date, registered, result, phone, valor, bank, flow, ad_id, ad_lossy, ad_url, synced_at) VALUES ('2026-10-28','28/10/2026 10:00:00','Pago válido','573001234567',1000,'N','Bebidas','A',0,'',1)").run();
+  old.close();
+
+  const s = createStore(file);
+  const before = s.comprobantesBetween('2026-10-01', '2026-10-31');
+  assert.equal(before.length, 1);
+  assert.equal(before[0].clientName, '');
+  assert.equal(before[0].payerName, '');
+  s.syncComprobantes([voucher('2026-10-28', 1000, { registered: '28/10/2026 10:00:00', clientName: 'Ana Chat', payerName: 'Ana Titular' })], 5);
+  const after = s.comprobantesBetween('2026-10-01', '2026-10-31');
+  assert.equal(after.length, 1, 'same payment, updated in place');
+  assert.equal(after[0].clientName, 'Ana Chat');
+  assert.equal(after[0].payerName, 'Ana Titular');
+  s.close();
+});
+
 test('kv stores JSON values and counts summarise the tables', () => {
   const s = createStore();
   assert.equal(s.getKv('x'), null);

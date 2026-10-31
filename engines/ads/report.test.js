@@ -130,12 +130,13 @@ test('daily series fills every day of the range', () => {
   assert.equal(wide[0].gasto, 0);
 });
 
-test('comprobantes list masks phones, flags review rows and resolves the CT', () => {
+test('comprobantes list carries phone and names, masks the short form, flags review rows and resolves the CT', () => {
   const { comprobantes: list, reviewCount } = run();
   assert.equal(list.length, 6);
   assert.equal(reviewCount, 1);
   assert.ok(list.every((c) => c.phoneMasked === '••••4567'));
-  assert.ok(list.every((c) => !('phone' in c)));
+  assert.ok(list.every((c) => c.phone === '573001234567'));
+  assert.ok(list.every((c) => c.clientName === '' && c.payerName === ''));
   const review = list.find((c) => c.status !== 'valid');
   assert.equal(review.status, 'invalid');
   assert.equal(review.ct, 'CT 01');

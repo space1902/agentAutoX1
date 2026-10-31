@@ -24,6 +24,8 @@ test('parseComprobantes maps columns by header name and ignores blank trailing h
     date: '2026-09-30',
     result: 'Pago válido',
     phone: '573001234567',
+    clientName: 'Ana',
+    payerName: 'Ana P',
     valor: 15000,
     bank: 'Nequi',
     flow: 'Bebidas - aporte',
@@ -111,4 +113,12 @@ test('fetchSheetCsv returns text and maps HTTP failures to friendly errors', asy
     fetchSheetCsv({ sheetId: 'abc123', tab: 'T', fetchImpl: async () => { throw new TypeError('fetch failed'); } }),
     /No se pudo leer la hoja/,
   );
+});
+
+test('the client (chat) name and the payer (voucher) name are read from their own columns', () => {
+  const { rows } = parseComprobantes(csv(row({ name: 'Luis Chat', payer: 'Maria Titular' }), row({ reg: '01/10/2026 10:00:00', name: '', payer: '' })));
+  assert.equal(rows[0].clientName, 'Luis Chat');
+  assert.equal(rows[0].payerName, 'Maria Titular');
+  assert.equal(rows[1].clientName, '');
+  assert.equal(rows[1].payerName, '');
 });

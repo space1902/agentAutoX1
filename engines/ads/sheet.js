@@ -81,6 +81,8 @@ export function parseComprobantes(csvText) {
       date,
       result,
       phone: cell(r, 'phone'),
+      clientName: cell(r, 'clientName'),
+      payerName: cell(r, 'payerName'),
       valor: parseMoney(cell(r, 'valor')),
       bank: cell(r, 'bank'),
       flow,
