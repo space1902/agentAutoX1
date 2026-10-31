@@ -84,7 +84,7 @@ export async function startMonitor({ dataDir, env = process.env, emit = line, no
     };
 
   const monitor = new Monitor({
-    api, store, config: { ...config, flowPrefix: adsConfig.flowPrefix, validResult: adsConfig.validResult }, accountId: adsConfig.adAccountId,
+    api, store, config: { ...config, flowPrefix: adsConfig.flowPrefix, spendVatPct: adsConfig.spendVatPct, validResult: adsConfig.validResult }, accountId: adsConfig.adAccountId,
     send, saveConfig: () => {}, log, sheetRows, allowActions: config.allowActions, now,
   });
 

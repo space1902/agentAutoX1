@@ -11,7 +11,8 @@ export function rmDir(dir) {
   fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
-export function makeDataDir({ days = 10, raiseOn = 6 } = {}) {
+// vatPct = IVA on the spend (0 keeps the hand-computed numbers of the older tests simple).
+export function makeDataDir({ days = 10, raiseOn = 6, vatPct = 0 } = {}) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-'));
   const store = openStoreAt(dataDir);
   const insights = [];
@@ -36,6 +37,9 @@ export function makeDataDir({ days = 10, raiseOn = 6 } = {}) {
   store.refreshFirstSpend();
   store.syncComprobantes(sales, 1);
   store.setComprobanteCountries(store.comprobantesBetween('2000-01-01', '2999-12-31').map((c) => ({ key: c.key, country: 'CO', source: 'telefono' })));
+  store.setSpendVat(vatPct);
+  fs.mkdirSync(path.join(dataDir, 'ads'), { recursive: true });
+  fs.writeFileSync(path.join(dataDir, 'ads', 'config.json'), JSON.stringify({ spendVatPct: vatPct }), 'utf8');
   store.setKv('account', { name: 'Test', timezone: 'America/Bogota', currency: 'COP' });
   if (raiseOn) {
     store.upsertBudgetEvents([{ entityType: 'adset', entityId: 's1', time: Date.parse(`${day(raiseOn)}T15:00:00Z`), date: day(raiseOn), oldBudget: 10000, newBudget: 12000 }]);

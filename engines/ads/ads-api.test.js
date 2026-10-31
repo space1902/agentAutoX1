@@ -45,9 +45,12 @@ test('sync then report returns KPIs, rows with actions, daily series and masked 
   assert.equal(sync.sheet.ok, true);
 
   const report = await runAdsCommand('report', { from: '2026-10-28', to: '2026-10-29', group: 'ct' }, c);
-  assert.equal(report.kpis.gasto, 20000);
+  // Meta reports 20000 without IVA; the report shows it with the default 19 %.
+  assert.equal(report.kpis.spendNet, 20000);
+  assert.equal(report.kpis.gasto, 23800);
+  assert.equal(report.kpis.vat, 3800);
   assert.equal(report.kpis.valor, 60000);
-  assert.equal(report.kpis.roas, 3);
+  assert.equal(report.kpis.roas, 60000 / 23800);
   assert.equal(report.rows[0].label, 'CT 01');
   assert.equal(report.rows[0].action.label, 'Escalar');
   assert.equal(report.rows[0].ageDays, 2); // first spend 2026-10-28 = day 1

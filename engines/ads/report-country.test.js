@@ -4,13 +4,16 @@ import { test } from 'node:test';
 import { DEFAULT_CONFIG, mergeConfig } from './config.js';
 import { buildReport } from './report.js';
 
+// Legacy expectations are written without IVA; the IVA behavior has its own tests.
+const NO_VAT = { ...DEFAULT_CONFIG, spendVatPct: 0 };
+
 const ins = (adId, campaignName, country, gasto) => ({ date: '2026-10-28', adId, adName: `Ad ${adId}`, campaignId: `c${adId}`, campaignName, adsetId: 's', adsetName: 'S', gasto, mensajes: 10, country });
 const pay = (adId, phone, valor, extra = {}) => ({ key: `${adId}-${phone}-${valor}`, registered: '28/10/2026 10:00:00', date: '2026-10-28', result: 'Pago válido', phone, valor, bank: 'X', flow: 'Bebidas - aporte', adId, adLossy: false, adUrl: '', country: '', countrySource: '', gone: false, ...extra });
 
 const insights = [ins('A', 'CT01 Col', 'CO', 30000), ins('A', 'CT01 Col', 'MX', 10000), ins('B', 'CT02 MX', 'MX', 20000)];
 const comprobantes = [pay('A', '573001234567', 60000), pay('A', '525512345678', 500), pay('B', '', 300)];
 const identities = { A: { adName: 'Ad A', campaignId: 'cA', campaignName: 'CT01 Col' }, B: { adName: 'Ad B', campaignId: 'cB', campaignName: 'CT02 MX' } };
-const config = mergeConfig({ enabledCountries: ['CO', 'MX', 'VE', 'EC'], countries: { MX: { rateToCop: 200, feePct: 5, costPerSale: 1000, taxPct: 16 } } });
+const config = mergeConfig({ spendVatPct: 0, enabledCountries: ['CO', 'MX', 'VE', 'EC'], countries: { MX: { rateToCop: 200, feePct: 5, costPerSale: 1000, taxPct: 16 } } });
 const run = (over = {}) => buildReport({ insights, comprobantes, identities, config, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29', ...over });
 
 test('unfiltered totals add every country and convert values to COP', () => {
@@ -67,17 +70,17 @@ test('a stored or manual country wins over the derivation', () => {
 });
 
 test('a non-COP country without a rate is flagged and not converted', () => {
-  const r = buildReport({ insights, comprobantes, identities, config: mergeConfig({ enabledCountries: ['CO', 'MX'] }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  const r = buildReport({ insights, comprobantes, identities, config: mergeConfig({ spendVatPct: 0, enabledCountries: ['CO', 'MX'] }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
   assert.equal(r.countries.find((c) => c.country === 'MX').rateMissing, true);
   assert.equal(r.kpis.valor, 60000 + 500 + 300);
 });
 
 test('a country with no settings at all is flagged until a rate is set (only Colombia needs none)', () => {
   const ec = [pay('A', '593987654321', 20000)];
-  const r = buildReport({ insights: [], comprobantes: ec, identities, config: mergeConfig({ enabledCountries: ['CO', 'EC'] }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  const r = buildReport({ insights: [], comprobantes: ec, identities, config: mergeConfig({ spendVatPct: 0, enabledCountries: ['CO', 'EC'] }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
   assert.equal(r.countries.find((c) => c.country === 'EC').rateMissing, true);
   assert.equal(r.countries.find((c) => c.country === 'EC').name, 'Ecuador');
-  const co = buildReport({ insights: [], comprobantes: [pay('A', '573001234567', 1)], identities, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  const co = buildReport({ insights: [], comprobantes: [pay('A', '573001234567', 1)], identities, config: NO_VAT, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
   assert.equal(co.countries.find((c) => c.country === 'CO').rateMissing, false);
 });
 
@@ -87,7 +90,7 @@ test('rows that left the sheet are still counted and flagged', () => {
   assert.equal(r.comprobantes[0].gone, true);
 });
 
-const only = (extra = {}) => mergeConfig(extra);
+const only = (extra = {}) => mergeConfig({ spendVatPct: 0, ...extra });
 
 test('by default only Colombia is shown: other countries are left out of KPIs, tables, daily and vouchers', () => {
   const r = buildReport({ insights, comprobantes, identities, config: only({ countries: { MX: { rateToCop: 200 } } }), from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
@@ -120,7 +123,7 @@ test('the filter "-" selects data without a country and empty countries never sh
 test('the enabled countries setting is validated and keeps Colombia by default', () => {
   assert.deepEqual(DEFAULT_CONFIG.enabledCountries, ['CO']);
   assert.equal(DEFAULT_CONFIG.includeOtherCountries, false);
-  assert.deepEqual(mergeConfig({ enabledCountries: ['co', 'mx', 'MX'] }).enabledCountries, ['CO', 'MX']);
-  assert.throws(() => mergeConfig({ enabledCountries: [] }), /al menos un país/);
-  assert.throws(() => mergeConfig({ enabledCountries: ['Mexico'] }), /al menos un país/);
+  assert.deepEqual(mergeConfig({ spendVatPct: 0, enabledCountries: ['co', 'mx', 'MX'] }).enabledCountries, ['CO', 'MX']);
+  assert.throws(() => mergeConfig({ spendVatPct: 0, enabledCountries: [] }), /al menos un país/);
+  assert.throws(() => mergeConfig({ spendVatPct: 0, enabledCountries: ['Mexico'] }), /al menos un país/);
 });

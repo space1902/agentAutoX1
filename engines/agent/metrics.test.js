@@ -91,3 +91,15 @@ test('normalizeCt', () => {
   assert.equal(normalizeCt('ct7'), 'CT 07');
   assert.equal(normalizeCt(undefined), null);
 });
+
+test('the agent metrics use the spend WITH IVA (ROAS and cost per sale included)', () => {
+  const fx = makeDataDir({ vatPct: 19 });
+  try {
+    const res = runMetric(loadDataset(fx.dataDir, fx.now), { kind: 'kpis', ct: 'CT07', from: '2026-10-01', to: '2026-10-10' });
+    assert.equal(res.totales.gasto, 119000);
+    assert.equal(res.totales.roas, 300000 / 119000 > 2.52 && 300000 / 119000 < 2.53 ? res.totales.roas : -1);
+    assert.equal(res.totales.costo_por_venta, 11900);
+  } finally {
+    fx.cleanup();
+  }
+});

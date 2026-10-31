@@ -1,26 +1,31 @@
 // Allowlisted analysis views over ads.db. They are the ONLY relations the "Analista" agent may query (see
-// engines/agent/sql-guard.js). Helper tables `ad_ct` and `country_rates` exist so the views can be pure SQL:
+// engines/agent/sql-guard.js). Helper tables `ad_ct`, `country_rates` and `spend_vat` exist so the views can be pure SQL:
 // the CT code is derived in JS (extractCt) and the exchange rates live in the JSON config.
 import { extractCt } from './parse.js';
 
-export const VIEWS_VERSION = 3;
+export const VIEWS_VERSION = 4;
 export const NO_COUNTRY_LABEL = 'Sin país';
 
 export const HELPER_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ad_ct (ad_id TEXT PRIMARY KEY, ct TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS spend_vat (id INTEGER PRIMARY KEY CHECK (id = 1), pct REAL NOT NULL);
+INSERT OR IGNORE INTO spend_vat (id, pct) VALUES (1, 19);
 CREATE TABLE IF NOT EXISTS country_rates (
   country TEXT PRIMARY KEY, currency TEXT NOT NULL, rate_to_cop REAL NOT NULL, fee_pct REAL NOT NULL, cost_per_sale REAL NOT NULL, tax_pct REAL NOT NULL
 );
 `;
 
+// Multiplier that turns the spend Meta reports into the spend actually charged (IVA included).
+const VAT_PCT = 'COALESCE((SELECT pct FROM spend_vat WHERE id = 1), 0)';
+const VAT_FACTOR = `(1 + ${VAT_PCT} / 100.0)`;
 const COUNTRY = (expr) => `COALESCE(NULLIF(${expr}, ''), '${NO_COUNTRY_LABEL}')`;
 
 // name -> { sql (SELECT body), description, columns: [[name, description]] }
 export const VIEWS = {
   v_ads_daily: {
-    description: 'Gasto y resultados de Meta por día, país, CT y anuncio (una fila por día+anuncio+país de entrega).',
+    description: 'Gasto y resultados de Meta por día, país, CT y anuncio (una fila por día+anuncio+país de entrega). El gasto (spend) ya incluye el IVA que cobra Meta: úsalo tal cual para ROAS, costo por venta y ganancia; no le sumes IVA otra vez.',
     sql: `SELECT i.date AS date, ${COUNTRY('i.country')} AS country, COALESCE(c.ct, 'Sin CT') AS ct, i.campaign_name AS campaign,
-      i.ad_id AS ad_id, i.ad_name AS ad_name, i.gasto AS spend, i.mensajes AS messages, i.impressions AS impressions, i.clicks AS clicks
+      i.ad_id AS ad_id, i.ad_name AS ad_name, i.gasto * ${VAT_FACTOR} AS spend, i.gasto AS spend_net, i.gasto * ${VAT_PCT} / 100.0 AS vat, i.mensajes AS messages, i.impressions AS impressions, i.clicks AS clicks
       FROM insights i LEFT JOIN ad_ct c ON c.ad_id = i.ad_id`,
     columns: [
       ['date', 'Día (AAAA-MM-DD, zona horaria de la cuenta).'],
@@ -29,7 +34,9 @@ export const VIEWS = {
       ['campaign', 'Nombre de la campaña.'],
       ['ad_id', 'ID del anuncio en Meta.'],
       ['ad_name', 'Nombre del anuncio.'],
-      ['spend', 'Gasto en COP (moneda de la cuenta).'],
+      ['spend', 'Gasto en COP CON IVA (lo que realmente cobra Meta). Es el que debes usar para ROAS, costo por venta y ganancia.'],
+      ['spend_net', 'Gasto en COP SIN IVA, como lo reporta la API de Meta. Solo de referencia: no lo mezcles con spend.'],
+      ['vat', 'IVA sobre el gasto en COP (spend - spend_net). Ya está incluido en spend: no lo sumes otra vez.'],
       ['messages', 'Conversaciones de mensajes iniciadas.'],
       ['impressions', 'Impresiones.'],
       ['clicks', 'Clics.'],
@@ -118,21 +125,23 @@ export const VIEWS = {
     ],
   },
   v_ct_daily: {
-    description: 'Gasto y ventas por día, país y CT en una sola tabla (para tendencias). Para el ROAS de un periodo suma primero y divide después.',
-    sql: `SELECT date, country, ct, spend, messages, sales, revenue_cop,
+    description: 'Gasto (con IVA) y ventas por día, país y CT en una sola tabla (para tendencias). Para el ROAS de un periodo suma primero y divide después.',
+    sql: `SELECT date, country, ct, spend, spend_net, vat, messages, sales, revenue_cop,
       CASE WHEN spend > 0 THEN revenue_cop / spend ELSE NULL END AS roas,
       CASE WHEN sales > 0 THEN spend / sales ELSE NULL END AS cost_per_sale
       FROM (
-        SELECT date, country, ct, SUM(spend) AS spend, SUM(messages) AS messages, SUM(sales) AS sales, SUM(revenue_cop) AS revenue_cop FROM (
-          SELECT date, country, ct, spend, messages, 0 AS sales, 0.0 AS revenue_cop FROM v_ads_daily
-          UNION ALL SELECT date, country, ct, 0.0, 0, 1, value_cop FROM v_sales
+        SELECT date, country, ct, SUM(spend) AS spend, SUM(spend_net) AS spend_net, SUM(vat) AS vat, SUM(messages) AS messages, SUM(sales) AS sales, SUM(revenue_cop) AS revenue_cop FROM (
+          SELECT date, country, ct, spend, spend_net, vat, messages, 0 AS sales, 0.0 AS revenue_cop FROM v_ads_daily
+          UNION ALL SELECT date, country, ct, 0.0, 0.0, 0.0, 0, 1, value_cop FROM v_sales
         ) GROUP BY date, country, ct
       )`,
     columns: [
       ['date', 'Día.'],
       ['country', 'País (el del gasto viene de Meta; el de la venta, del cliente).'],
       ['ct', 'Código CT.'],
-      ['spend', 'Gasto en COP.'],
+      ['spend', 'Gasto en COP CON IVA (el real). Úsalo para ROAS y costo por venta.'],
+      ['spend_net', 'Gasto en COP sin IVA (referencia; no lo mezcles con spend).'],
+      ['vat', 'IVA del gasto (ya incluido en spend; no lo sumes otra vez).'],
       ['messages', 'Conversaciones iniciadas.'],
       ['sales', 'Número de ventas válidas.'],
       ['revenue_cop', 'Ingresos en COP.'],
@@ -182,6 +191,15 @@ export function refreshAdCt(db) {
     db.exec('ROLLBACK');
     throw error;
   }
+}
+
+// Mirrors the spend IVA % into ads.db so the views can add it to the spend.
+export function syncSpendVat(db, pct) {
+  const wanted = Math.max(0, Number(pct) || 0);
+  const current = db.prepare('SELECT pct FROM spend_vat WHERE id = 1').get();
+  if (current && current.pct === wanted) return false;
+  db.prepare('INSERT INTO spend_vat (id, pct) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET pct = excluded.pct').run(wanted);
+  return true;
 }
 
 // Mirrors the config's per-country economics into ads.db so SQL can convert to COP.

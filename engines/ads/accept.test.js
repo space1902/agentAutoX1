@@ -12,6 +12,9 @@ import { todaySales } from './monitor/sheet-sales.js';
 import { buildReport } from './report.js';
 import { createStore, keyRows, openStoreAt } from './store.js';
 
+// Legacy expectations are written without IVA; the IVA behavior has its own tests.
+const NO_VAT = { ...DEFAULT_CONFIG, spendVatPct: 0 };
+
 const row = (registered, date, result, extra = {}) => ({
   registered, date, result, phone: '573001234567', valor: 60000, bank: 'Nequi', flow: 'Bebidas - aporte', adId: 'A', adLossy: false, adUrl: '', ...extra,
 });
@@ -23,7 +26,7 @@ const insights = [{ date: '2026-10-28', adId: 'A', adName: 'Ad A', campaignId: '
 const NO_KEY = '0'.repeat(20);
 
 const report = (store, over = {}) => buildReport({
-  insights, comprobantes: store.comprobantesBetween('2026-10-01', '2026-10-31'), identities, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-28', today: '2026-10-29', ...over,
+  insights, comprobantes: store.comprobantesBetween('2026-10-01', '2026-10-31'), identities, config: NO_VAT, from: '2026-10-28', to: '2026-10-28', today: '2026-10-29', ...over,
 });
 const keyOf = (store, result) => store.comprobantesBetween('2026-10-01', '2026-10-31').find((c) => c.result === result).key;
 const seeded = () => {
@@ -85,7 +88,7 @@ test('the pending counter counts any non-valid result, within the range and the 
   store.syncComprobantes([REVIEW, VALID, INVALID, row('28/10/2026 13:00:00', '2026-10-28', 'Algo nuevo', { phone: '573005554444' })], 2);
   assert.equal(report(store).reviewCount, 3);
   assert.equal(report(store, { from: '2026-10-29', to: '2026-10-29' }).reviewCount, 0);
-  const mx = report(store, { config: { ...DEFAULT_CONFIG, enabledCountries: ['MX'] } });
+  const mx = report(store, { config: { ...NO_VAT, enabledCountries: ['MX'] } });
   assert.equal(mx.reviewCount, 0, 'Colombian payments are out of scope when only MX is enabled');
 });
 
@@ -108,7 +111,7 @@ test('decisions count accepted payments in the verdict metrics', () => {
   store.syncComprobantes(pending, 1);
   const data = () => ({
     insights: spend, comprobantes: store.comprobantesBetween('2000-01-01', '2999-12-31'), identities, ads: { A: { firstSpendDate: '2026-10-25' } }, changes: [],
-    config: DEFAULT_CONFIG, existing: new Set(), now: { date: '2026-10-28', minutes: 20 * 60 },
+    config: NO_VAT, existing: new Set(), now: { date: '2026-10-28', minutes: 20 * 60 },
   });
   assert.equal(evaluateDue(data()).find((d) => d.kind === 'test').metrics.ventas, 0);
   for (const c of store.comprobantesBetween('2000-01-01', '2999-12-31')) store.setAccepted(c.key, true, 5);

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   actionValue, parseInsightRow, parseHourlyRow, hourFromBreakdown, isMonitored,
-  ACTION_PURCHASE, ACTION_CONVERSATION,
+  ACTION_PURCHASE, ACTION_CONVERSATION, HOURLY_BREAKDOWN as HOURLY,
 } from './insights.js';
 
 const row = {
@@ -59,4 +59,12 @@ test('isMonitored filters by campaign prefix, case-insensitively', () => {
   assert.equal(isMonitored('ct05', 'CT'), true);
   assert.equal(isMonitored('BF Black Friday', 'CT'), false);
   assert.equal(isMonitored(undefined, 'CT'), false);
+});
+
+test('parseInsightRow and parseHourlyRow add the IVA to spend and cpm when asked', () => {
+  const r = parseInsightRow({ ...row, spend: '1000', cpm: '200' }, 19);
+  assert.ok(Math.abs(r.spend - 1190) < 1e-9);
+  assert.ok(Math.abs(r.cpm - 238) < 1e-9);
+  assert.equal(parseInsightRow({ ...row, spend: '1000' }).spend, 1000);
+  assert.ok(Math.abs(parseHourlyRow({ ...row, spend: '1000', date_start: '2026-10-28', [HOURLY]: '07:00:00 - 07:59:59' }, 19).spend - 1190) < 1e-9);
 });

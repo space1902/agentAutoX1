@@ -45,6 +45,17 @@ test('mergeConfig rejects values that would break requests', () => {
   assert.throws(() => mergeConfig({ autoRefreshMinutes: -5 }), /minutos/i);
 });
 
+test('spendVatPct defaults to 19, is editable and stays apart from the per-country taxPct', () => {
+  assert.equal(DEFAULT_CONFIG.spendVatPct, 19);
+  const c = mergeConfig({ spendVatPct: '0' });
+  assert.equal(c.spendVatPct, 0);
+  assert.equal(c.countries.CO.taxPct, 0);
+  assert.equal(mergeConfig({ countries: { CO: { taxPct: 5 } } }).spendVatPct, 19);
+  assert.throws(() => mergeConfig({ spendVatPct: -1 }), /IVA/);
+  assert.throws(() => mergeConfig({ spendVatPct: 101 }), /IVA/);
+  assert.throws(() => mergeConfig({ spendVatPct: '' }), /IVA/);
+});
+
 test('mergeConfig refuses secrets', () => {
   assert.throws(() => mergeConfig({ token: 'abc' }), /token/i);
   assert.throws(() => mergeConfig({ accessToken: 'abc' }), /token/i);

@@ -49,8 +49,23 @@ test('every view can be selected and exposes the documented columns', () => {
 
 test('v_ads_daily derives the CT and labels a missing country', () => {
   const store = seeded();
+  store.setSpendVat(0);
   const rows = store.db.prepare('SELECT ct, country, SUM(spend) AS spend FROM v_ads_daily GROUP BY ct, country ORDER BY ct').all();
   assert.deepEqual(rows.map((r) => [r.ct, r.country, r.spend]), [['CT 07', 'CO', 30000], ['Sin CT', 'CO', 500]]);
+});
+
+test('spend in the views includes the IVA; spend_net and vat are exposed without double counting', () => {
+  const store = seeded();
+  assert.equal(store.db.prepare('SELECT pct FROM spend_vat').get().pct, 19); // default until the config is mirrored
+  const day = store.db.prepare("SELECT spend, spend_net, vat FROM v_ads_daily WHERE date = '2026-10-01' AND ad_id = 'a1'").get();
+  assert.deepEqual({ ...day }, { spend: 11900, spend_net: 10000, vat: 1900 });
+  store.setSpendVat(10);
+  const ct = store.db.prepare("SELECT spend, spend_net, vat, roas FROM v_ct_daily WHERE date = '2026-10-01' AND ct = 'CT 07'").get();
+  assert.equal(ct.spend, 11000);
+  assert.equal(ct.spend_net, 10000);
+  assert.equal(ct.vat, 1000);
+  assert.equal(ct.roas, 25000 / 11000);
+  assert.equal(store.setSpendVat(10), false);
 });
 
 test('v_sales keeps only valid payments and converts to COP', () => {
@@ -73,10 +88,10 @@ test('v_ads reports the day counter and the current budget', () => {
 test('v_ct_daily joins spend and sales per day', () => {
   const store = seeded();
   const row = store.db.prepare("SELECT * FROM v_ct_daily WHERE ct = 'CT 07' AND date = '2026-10-01'").get();
-  assert.equal(row.spend, 10000);
+  assert.equal(row.spend, 11900); // 10000 + 19 % IVA
   assert.equal(row.sales, 1);
   assert.equal(row.revenue_cop, 25000);
-  assert.equal(row.roas, 2.5);
+  assert.equal(row.roas, 25000 / 11900);
 });
 
 test('read-only stores skip migrations and cannot write', () => {

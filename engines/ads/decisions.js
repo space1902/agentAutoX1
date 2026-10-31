@@ -33,7 +33,7 @@ export function isDue(now, dueDate, notifyAt, lateDays) {
 export function testVerdict(metrics, days, thresholds) {
   const action = suggestAction(metrics, thresholds);
   if (action.key === 'wait') {
-    return { action, reason: `Gasto de ${money(metrics.gasto)} en ${days} días: todavía no llega al mínimo de ${money(thresholds.minSpend)} para decidir.` };
+    return { action, reason: `Gasto de  (con IVA) en ${days} días: todavía no llega al mínimo de ${money(thresholds.minSpend)} para decidir.` };
   }
   const cpa = metrics.ventas > 0 ? ` · costo por venta ${money(metrics.costoVenta)}` : '';
   return { action, reason: `ROAS ${num1(metrics.roas)} con ${sales(metrics.ventas)} en ${days} días${cpa}.` };

@@ -94,7 +94,7 @@ export class Monitor {
     let rows = [];
     try {
       const raw = await fetchHourly(this.api, this.accountId, addDays(today, -this.config.baselineDays), today);
-      const parsed = raw.map(parseHourlyRow).filter((r) => r.hour !== null);
+      const parsed = raw.map((r) => parseHourlyRow(r, this.config.spendVatPct)).filter((r) => r.hour !== null);
       const others = new Set(parsed.filter((r) => !isMonitored(r.campaignName, this.config.campaignPrefix)).map((r) => r.adId));
       rows = parsed.filter((r) => isMonitored(r.campaignName, this.config.campaignPrefix));
       const sheet = await this.#sheet();
@@ -137,7 +137,7 @@ export class Monitor {
       });
     }
     for (const raw of insightRows) {
-      const row = parseInsightRow(raw);
+      const row = parseInsightRow(raw, this.config.spendVatPct);
       if (!isMonitored(row.campaignName, prefix)) continue;
       const ad = byId.get(row.adId) ?? {
         id: row.adId, name: row.adName, campaignId: row.campaignId, campaignName: row.campaignName,

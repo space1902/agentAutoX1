@@ -13,18 +13,20 @@ export function actionValue(actions, type) {
   return actions.filter((a) => a?.action_type === type).reduce((sum, a) => sum + num(a.value), 0);
 }
 
-export function parseInsightRow(row) {
+// `vatPct`: IVA Meta adds on top of the spend it reports (0 = leave as reported). Spend and cpm are scaled together.
+export function parseInsightRow(row, vatPct = 0) {
+  const k = 1 + Math.max(0, Number(vatPct) || 0) / 100;
   return {
     adId: String(row.ad_id ?? ''),
     adName: row.ad_name ?? '',
     campaignId: row.campaign_id ?? '',
     campaignName: row.campaign_name ?? '',
     adsetId: row.adset_id ?? '',
-    spend: num(row.spend),
+    spend: num(row.spend) * k,
     impressions: num(row.impressions),
     clicks: num(row.clicks),
     ctr: num(row.ctr),
-    cpm: num(row.cpm),
+    cpm: num(row.cpm) * k,
     frequency: num(row.frequency),
     purchases: actionValue(row.actions, ACTION_PURCHASE),
     conversations: actionValue(row.actions, ACTION_CONVERSATION),
@@ -37,9 +39,9 @@ export function hourFromBreakdown(value) {
   return match ? Number(match[1]) : null;
 }
 
-export function parseHourlyRow(row) {
+export function parseHourlyRow(row, vatPct = 0) {
   return {
-    ...parseInsightRow(row),
+    ...parseInsightRow(row, vatPct),
     date: row.date_start,
     hour: hourFromBreakdown(row[HOURLY_BREAKDOWN]),
   };

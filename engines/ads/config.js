@@ -15,6 +15,9 @@ export const DEFAULT_CONFIG = Object.freeze({
   validResult: 'Pago válido',
   flowPrefix: 'Bebidas',
   currency: 'COP',
+  // IVA (%) Meta charges on top of the ad spend. The API returns spend WITHOUT it, so every spend shown or used in
+  // a decision is multiplied by (1 + spendVatPct / 100). Not the per-country taxPct (tax on the value of the sales).
+  spendVatPct: 19,
   // First day to keep in the history ('' = detect the earliest day found in the sheet or in Meta).
   historyFrom: '',
   // Countries shown in the views (default: only Colombia). Data of the others is left out, or grouped as
@@ -108,6 +111,11 @@ export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
   if (p.validResult !== undefined) out.validResult = text(p.validResult, 'El resultado válido', { max: 100 });
   if (p.flowPrefix !== undefined) out.flowPrefix = text(p.flowPrefix, 'El prefijo de flujo', { allowEmpty: true, max: 100 });
   if (p.currency !== undefined) out.currency = text(p.currency, 'La moneda', { pattern: /^[A-Za-z]{3}$/ }).toUpperCase();
+  if (p.spendVatPct !== undefined) {
+    const n = typeof p.spendVatPct === 'string' && p.spendVatPct.trim() === '' ? NaN : Number(p.spendVatPct);
+    if (!Number.isFinite(n) || n < 0 || n > 100) throw new ConfigError('El IVA sobre el gasto en Meta (%) debe estar entre 0 y 100.');
+    out.spendVatPct = n;
+  }
   if (p.enabledCountries !== undefined) {
     const list = Array.isArray(p.enabledCountries) ? [...new Set(p.enabledCountries.map((c) => String(c).trim().toUpperCase()))] : null;
     if (!list || list.length === 0 || list.length > 40 || list.some((c) => !/^[A-Z]{2}$/.test(c))) {

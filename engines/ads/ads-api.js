@@ -104,6 +104,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
   const store = openStoreAt(dataDir);
   try {
     store.setCountryRates(config.countries);
+    store.setSpendVat(config.spendVatPct);
     if (command === 'sync' && (args.auto === true || args.auto === 'true')) {
       return await runAutoSync({ store, config, token, fetchImpl, now });
     }

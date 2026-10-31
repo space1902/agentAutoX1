@@ -17,7 +17,7 @@ export function isMonitored(campaignName, prefix) {
   return String(campaignName ?? '').toLowerCase().startsWith(p);
 }
 
-const blank = (date, adId, country = '') => ({ date, adId, country, gasto: 0, mensajes: 0, valor: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
+const blank = (date, adId, country = '') => ({ date, adId, country, gasto: 0, spendNet: 0, vat: 0, mensajes: 0, valor: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
 
 // Settings of a country; the rate defaults to 1 while it is not set (flagged by the country table).
 export function countrySettings(config, country) {
@@ -32,9 +32,10 @@ export function economics(sale, config, country) {
   return { valor, comisiones: (valor * s.feePct) / 100, costos: s.costPerSale, impuestos: (valor * s.taxPct) / 100 };
 }
 
+// Spend as shown everywhere: `gasto` includes Meta's IVA, `spendNet` is what the API returned, `vat` the difference.
 // Map "date|adId[|country]" -> entry. `sales` must already be valid payments; `convert(sale)` may turn them into COP
 // and add costs (the default keeps the raw sheet value).
-export function joinByDateAndAd({ insights, sales, convert = (s) => ({ valor: s.valor, comisiones: 0, costos: 0, impuestos: 0 }) }) {
+export function joinByDateAndAd({ insights, sales, vatPct = 0, convert = (s) => ({ valor: s.valor, comisiones: 0, costos: 0, impuestos: 0 }) }) {
   const map = new Map();
   const entry = (date, adId, country) => {
     const key = country ? `${date}|${adId}|${country}` : `${date}|${adId}`;
@@ -43,7 +44,10 @@ export function joinByDateAndAd({ insights, sales, convert = (s) => ({ valor: s.
   };
   for (const r of insights) {
     const e = entry(r.date, r.adId, r.country ?? '');
-    e.gasto += r.gasto;
+    const vat = (r.gasto * vatPct) / 100;
+    e.spendNet += r.gasto;
+    e.vat += vat;
+    e.gasto += r.gasto + vat;
     e.mensajes += r.mensajes;
   }
   for (const s of sales) {
@@ -75,7 +79,7 @@ const dayOf = (ad, today) => {
 };
 
 const addTotals = (to, from) => {
-  for (const k of ['gasto', 'mensajes', 'valor', 'ventas', 'comisiones', 'costos', 'impuestos']) to[k] += from[k];
+  for (const k of ['gasto', 'spendNet', 'vat', 'mensajes', 'valor', 'ventas', 'comisiones', 'costos', 'impuestos']) to[k] += from[k];
   return to;
 };
 
@@ -84,7 +88,7 @@ const withMetrics = (t) => {
   const margen = t.valor - t.gasto - t.comisiones - t.costos - t.impuestos;
   return { ...t, ...computeMetrics(t), margen, margenPct: t.valor ? margen / t.valor : 0 };
 };
-const zero = () => ({ gasto: 0, mensajes: 0, valor: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
+const zero = () => ({ gasto: 0, spendNet: 0, vat: 0, mensajes: 0, valor: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
 
 export function buildReport({
   insights, comprobantes, identities = {}, ads = {}, config, from, to, group = 'ct', today, country = '', splitCountry = false, raises = {},
@@ -112,7 +116,7 @@ export function buildReport({
   });
   const withCountry = new Map(attributable.map((c) => [c, saleCountry(c)]));
   const sales = attributable.filter((c) => countsAsSale(c, config.validResult)).map((c) => ({ ...c, country: withCountry.get(c) }));
-  const joinedAll = joinByDateAndAd({ insights: monitoredInsights, sales, convert: (s) => economics(s, config, s.country) });
+  const joinedAll = joinByDateAndAd({ insights: monitoredInsights, sales, vatPct: Math.max(0, Number(config.spendVatPct ?? 0)), convert: (s) => economics(s, config, s.country) });
 
   // Countries that have data at all (before the enabled-countries scope), so the settings can offer them.
   const detectedMap = new Map();
@@ -236,7 +240,7 @@ export function buildReport({
     }
     addTotals(total, e);
   }
-  const dailyPoint = ({ date, gasto, valor, ventas, mensajes }) => ({ date, gasto, valor, ventas, mensajes, roas: gasto ? valor / gasto : 0 });
+  const dailyPoint = ({ date, gasto, spendNet, vat, valor, ventas, mensajes }) => ({ date, gasto, spendNet, vat, valor, ventas, mensajes, roas: gasto ? valor / gasto : 0 });
   const ctDaily = [...ctDays.entries()]
     .map(([ct, days]) => ({ ct, daily: [...days.values()].map(dailyPoint) }))
     .filter((c) => c.daily.some((d) => d.gasto > 0 || d.valor > 0))
@@ -305,6 +309,7 @@ export function buildReport({
     country: wanted,
     splitCountry,
     currency: config.currency,
+    spendVatPct: config.spendVatPct ?? 0,
     kpis: withMetrics(total),
     rows,
     countries,

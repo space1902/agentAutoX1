@@ -4,6 +4,9 @@ import { test } from 'node:test';
 import { DEFAULT_CONFIG } from './config.js';
 import { buildReport, isMonitored, joinByDateAndAd } from './report.js';
 
+// Legacy expectations are written without IVA; the IVA behavior has its own tests.
+const NO_VAT = { ...DEFAULT_CONFIG, spendVatPct: 0 };
+
 const ins = (date, adId, adName, campaignId, campaignName, gasto, mensajes) => ({ date, adId, adName, campaignId, campaignName, adsetId: 's1', gasto, mensajes });
 const sale = (date, adId, valor, extra = {}) => ({
   registered: `${date} 10:00`, date, result: 'Pago válido', phone: '573001234567', valor, bank: 'Nequi', flow: 'Bebidas - aporte', adId, adLossy: false, adUrl: '', ...extra,
@@ -39,7 +42,7 @@ const ads = {
   C: { createdTime: '2026-10-20T10:00:00-0500', effectiveStatus: 'PAUSED' },
 };
 const run = (group = 'ct', overrides = {}) =>
-  buildReport({ insights, comprobantes, identities, ads, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-29', group, today: '2026-10-29', ...overrides });
+  buildReport({ insights, comprobantes, identities, ads, config: NO_VAT, from: '2026-10-28', to: '2026-10-29', group, today: '2026-10-29', ...overrides });
 
 test('isMonitored matches the prefix case-insensitively and "all" monitors everything', () => {
   assert.equal(isMonitored('CT01 - ventas', 'CT'), true);
@@ -113,7 +116,7 @@ test('group by campaign and by ad', () => {
 
 test('ads outside the prefix are excluded, and "all" brings them back', () => {
   assert.equal(run('ad').rows.some((r) => r.adId === 'X'), false);
-  const all = run('ad', { config: { ...DEFAULT_CONFIG, campaignPrefix: 'all' } });
+  const all = run('ad', { config: { ...NO_VAT, campaignPrefix: 'all' } });
   assert.equal(all.rows.some((r) => r.adId === 'X'), true);
   assert.equal(all.kpis.gasto, 164999);
 });
@@ -167,7 +170,7 @@ test('CT 10 is never counted inside CT 01 and names without a CT go to "Sin CT" 
     ins('2026-10-28', 'T', 'Ta', 'c-amb', 'CT 1 0', 50000, 5),
   ];
   const ids = Object.fromEntries(rows.map((r) => [r.adId, { adName: r.adName, campaignId: r.campaignId, campaignName: r.campaignName }]));
-  const out = buildReport({ insights: rows, comprobantes: [], identities: ids, config: DEFAULT_CONFIG, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
+  const out = buildReport({ insights: rows, comprobantes: [], identities: ids, config: NO_VAT, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29' });
   const byLabel = Object.fromEntries(out.rows.map((r) => [r.label, r.gasto]));
   assert.equal(byLabel['CT 10'], 20000);
   assert.equal(byLabel['CT 100'], 30000);
@@ -250,4 +253,35 @@ test('Apagada also applies when the CT is split by country', () => {
   const rows = run('ct', { ads: off, splitCountry: true }).rows.filter((r) => r.label.startsWith('CT 01'));
   assert.ok(rows.length >= 1);
   assert.ok(rows.every((r) => r.paused));
+});
+
+test('IVA on the spend: gasto includes it everywhere, spendNet keeps the raw value and ROAS/margin/costs use the gross spend', () => {
+  const r = run('ct', { config: { ...NO_VAT, spendVatPct: 19, campaignPrefix: 'CT' } });
+  const k = r.kpis;
+  assert.equal(k.spendNet, 65000); // 20000 + 10000 + 30000 + 5000
+  assert.equal(k.gasto, 65000 * 1.19);
+  assert.equal(k.vat, 65000 * 0.19);
+  assert.equal(k.gasto, k.spendNet + k.vat);
+  assert.equal(k.roas, k.valor / (65000 * 1.19));
+  assert.equal(k.resultado, k.valor - 65000 * 1.19);
+  assert.equal(k.costoMensaje, (65000 * 1.19) / 85);
+  assert.equal(k.costoVenta, (65000 * 1.19) / k.ventas);
+  assert.equal(r.spendVatPct, 19);
+  const ct1 = r.rows.find((x) => x.ct === 'CT 01');
+  assert.equal(ct1.gasto, 35000 * 1.19);
+  assert.equal(ct1.vat, 35000 * 0.19);
+  assert.equal(r.rows.reduce((n, x) => n + x.gasto, 0), k.gasto);
+  const d28 = r.daily.find((x) => x.date === '2026-10-28');
+  assert.equal(d28.gasto, 60000 * 1.19);
+  assert.equal(d28.spendNet, 60000);
+  assert.equal(d28.roas, d28.valor / (60000 * 1.19));
+  const chart = r.ctDaily.find((c) => c.ct === 'CT 01').daily.find((x) => x.date === '2026-10-29');
+  assert.equal(chart.gasto, 5000 * 1.19);
+  assert.equal(chart.vat, 5000 * 0.19);
+});
+
+test('with 0 % IVA the spend is untouched', () => {
+  const k = run('ct').kpis;
+  assert.equal(k.gasto, k.spendNet);
+  assert.equal(k.vat, 0);
 });

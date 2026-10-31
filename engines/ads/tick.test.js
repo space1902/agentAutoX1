@@ -5,6 +5,9 @@ import { DEFAULT_CONFIG, mergeConfig } from './config.js';
 import { createStore } from './store.js';
 import { runTick } from './tick.js';
 
+// Legacy expectations are written without IVA; the IVA behavior has its own tests.
+const NO_VAT = { ...DEFAULT_CONFIG, spendVatPct: 0 };
+
 const TOKEN = 'EAAB-secret-token-1234567890';
 const json = (body, status = 200) => ({ ok: status < 400, status, headers: new Headers(), json: async () => body, text: async () => JSON.stringify(body) });
 const text = (body) => ({ ok: true, status: 200, headers: new Headers(), json: async () => ({}), text: async () => body });
@@ -41,7 +44,7 @@ const DAY4_2005 = '2026-10-29T01:05:00Z';
 test('first tick snapshots budgets, reads activities and creates nothing when nothing is due', async () => {
   const store = createStore();
   const w = world();
-  const out = await runTick({ store, config: DEFAULT_CONFIG, token: TOKEN, fetchImpl: w.fetchImpl, now: at('2026-10-28T15:00:00Z') });
+  const out = await runTick({ store, config: NO_VAT, token: TOKEN, fetchImpl: w.fetchImpl, now: at('2026-10-28T15:00:00Z') });
   assert.equal(out.snapshot, true);
   assert.equal(out.created.length, 0);
   assert.equal(store.budgetHistory('adset', 's1').length, 1);
@@ -53,19 +56,19 @@ test('snapshots are throttled to every snapshotMinutes', async () => {
   const store = createStore();
   const w = world();
   let t = Date.parse('2026-10-28T15:00:00Z');
-  await runTick({ store, config: DEFAULT_CONFIG, token: TOKEN, fetchImpl: w.fetchImpl, now: () => t });
+  await runTick({ store, config: NO_VAT, token: TOKEN, fetchImpl: w.fetchImpl, now: () => t });
   const before = w.calls.length;
   t += 10 * 60_000;
-  const again = await runTick({ store, config: DEFAULT_CONFIG, token: TOKEN, fetchImpl: w.fetchImpl, now: () => t });
+  const again = await runTick({ store, config: NO_VAT, token: TOKEN, fetchImpl: w.fetchImpl, now: () => t });
   assert.equal(again.snapshot, false);
   assert.equal(w.calls.length, before);
   t += 25 * 60_000;
-  assert.equal((await runTick({ store, config: DEFAULT_CONFIG, token: TOKEN, fetchImpl: w.fetchImpl, now: () => t })).snapshot, true);
+  assert.equal((await runTick({ store, config: NO_VAT, token: TOKEN, fetchImpl: w.fetchImpl, now: () => t })).snapshot, true);
 });
 
 test('a due decision triggers a sync, is stored once and is queued for WhatsApp when enabled', async () => {
   const store = createStore();
-  const config = mergeConfig({ lifecycle: { notifyWhatsapp: true } });
+  const config = mergeConfig({ spendVatPct: 0, lifecycle: { notifyWhatsapp: true } });
   const w = world();
   // Day 1 of the ad is already known (first spend 2026-10-25).
   store.upsertInsights([{ date: '2026-10-25', adId: '5255001', adName: 'Ad 5255001', campaignId: 'c1', campaignName: 'CT01 - ventas', adsetId: 's1', adsetName: 'Set 1', gasto: 10000, impressions: 1, clicks: 1, mensajes: 10 }], 1);
@@ -93,11 +96,11 @@ test('without a token it still evaluates from the cache (catch-up) and never cal
   const store = createStore();
   const w = world();
   // Seed the cache through a normal run, then evaluate the next morning without a token.
-  await runTick({ store, config: DEFAULT_CONFIG, token: TOKEN, fetchImpl: w.fetchImpl, now: at('2026-10-28T15:00:00Z') });
+  await runTick({ store, config: NO_VAT, token: TOKEN, fetchImpl: w.fetchImpl, now: at('2026-10-28T15:00:00Z') });
   const sync = await import('./sync.js');
-  await sync.runSync({ store, config: DEFAULT_CONFIG, token: TOKEN, from: '2026-10-25', to: '2026-10-28', fetchImpl: w.fetchImpl, now: at('2026-10-28T15:00:00Z') });
+  await sync.runSync({ store, config: NO_VAT, token: TOKEN, from: '2026-10-25', to: '2026-10-28', fetchImpl: w.fetchImpl, now: at('2026-10-28T15:00:00Z') });
   const offline = world();
-  const out = await runTick({ store, config: DEFAULT_CONFIG, token: '', fetchImpl: offline.fetchImpl, now: at('2026-10-29T14:00:00Z') });
+  const out = await runTick({ store, config: NO_VAT, token: '', fetchImpl: offline.fetchImpl, now: at('2026-10-29T14:00:00Z') });
   assert.equal(offline.calls.length, 0);
   assert.ok(out.created.length >= 1);
   assert.equal(out.created.every((d) => d.late), true);
@@ -107,7 +110,7 @@ test('a raise found in the activity log is dated exactly and evaluated on day 2'
   const store = createStore();
   const activities = [{ event_type: 'update_ad_set_budget', object_id: 's1', event_time: '2026-10-27T15:30:00+0000', extra_data: JSON.stringify({ old_value: '4000000', new_value: '5000000' }) }];
   const w = world({ activities });
-  const config = mergeConfig({ lifecycle: { testEnabled: false } });
+  const config = mergeConfig({ spendVatPct: 0, lifecycle: { testEnabled: false } });
   const out = await runTick({ store, config, token: TOKEN, fetchImpl: w.fetchImpl, now: at(DAY4_2005) });
   const b = out.created.find((d) => d.kind === 'budget');
   assert.ok(b, 'budget decision created');
@@ -118,7 +121,7 @@ test('a raise found in the activity log is dated exactly and evaluated on day 2'
 
 test('an activity log failure does not break the tick (snapshots are the fallback)', async () => {
   const store = createStore();
-  const out = await runTick({ store, config: DEFAULT_CONFIG, token: TOKEN, fetchImpl: world({ failActivities: true }).fetchImpl, now: at('2026-10-28T15:00:00Z') });
+  const out = await runTick({ store, config: NO_VAT, token: TOKEN, fetchImpl: world({ failActivities: true }).fetchImpl, now: at('2026-10-28T15:00:00Z') });
   assert.equal(out.snapshot, true);
   assert.equal(store.budgetHistory('adset', 's1').length, 1);
   assert.match(out.warnings.join(' '), /actividad/i);
@@ -130,7 +133,7 @@ test('the status refreshed by the due-time sync silences verdicts of what was pa
   // The cache still says ACTIVE; Meta now says CAMPAIGN_PAUSED.
   store.upsertAds([{ adId: '5255001', name: 'Ad', createdTime: '2026-10-25T08:00:00-0500', effectiveStatus: 'ACTIVE', campaignId: 'c1', campaignName: 'CT01 - ventas', adsetId: 's1', adsetName: 'Set 1' }], 1);
   store.refreshFirstSpend();
-  const out = await runTick({ store, config: DEFAULT_CONFIG, token: TOKEN, fetchImpl: world({ status: 'CAMPAIGN_PAUSED' }).fetchImpl, now: at(DAY4_2005) });
+  const out = await runTick({ store, config: NO_VAT, token: TOKEN, fetchImpl: world({ status: 'CAMPAIGN_PAUSED' }).fetchImpl, now: at(DAY4_2005) });
   assert.equal(store.adsMap()['5255001'].effectiveStatus, 'CAMPAIGN_PAUSED');
   assert.equal(out.created.length, 0);
   assert.equal(store.decisions().length, 0);

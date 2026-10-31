@@ -6,6 +6,9 @@ import { DEFAULT_CONFIG, mergeConfig } from './config.js';
 import { allAdsOff, evaluateDue, isDue, postBudgetVerdict, testVerdict } from './decisions.js';
 import { addDays } from './time.js';
 
+// Legacy expectations are written without IVA; the IVA behavior has its own tests.
+const NO_VAT = { ...DEFAULT_CONFIG, spendVatPct: 0 };
+
 const T = DEFAULT_CONFIG.thresholds;
 const L = DEFAULT_CONFIG.lifecycle;
 const m = (o) => ({ gasto: 0, mensajes: 0, ventas: 0, valor: 0, roas: 0, costoVenta: 0, conversion: 0, ...o });
@@ -72,7 +75,7 @@ function testScenario() {
   const comprobantes = ['2026-10-26', '2026-10-27', '2026-10-28'].map((d) => pay(d, 'A', 60000));
   return { insights, comprobantes, identities: { A: { adName: 'Ad A', campaignId: 'c1', campaignName: 'CT01 - ventas' } }, ads: { A: { firstSpendDate: '2026-10-25' } }, changes: [] };
 }
-const base = (over) => ({ config: DEFAULT_CONFIG, existing: new Set(), ...testScenario(), ...over });
+const base = (over) => ({ config: NO_VAT, existing: new Set(), ...testScenario(), ...over });
 const clock = (date, h) => ({ date, minutes: h * 60 });
 
 test('day 4 at 20:00 creates the ad and CT verdicts over days 1..4', () => {
@@ -94,7 +97,7 @@ test('day 4 at 20:00 creates the ad and CT verdicts over days 1..4', () => {
 
 test('nothing is created before 20:00 or when the kind is off', () => {
   assert.equal(evaluateDue(base({ now: clock('2026-10-28', 19) })).length, 0);
-  const off = mergeConfig({ lifecycle: { testEnabled: false } });
+  const off = mergeConfig({ spendVatPct: 0, lifecycle: { testEnabled: false } });
   assert.equal(evaluateDue(base({ now: clock('2026-10-28', 21), config: off })).length, 0);
 });
 
@@ -105,7 +108,7 @@ test('each decision is issued once (dedupe by key) and catch-up is flagged late 
 
   const withMore = { ...testScenario() };
   withMore.insights = [...withMore.insights, ins('2026-10-29', 'A', 99999)];
-  const late = evaluateDue({ ...withMore, config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-29', 9) });
+  const late = evaluateDue({ ...withMore, config: NO_VAT, existing: new Set(), now: clock('2026-10-29', 9) });
   const ad = late.find((d) => d.kind === 'test');
   assert.equal(ad.late, true);
   assert.equal(ad.metrics.gasto, 40000, 'day 5 spend must not leak into the day 1..4 verdict');
@@ -116,7 +119,7 @@ test('ads that never spent, old ads and ads outside the prefix get no test verdi
   assert.equal(evaluateDue(base({ now: clock('2026-11-10', 21) })).length, 0, 'too late to catch up');
   assert.equal(evaluateDue(base({ ads: { A: {} }, now: clock('2026-10-28', 21) })).length, 0);
   const other = { ...s, identities: { A: { adName: 'A', campaignId: 'c9', campaignName: 'Branding' } }, insights: s.insights.map((r) => ({ ...r, campaignName: 'Branding' })) };
-  assert.equal(evaluateDue({ ...other, config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-28', 21) }).length, 0);
+  assert.equal(evaluateDue({ ...other, config: NO_VAT, existing: new Set(), now: clock('2026-10-28', 21) }).length, 0);
 });
 
 function budgetScenario({ afterVentas = 2, afterGasto = 20000 } = {}) {
@@ -134,7 +137,7 @@ function budgetScenario({ afterVentas = 2, afterGasto = 20000 } = {}) {
 }
 
 test('post-budget check on day 2 at 20:00 compares against the 3 days before the change', () => {
-  const out = evaluateDue({ ...budgetScenario(), config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-28', 20) });
+  const out = evaluateDue({ ...budgetScenario(), config: NO_VAT, existing: new Set(), now: clock('2026-10-28', 20) });
   const b = out.find((d) => d.kind === 'budget');
   assert.equal(b.dayN, 2);
   assert.equal(b.entityType, 'adset');
@@ -150,9 +153,9 @@ test('post-budget check on day 2 at 20:00 compares against the 3 days before the
 });
 
 test('post-budget check says lower when ROAS collapses and hold with little data', () => {
-  const lower = evaluateDue({ ...budgetScenario({ afterVentas: 0, afterGasto: 30000 }), config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-28', 20) });
+  const lower = evaluateDue({ ...budgetScenario({ afterVentas: 0, afterGasto: 30000 }), config: NO_VAT, existing: new Set(), now: clock('2026-10-28', 20) });
   assert.equal(lower.find((d) => d.kind === 'budget').verdict.label, 'Bajar presupuesto');
-  const hold = evaluateDue({ ...budgetScenario({ afterVentas: 1 }), config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-28', 20) });
+  const hold = evaluateDue({ ...budgetScenario({ afterVentas: 1 }), config: NO_VAT, existing: new Set(), now: clock('2026-10-28', 20) });
   assert.equal(hold.find((d) => d.kind === 'budget').verdict.label, 'Mantener y esperar');
 });
 
@@ -162,7 +165,7 @@ test('post-budget notes the previous change of the same entity', () => {
     histories: { 'adset|s1': [{ date: '2026-10-10', dailyBudget: 4000000, lifetimeBudget: null, firstSeen: 0 }, { date: '2026-10-20', dailyBudget: 5000000, lifetimeBudget: null, firstSeen: 1 }, { date: '2026-10-27', dailyBudget: 6000000, lifetimeBudget: null, firstSeen: 2 }] },
     events: [],
   });
-  const out = evaluateDue({ ...s, config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-28', 20) });
+  const out = evaluateDue({ ...s, config: NO_VAT, existing: new Set(), now: clock('2026-10-28', 20) });
   const b = out.find((d) => d.kind === 'budget' && d.extra.changeDate === '2026-10-27');
   assert.equal(b.extra.previous.date, '2026-10-20');
   assert.equal(b.extra.daysSincePrevious, 7);
@@ -194,14 +197,26 @@ test('a CT with one active ad keeps its CT verdict while the paused ad gets none
     identities: { ...s.identities, B: { adName: 'Ad B', campaignId: 'c1', campaignName: 'CT01 - ventas' } },
     ads: { A: { firstSpendDate: '2026-10-25', effectiveStatus: 'PAUSED' }, B: { firstSpendDate: '2026-10-25', effectiveStatus: 'ACTIVE' } },
   };
-  const out = evaluateDue({ ...two, config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-28', 20) });
+  const out = evaluateDue({ ...two, config: NO_VAT, existing: new Set(), now: clock('2026-10-28', 20) });
   assert.deepEqual(out.filter((d) => d.kind === 'test').map((d) => d.entityId), ['B']);
   assert.equal(out.filter((d) => d.kind === 'ct_test').length, 1);
 });
 
 test('no post-budget verdict (Subir/Bajar) for an ad set whose ads are all paused', () => {
   const s = budgetScenario({ afterVentas: 0, afterGasto: 30000 });
-  const run = (status) => evaluateDue({ ...s, ads: { X: { firstSpendDate: '2026-10-01', effectiveStatus: status } }, config: DEFAULT_CONFIG, existing: new Set(), now: clock('2026-10-28', 20) });
+  const run = (status) => evaluateDue({ ...s, ads: { X: { firstSpendDate: '2026-10-01', effectiveStatus: status } }, config: NO_VAT, existing: new Set(), now: clock('2026-10-28', 20) });
   assert.equal(run('ACTIVE').filter((d) => d.kind === 'budget').length, 1);
   assert.equal(run('PAUSED').filter((d) => d.kind === 'budget').length, 0);
+});
+
+test('decisions use the spend WITH IVA, so the same data gives a stricter verdict', () => {
+  const s = testScenario();
+  const sales = ['2026-10-26', '2026-10-27', '2026-10-28'].map((d) => pay(d, 'A', 40000)); // 120000 over 40000 net spend = ROAS 3.0
+  const run = (config) => evaluateDue({ ...s, comprobantes: sales, config, existing: new Set(), now: clock('2026-10-28', 20) }).find((d) => d.kind === 'test');
+  assert.equal(run(NO_VAT).verdict.label, 'Escalar y duplicar');
+  const withVat = run({ ...NO_VAT, spendVatPct: 19 });
+  assert.equal(withVat.verdict.label, 'Escalar'); // 120000 / 47600 = 2.52
+  assert.equal(withVat.metrics.gasto, 40000 * 1.19);
+  assert.equal(withVat.metrics.spendNet, 40000);
+  assert.match(withVat.reason, /ROAS 2,5 /);
 });

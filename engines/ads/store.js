@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 import { adsDir } from './config.js';
-import { installViews, refreshAdCt, syncCountryRates } from './views.js';
+import { installViews, refreshAdCt, syncCountryRates, syncSpendVat } from './views.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -175,6 +175,7 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
       refreshAdCt(db);
     },
     setCountryRates: (countries) => syncCountryRates(db, countries),
+    setSpendVat: (pct) => syncSpendVat(db, pct),
     insightsBetween: (from, to) =>
       q('SELECT * FROM insights WHERE date >= ? AND date <= ? ORDER BY date, ad_id, country').all(from, to).map((r) => ({
         date: r.date, adId: r.ad_id, adName: r.ad_name, campaignId: r.campaign_id, campaignName: r.campaign_name,
