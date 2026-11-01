@@ -1,19 +1,32 @@
-import { Check, Pencil, RotateCcw, Save, Undo2, X } from "lucide-react";
+import { Check, Pencil, RefreshCw, RotateCcw, Save, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { type AgentApi, type LearningSummary, type Lesson, type LessonStatus } from "../../lib/agentApi";
+import { type AgentApi, type AgentInfo, type LearningSummary, type Lesson, type LessonStatus } from "../../lib/agentApi";
 import { Card, Notice, Pill, Skeleton } from "../ui";
 
-const GROUPS: { status: LessonStatus; title: string; empty: string }[] = [
-  { status: "candidate", title: "Candidatas (esperan tu decisión)", empty: "No hay lecciones nuevas. Aparecen cuando una recomendación se mide con datos reales." },
-  { status: "certified", title: "Certificadas (las que el Analista usa)", empty: "Todavía no certificaste ninguna: el Analista no usa lecciones." },
-  { status: "rejected", title: "Rechazadas o revocadas", empty: "Nada por aquí." },
-];
+// What each agent learns from (shown under the title so it is clear where the candidates come from).
+const SOURCES: Record<string, string> = {
+  analista: "Aparecen cuando una recomendación se mide con datos reales.",
+  creativo: "Aparecen cuando aprobaste o rechazaste generaciones, usaste o descartaste archivos, o lo corregiste; y cuando le dices una regla.",
+  investigador: "Aparecen cuando le cuentas que un producto se lanzó y se compara lo previsto con lo real, o cuando le dices una regla.",
+};
 
-const KIND = { rule: "Resultado real", preference: "Tu preferencia", agent: "Propuesta del Analista" } as const;
+function groupsFor(name: string, agentId: string): { status: LessonStatus; title: string; empty: string }[] {
+  return [
+    { status: "candidate", title: "Candidatas (esperan tu decisión)", empty: `No hay lecciones nuevas. ${SOURCES[agentId] ?? SOURCES.analista}` },
+    { status: "certified", title: `Certificadas (las que ${name} usa)`, empty: `Todavía no certificaste ninguna: ${name} no usa lecciones.` },
+    { status: "rejected", title: "Rechazadas o revocadas", empty: "Nada por aquí." },
+  ];
+}
+
+const kindLabel = (l: Lesson, name: string) => (l.source === "user" && l.kind === "rule" ? "Regla que dijiste" : l.kind === "rule" ? "Resultado real" : l.kind === "preference" ? "Tu preferencia" : `Propuesta de ${name}`);
 const dmy = (ms: number) => new Date(ms).toLocaleDateString("es-CO");
 
-export default function LessonsPanel({ api, learning, refreshKey }: { api: AgentApi; learning: boolean; refreshKey: number }) {
+export default function LessonsPanel({ api, agent, learning, refreshKey }: { api: AgentApi; agent?: AgentInfo; learning: boolean; refreshKey: number }) {
+  const name = agent?.shortName ?? "Analista";
+  const agentId = agent?.id ?? "analista";
+  const [note, setNote] = useState<string | null>(null);
+  const [measuring, setMeasuring] = useState(false);
   const [lessons, setLessons] = useState<Lesson[] | null>(null);
   const [summary, setSummary] = useState<LearningSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +56,22 @@ export default function LessonsPanel({ api, learning, refreshKey }: { api: Agent
     }
   }
 
+  // "Medir ahora": the agent re-reads its own outcomes (approvals, used files, launches) and stores new candidates.
+  async function measure() {
+    setMeasuring(true);
+    setError(null);
+    setNote(null);
+    try {
+      const res = (await api.measureNow()) as { candidates?: number; faltan_resultados?: number };
+      setNote(res.candidates ? `Salieron ${res.candidates} lecciones candidatas nuevas.` : res.faltan_resultados ? `Todavía faltan ${res.faltan_resultados} lanzamientos con resultado real para proponer algo.` : "No hay lecciones nuevas todavía: se necesitan al menos 3 casos que coincidan en un 75 % o más.");
+      await load();
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setMeasuring(false);
+    }
+  }
+
   async function saveEdit() {
     if (!editing) return;
     setError(null);
@@ -57,21 +86,30 @@ export default function LessonsPanel({ api, learning, refreshKey }: { api: Agent
 
   if (!lessons) return error ? <Notice>{error}</Notice> : <Skeleton height={200} />;
   const sig = summary?.signals;
+  const GROUPS = groupsFor(name, agentId);
 
   return (
     <div className="an-lessons">
       {!learning && <Notice>El aprendizaje está desactivado: ninguna lección se usa en las respuestas (no se borró nada). Actívalo en Ajustes.</Notice>}
       {error && <Notice>{error}</Notice>}
+      {note && <Notice kind="ok">{note}</Notice>}
       {summary && (
         <Card className="an-summary">
-          <p>
-            <strong>Resultados medidos:</strong> {summary.outcomes.acierto} aciertos · {summary.outcomes.fallo} fallos · {summary.outcomes.neutral} neutrales · {summary.outcomes.sin_datos} sin datos
-            {summary.pending ? ` · ${summary.pending} por medir` : ""}.
-          </p>
+          {agent?.usesAdsData !== false && (
+            <p>
+              <strong>Resultados medidos:</strong> {summary.outcomes.acierto} aciertos · {summary.outcomes.fallo} fallos · {summary.outcomes.neutral} neutrales · {summary.outcomes.sin_datos} sin datos
+              {summary.pending ? ` · ${summary.pending} por medir` : ""}.
+            </p>
+          )}
           <p className="muted">
             Señales de tus valoraciones (con vida media de 30 días): {sig && sig.count ? `${sig.total > 0 ? "+" : ""}${String(sig.total).replace(".", ",")} en ${sig.count} eventos` : "aún no hay"}.
           </p>
-          <p className="muted">Solo las lecciones certificadas llegan al Analista. Las candidatas nunca cambian sus respuestas.</p>
+          <p className="muted">Solo las lecciones certificadas llegan a {name}. Las candidatas nunca cambian sus respuestas.</p>
+          {!agent?.usesAdsData && (
+            <button className="btn secondary sm" onClick={() => void measure()} disabled={measuring}>
+              <RefreshCw size={13} aria-hidden className={measuring ? "spin" : ""} /> Revisar resultados ahora
+            </button>
+          )}
         </Card>
       )}
 
@@ -95,7 +133,7 @@ export default function LessonsPanel({ api, learning, refreshKey }: { api: Agent
                       <div className="an-lesson-text">
                         <p>{l.text}</p>
                         <small className="muted">
-                          {KIND[l.kind]}
+                          {kindLabel(l, name)}
                           {l.evidence.support ? ` · ${l.evidence.support} casos` : ""}
                           {l.evidence.acierto !== undefined ? ` (${l.evidence.acierto} aciertos, ${l.evidence.fallo ?? 0} fallos)` : ""}
                           {l.certifiedAt ? ` · certificada el ${dmy(l.certifiedAt)}` : ` · creada el ${dmy(l.created)}`}

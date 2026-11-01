@@ -27,7 +27,9 @@ export default function AnalistaSettingsPanel({ api, agent, showLearning = true,
   const [busy, setBusy] = useState(false);
   const [codex, setCodex] = useState<CodexStatus | null>(null);
   const creativo = api.agentId === "creativo";
-  const models = creativo ? MODELS.filter((m) => m.id !== "") : MODELS;
+  // The creativo and the investigador default to Sonnet (the CLI default model reads a much larger context).
+  const sonnetDefault = creativo || api.agentId === "investigador";
+  const models = sonnetDefault ? MODELS.filter((m) => m.id !== "") : MODELS;
 
   useEffect(() => {
     api
@@ -93,12 +95,12 @@ export default function AnalistaSettingsPanel({ api, agent, showLearning = true,
 
       <div className="field">
         <label htmlFor="an-model">Modelo</label>
-        <select id="an-model" className="input" value={models.some((m) => m.id === form.model) ? form.model : creativo ? "sonnet" : ""} onChange={(e) => setForm({ ...form, model: e.target.value })}>
+        <select id="an-model" className="input" value={models.some((m) => m.id === form.model) ? form.model : sonnetDefault ? "sonnet" : ""} onChange={(e) => setForm({ ...form, model: e.target.value })}>
           {models.map((m) => (
             <option key={m.id} value={m.id}>{m.label}</option>
           ))}
         </select>
-        <small>Cada pregunta gasta del límite de tu plan; un modelo más pequeño rinde más preguntas.{creativo ? " Sonnet es el recomendado para este agente." : ""}</small>
+        <small>Cada pregunta gasta del límite de tu plan; un modelo más pequeño rinde más preguntas.{sonnetDefault ? " Sonnet es el recomendado para este agente." : ""}</small>
       </div>
 
       {creativo && (

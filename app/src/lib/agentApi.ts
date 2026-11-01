@@ -97,6 +97,111 @@ export interface CodexStatus {
   message: string;
 }
 
+export type RoadmapStatus = "pendiente" | "en_progreso" | "hecho" | "no_aplica";
+
+export interface RoadmapItem {
+  id: number;
+  productId: string;
+  /** null = an item of the whole product. */
+  country: string | null;
+  templateId: string;
+  phase: string | null;
+  title: string;
+  status: RoadmapStatus;
+  evidencePath: string | null;
+  notes: string;
+  /** What the disk said when it was last checked ("12 de 16 archivos"). */
+  detail: string;
+  markedBy: "usuario" | "agente" | "sistema";
+  updated: number;
+  evidenceBroken: boolean;
+  skill?: string | null;
+  manual?: boolean;
+}
+
+export interface RoadmapProduct {
+  id: string;
+  name: string;
+  folder: string;
+  countries: string[];
+  progress: Record<string, { total: number; done: number; pct: number }>;
+  rows: { templateId: string; title: string; scope: "product" | "country"; sort: number; skill: string | null; manual: boolean }[];
+  items: RoadmapItem[];
+  next: RoadmapItem[];
+}
+
+/** A file the creativo generated and what the user did with it (what the creativo learns from). */
+export interface CreativeAsset {
+  id: number;
+  ts: number;
+  product: string;
+  country: string;
+  kind: string;
+  path: string;
+  status: "generated" | "used" | "discarded";
+  ctCode: string | null;
+}
+
+export interface ResearchMeasurement {
+  term: string;
+  country: string;
+  count: number;
+  verdict: "saturado" | "competitivo" | "hueco";
+  measuredOn: string;
+  infoproducers: number | null;
+}
+
+export interface ResearchLaunch {
+  reportId: number;
+  launchedOn: string;
+  product: string;
+  ctCode: string | null;
+  source: "analista" | "usuario";
+  label: "acierto" | "fallo" | "neutral" | "sin_datos";
+  hit: boolean | null;
+  result: { roas?: number | null };
+}
+
+export interface ResearchReport {
+  id: number;
+  date: string;
+  topic: string;
+  path: string;
+  verdict: "saturado" | "competitivo" | "hueco";
+  decision: "entrar" | "validar" | "descartar";
+  mainTerm: string | null;
+  mainCount: number | null;
+  measurements: ResearchMeasurement[];
+  launch: ResearchLaunch | null;
+}
+
+export interface ResearchThresholds {
+  saturated: number;
+  competitive: number;
+  roasGood: number;
+  roasBad: number;
+}
+
+export interface LaunchInput {
+  reportId: number;
+  ctCode?: string;
+  product?: string;
+  launchedOn?: string;
+  roas?: number;
+  ticket?: number;
+  costPerMessage?: number;
+  conversion?: number;
+}
+
+export interface LaunchComparison {
+  informe: { id: number; tema: string; veredicto: string; decision: string };
+  real: { fuente: string; etiqueta: string; roas: number | null };
+  acerto_la_decision: boolean | null;
+  aviso?: string;
+  lanzamientos_medidos: number;
+  siguiente: string;
+}
+
 export interface AnalistaStatus {
   claude: { found: boolean; path: string | null };
   adsDb: boolean;
@@ -227,7 +332,7 @@ export interface ProcStatus {
   logs: string[];
 }
 
-export type AgentTab = "chat" | "lecciones" | "recomendaciones" | "calidad" | "ajustes";
+export type AgentTab = "chat" | "lecciones" | "recomendaciones" | "calidad" | "hoja" | "informes" | "ajustes";
 
 export interface AgentInfo {
   id: string;
@@ -286,6 +391,12 @@ export function makeAgentApi(agentId: string) {
     onEvalExit: (cb: () => void): Promise<UnlistenFn> => mine<object>("agent-eval-exit", () => cb()),
     proposals: (status?: string) => call<{ proposals: Proposal[] }>("proposals", status ? { status } : {}),
     decideProposal: (id: number, approve: boolean) => call<{ id: number; status: string }>("proposal-decide", { id, approve }),
+    roadmap: (product?: string) => call<{ board: RoadmapProduct[]; seeded: { created: number; refreshed: number } }>("roadmap-get", product ? { product } : {}),
+    setItem: (id: number, status: RoadmapStatus, note?: string) => call<{ item: RoadmapItem }>("item-set", { id, status, note }),
+    assets: (status?: string) => call<{ assets: CreativeAsset[] }>("assets", status ? { status } : {}),
+    setAsset: (id: number, status: CreativeAsset["status"], ctCode?: string) => call<{ output: CreativeAsset }>("asset-set", { id, status, ...(ctCode !== undefined ? { ctCode } : {}) }),
+    researchList: () => call<{ reports: ResearchReport[]; thresholds: ResearchThresholds }>("research-list"),
+    markLaunched: (input: LaunchInput) => call<LaunchComparison>("research-launch", input as unknown as Record<string, unknown>),
     codexStatus: () => call<CodexStatus>("codex-status"),
     settings: () => call<{ settings: AnalistaSettings }>("settings-get"),
     saveSettings: (partial: Partial<AnalistaSettings>) => call<{ settings: AnalistaSettings }>("settings-set", partial),

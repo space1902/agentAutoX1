@@ -1,8 +1,10 @@
-import { BarChart3, Bot, Clapperboard, Loader2, type LucideIcon } from "lucide-react";
+import { BarChart3, Bot, Clapperboard, Loader2, Search, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import AnalistaSettingsPanel from "../components/analista/AnalistaSettings";
 import ChatPanel from "../components/analista/ChatPanel";
 import QualityPanel from "../components/analista/QualityPanel";
+import ResearchPanel from "../components/analista/ResearchPanel";
+import RoadmapBoard from "../components/analista/RoadmapBoard";
 import LessonsPanel from "../components/analista/LessonsPanel";
 import RecommendationsPanel from "../components/analista/RecommendationsPanel";
 import { Banner, Notice } from "../components/ui";
@@ -17,9 +19,9 @@ const FALLBACK_AGENTS: AgentInfo[] = [
 ];
 
 // Registry icon keys -> lucide icons.
-const ICONS: Record<string, LucideIcon> = { BarChart3, Clapperboard };
+const ICONS: Record<string, LucideIcon> = { BarChart3, Clapperboard, Search };
 
-const TABS: ReadonlyArray<readonly [Tab, string]> = [["chat", "Chat"], ["lecciones", "Lecciones"], ["recomendaciones", "Recomendaciones"], ["calidad", "Calidad"], ["ajustes", "Ajustes"]];
+const TABS: ReadonlyArray<readonly [Tab, string]> = [["chat", "Chat"], ["lecciones", "Lecciones"], ["recomendaciones", "Recomendaciones"], ["calidad", "Calidad"], ["hoja", "Hoja de ruta"], ["informes", "Informes"], ["ajustes", "Ajustes"]];
 const ALL_TABS: Tab[] = TABS.map(([id]) => id);
 
 export default function Agentes() {
@@ -34,7 +36,7 @@ export default function Agentes() {
 
   const agent = agents.find((a) => a.id === selected) ?? agents[0];
   const api = useMemo(() => makeAgentApi(agent.id), [agent.id]);
-  // Only the tabs that apply to the agent (the creativo has no ads-metrics tabs until its own lessons arrive).
+  // Only the tabs that apply to the agent (each one learns; only the Analista has the ads-metrics tabs).
   const agentTabs = agent.tabs ?? ALL_TABS;
   const hasLessons = agentTabs.includes("lecciones");
 
@@ -111,7 +113,9 @@ export default function Agentes() {
       {/* Keyed by agent so a chat, its listeners and its drafts never leak into another agent. */}
       <div key={agent.id}>
         {tab === "chat" && <ChatPanel api={api} agent={agent} learning={learning && hasLessons} onGoSettings={() => setTab("ajustes")} onLearningChange={bumpLearning} />}
-        {tab === "lecciones" && <LessonsPanel api={api} learning={learning} refreshKey={tick} />}
+        {tab === "lecciones" && <LessonsPanel api={api} agent={agent} learning={learning} refreshKey={tick} />}
+        {tab === "hoja" && <RoadmapBoard api={api} refreshKey={tick} />}
+        {tab === "informes" && <ResearchPanel api={api} refreshKey={tick} />}
         {tab === "recomendaciones" && <RecommendationsPanel api={api} refreshKey={tick} />}
         {tab === "calidad" && <QualityPanel api={api} />}
         {tab === "ajustes" && <AnalistaSettingsPanel api={api} agent={agent} showLearning={hasLessons} onSaved={(s) => setLearning(s.learning)} />}
