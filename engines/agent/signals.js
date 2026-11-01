@@ -7,6 +7,15 @@ export const SIGNAL_WEIGHTS = Object.freeze({
   reformulacion: -2,
   recomendacion_seguida: 2,
   cifra_sin_fuente: -1,
+  // Agente creativo: what the user does with what it makes.
+  generacion_aprobada: 2,
+  generacion_rechazada: -2,
+  activo_usado: 3,
+  activo_descartado: -2,
+  correccion_en_chat: -1,
+  // Investigador de productos: what happened after a researched product launched.
+  lanzamiento_acertado: 3,
+  lanzamiento_fallido: -3,
 });
 
 export const HALF_LIFE_DAYS = 30;
@@ -27,6 +36,10 @@ export function aggregateSignals(signals, now) {
   const round = (n) => Math.round(n * 100) / 100;
   return { total: round(total), count: signals.length, byKind: Object.fromEntries(Object.entries(byKind).map(([k, v]) => [k, { count: v.count, sum: round(v.sum) }])) };
 }
+
+/** The user's chat message pushes back on the previous answer ("no, así no", "está mal", "corrige..."): a weak signal (heuristic, -1). */
+const CORRECTION_START = /^\s*(no[\s,.!:]|no$|eso no|esto no|así no|asi no|est[aá] mal|mal[\s,.!:]|incorrecto|corrige|corr[ií]gelo|c[aá]mbialo|rehaz|rehazlo|vuelve a hacerlo|no era)/i;
+export const isChatCorrection = (text) => CORRECTION_START.test(String(text ?? ''));
 
 const tokens = (text) => new Set(String(text ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').split(/[^a-z0-9]+/).filter((t) => t.length > 1));
 

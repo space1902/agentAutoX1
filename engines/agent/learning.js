@@ -7,7 +7,7 @@ import { distill } from './distiller.js';
 import { sanitizeLessonText } from './lesson-filter.js';
 import { entityAdIds, loadDataset, windowMetrics } from './metrics.js';
 import { ACTIONS, budgetChangesIn, detectFollowed, labelOutcome } from './outcome-labeler.js';
-import { aggregateSignals, isReformulation, SIGNAL_WEIGHTS } from './signals.js';
+import { aggregateSignals, isChatCorrection, isReformulation, SIGNAL_WEIGHTS } from './signals.js';
 
 export const ENTITY_TYPES = ['ct', 'ad', 'adset', 'campaign'];
 export const BASELINE_DAYS = 3;
@@ -140,8 +140,13 @@ export function runLearningCycle({ dataDir, store, now = Date.now(), force = fal
 }
 
 export function distillAndStore(store) {
+  return storeCandidates(store, distill(store.labeledOutcomes()));
+}
+
+/** Stores distilled candidates idempotently by key (shared by every agent's distiller). */
+export function storeCandidates(store, candidates) {
   let created = 0;
-  for (const c of distill(store.labeledOutcomes())) {
+  for (const c of candidates) {
     const cur = store.getLessonByKey(c.key);
     if (!cur) {
       store.insertLesson(c);
@@ -201,6 +206,27 @@ export function proposeLesson(store, text, evidence = {}) {
   return { id, estado: 'candidate', nota: 'Quedó como candidata: el usuario decide si se aprende.' };
 }
 
+const normalizeQuote = (s) => String(s ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+
+/**
+ * A rule the USER stated explicitly in this chat. The agent only transcribes it: the quote must literally appear in one of the
+ * user's messages of the session (checked here, not by the model). It is a candidate like any other lesson, but as a user rule
+ * it needs no minimum number of cases to be certified (see canCertify).
+ */
+export function proposeUserRule(store, { sessionId, text, quote }) {
+  const q = normalizeQuote(quote);
+  if (q.length < 20 || q.split(' ').length < 4) return { error: 'Indica en quote la frase textual del usuario (mínimo 4 palabras y 20 caracteres).' };
+  const said = sessionId ? store.messages(sessionId).filter((m) => m.role === 'user').some((m) => ` ${normalizeQuote(m.text)} `.includes(` ${q} `)) : false;
+  if (!said) return { error: 'No encuentro esa frase en lo que escribió el usuario en este chat. Solo puedo registrar reglas que dijo textualmente.' };
+  const check = sanitizeLessonText(text, { trusted: true });
+  if (!check.ok) return { error: `No puedo registrar esa regla: ${check.reason}.` };
+  const key = `user:${hash(check.text)}`;
+  const cur = store.getLessonByKey(key);
+  if (cur) return { id: cur.id, estado: cur.status, repetida: true };
+  const id = store.insertLesson({ key, text: check.text, kind: 'rule', source: 'user', scope: 'reglas', weight: 3, evidence: { support: 1, quote: String(quote).slice(0, 200) } });
+  return { id, estado: 'candidate', nota: 'Quedó como candidata: el usuario confirma con «¿Aprendo esto?» en la pestaña Lecciones.' };
+}
+
 // ---------------------------------------------------------------- feedback
 
 const RATING_KINDS = ['pulgar_arriba', 'pulgar_abajo', 'correccion'];
@@ -237,6 +263,16 @@ export function noteReformulation(store, { sessionId, userMessageId, text, now =
   return true;
 }
 
+/** A chat message that pushes back on the previous answer counts as a weak correction signal on it. */
+export function noteCorrection(store, { sessionId, userMessageId, text }) {
+  if (!isChatCorrection(text)) return false;
+  const msgs = store.messages(sessionId);
+  const prev = msgs.findLast((m) => m.role === 'assistant' && m.id < userMessageId);
+  if (!prev) return false;
+  store.addSignal({ sessionId, messageId: prev.id, kind: 'correccion_en_chat', weight: SIGNAL_WEIGHTS.correccion_en_chat, note: String(text).replace(/s+/g, ' ').trim().slice(0, 200) });
+  return true;
+}
+
 export function learningSummary(store, now = Date.now()) {
   const lessons = store.lessons();
   const outcomes = store.labeledOutcomes();
@@ -252,19 +288,30 @@ export function learningSummary(store, now = Date.now()) {
 
 // ---------------------------------------------------------------- hooks for the turn runner
 
-export function makeHooks() {
+/**
+ * Hooks of the turn runner. `profile` parametrizes the loop per agent (the Analista passes nothing and behaves as always):
+ *   refresh({ store })   re-reads the agent's own outcomes and stores new lesson candidates (creativo, investigador)
+ *   chatCorrections      also count "no, así no" style messages as weak correction signals
+ */
+export function makeHooks(profile = {}) {
   return {
     lessons: ({ store }) => certifiedLessons(store),
     onUserMessage: ({ store, sessionId, userMessageId, text }) => {
       try {
+        if (profile.chatCorrections) noteCorrection(store, { sessionId, userMessageId, text });
         noteReformulation(store, { sessionId, userMessageId, text });
       } catch {
         /* learning must never break a turn */
       }
     },
-    onTurnDone: ({ store, sessionId, messageId, meta }) => {
+    onTurnDone: ({ store, dataDir, sessionId, messageId, meta }) => {
       try {
         store.attachRecommendations(sessionId, messageId);
+        try {
+          profile.refresh?.({ store, dataDir });
+        } catch {
+          /* a failing distiller must not hide the answer */
+        }
         if (meta.ungrounded?.length) store.addSignal({ sessionId, messageId, kind: 'cifra_sin_fuente', weight: SIGNAL_WEIGHTS.cifra_sin_fuente, note: meta.ungrounded.join(', ').slice(0, 200) });
         const fresh = store.unshownCandidates();
         store.markShown(fresh.map((l) => l.id));

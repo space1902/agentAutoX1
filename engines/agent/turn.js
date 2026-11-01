@@ -185,7 +185,7 @@ export async function runTurn({ dataDir, agentId, sessionId, text, emit, registe
     };
     const messageId = store.addMessage({ sessionId, role: 'assistant', text: answer, meta });
     store.attachSources(sessionId, messageId);
-    const extra = hooks.onTurnDone?.({ store, sessionId, messageId, userMessageId, text: answer, meta }) ?? {};
+    const extra = hooks.onTurnDone?.({ store, dataDir, sessionId, messageId, userMessageId, text: answer, meta }) ?? {};
     emit({ type: 'done', sessionId, messageId, text: answer, meta, ...extra });
     return { ok: true, sessionId, messageId };
   } catch (error) {
