@@ -36,6 +36,8 @@ export interface PlanInfo {
 
 export interface MessageMeta {
   usage?: Usage;
+  /** Tokens of the first model call of the turn (system prompt, tool schemas, skills): what every inner turn re-reads. */
+  baseContext?: number;
   durationMs?: number;
   turns?: number;
   steps?: StepInfo[];
@@ -64,6 +66,35 @@ export interface AnalistaSettings {
   model: string;
   web: boolean;
   learning: boolean;
+  /** Agente creativo only: Codex (image generation with the ChatGPT plan). */
+  codexModel?: string;
+  codexEffort?: string;
+  codexHome?: string;
+  codexPath?: string;
+}
+
+/** What the creativo asks the user to approve before generating anything. */
+export interface ProposalItem {
+  id: number;
+  tool: "generate_image" | "design_pdf_asset" | "generate_voice";
+  label: string;
+  units: { images?: number; chars?: number; credits?: number };
+  status: string;
+}
+
+export interface Proposal {
+  id: number;
+  ts: number;
+  summary: string;
+  status: "pending" | "approved" | "rejected";
+  items: ProposalItem[];
+}
+
+export interface CodexStatus {
+  found: boolean;
+  loggedIn: boolean;
+  codexHome: string;
+  message: string;
 }
 
 export interface AnalistaStatus {
@@ -82,6 +113,7 @@ export type TurnEvent =
   | { type: "text"; delta: string }
   | { type: "step"; id: string; tool: string; label: string }
   | { type: "step_done"; id: string; tool: string; ok: boolean; summary: string }
+  | { type: "proposal"; id: number }
   | { type: "plan"; status: string | null; fiveHour: number | null; resetsAt: number | null }
   | { type: "result"; ok: boolean; text: string; durationMs: number; turns: number; usage: Usage }
   | { type: "done"; sessionId: string; messageId: number; text: string; meta: MessageMeta; newCandidates?: number; candidateIds?: number[] }
@@ -252,6 +284,9 @@ export function makeAgentApi(agentId: string) {
     evalDetail: (runId: number) => call<{ run: EvalRun | null; results: EvalResult[] }>("eval-run-detail", { runId }),
     onEval: (cb: (event: EvalEvent) => void): Promise<UnlistenFn> => mine<EvalEvent>("agent-eval-status", cb),
     onEvalExit: (cb: () => void): Promise<UnlistenFn> => mine<object>("agent-eval-exit", () => cb()),
+    proposals: (status?: string) => call<{ proposals: Proposal[] }>("proposals", status ? { status } : {}),
+    decideProposal: (id: number, approve: boolean) => call<{ id: number; status: string }>("proposal-decide", { id, approve }),
+    codexStatus: () => call<CodexStatus>("codex-status"),
     settings: () => call<{ settings: AnalistaSettings }>("settings-get"),
     saveSettings: (partial: Partial<AnalistaSettings>) => call<{ settings: AnalistaSettings }>("settings-set", partial),
     start: (command: "turn" | "eval-run", payload: Record<string, unknown>) => invoke<number>("agent_start", { agentId, command, payload }),

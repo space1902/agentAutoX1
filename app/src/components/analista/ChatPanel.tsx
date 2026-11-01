@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Loader2, MessageSquarePlus, Send, Square, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, Loader2, MessageSquarePlus, Send, ShieldQuestion, Square, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { errorText } from "../../lib/api";
 import {
@@ -11,6 +11,7 @@ import {
   type AgentSession,
   type AnalistaStatus,
   type PlanInfo,
+  type Proposal,
   type StepInfo,
   type TurnEvent,
 } from "../../lib/agentApi";
@@ -44,9 +45,39 @@ function UsageFooter({ meta }: { meta: AgentMessage["meta"] }) {
   if (meta.durationMs) parts.push(formatDuration(meta.durationMs));
   if (meta.turns) parts.push(`${meta.turns} ${meta.turns === 1 ? "turno" : "turnos"}`);
   if (meta.usage) parts.push(`${formatTokens(meta.usage.total)} tokens (${formatTokens(meta.usage.output)} de respuesta)`);
+  if (meta.baseContext) parts.push(`contexto base ${formatTokens(meta.baseContext)}`);
   const plan: PlanInfo | null | undefined = meta.plan;
   if (plan && plan.fiveHour !== null) parts.push(`plan: ${Math.round(plan.fiveHour * 100)} % de la ventana de 5 h`);
   return <p className="an-usage">{parts.join(" · ")}</p>;
+}
+
+/** Totals shown on the approval card: what would be generated and what it costs. */
+function totalsOf(p: Proposal) {
+  return p.items.reduce((t, i) => ({ images: t.images + (i.units.images ?? 0), chars: t.chars + (i.units.chars ?? 0), credits: t.credits + (i.units.credits ?? 0) }), { images: 0, chars: 0, credits: 0 });
+}
+
+function ApprovalCard({ proposal, disabled, onDecide }: { proposal: Proposal; disabled: boolean; onDecide: (approve: boolean) => void }) {
+  const t = totalsOf(proposal);
+  const parts: string[] = [];
+  if (t.images) parts.push(`${t.images} ${t.images === 1 ? "imagen" : "imágenes"} (usan tu plan de ChatGPT, sin costo en dinero)`);
+  if (t.chars) parts.push(`${formatTokens(t.chars)} caracteres de audio = unos ${formatTokens(t.credits)} créditos de ElevenLabs (de pago)`);
+  return (
+    <article className="an-msg assistant an-approval" aria-label={`Propuesta ${proposal.id} pendiente de aprobación`}>
+      <h3><ShieldQuestion size={16} aria-hidden /> Aprobar generación #{proposal.id}</h3>
+      {proposal.summary && <p>{proposal.summary}</p>}
+      <ul>
+        {proposal.items.map((i) => (
+          <li key={i.id}>{i.label}</li>
+        ))}
+      </ul>
+      <p><strong>Se generará:</strong> {parts.join(" y ")}.</p>
+      <div className="an-approval-actions">
+        <button className="btn" disabled={disabled} onClick={() => onDecide(true)}><Check size={14} aria-hidden /> Aprobar</button>
+        <button className="btn ghost" disabled={disabled} onClick={() => onDecide(false)}><X size={14} aria-hidden /> Rechazar</button>
+      </div>
+      <small className="muted">Cada aprobación sirve una sola vez y solo para estos pedidos exactos.</small>
+    </article>
+  );
 }
 
 export default function ChatPanel({ api, agent, learning, onGoSettings, onLearningChange }: { api: AgentApi; agent?: AgentInfo; learning: boolean; onGoSettings: () => void; onLearningChange: () => void }) {
@@ -63,6 +94,8 @@ export default function ChatPanel({ api, agent, learning, onGoSettings, onLearni
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<AnalistaStatus | null>(null);
   const [candidateIds, setCandidateIds] = useState<number[]>([]);
+  const [pending, setPending] = useState<Proposal[]>([]);
+  const hasApprovals = api.agentId === "creativo";
   const bottom = useRef<HTMLDivElement>(null);
   const activeRef = useRef<string | null>(null);
   activeRef.current = activeId;
@@ -74,6 +107,15 @@ export default function ChatPanel({ api, agent, learning, onGoSettings, onLearni
       setError(errorText(e));
     }
   }, []);
+
+  const loadPending = useCallback(async () => {
+    if (!hasApprovals) return;
+    try {
+      setPending((await api.proposals("pending")).proposals);
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }, [hasApprovals]);
 
   const openSession = useCallback(async (id: string | null) => {
     setActiveId(id);
@@ -88,9 +130,10 @@ export default function ChatPanel({ api, agent, learning, onGoSettings, onLearni
 
   useEffect(() => {
     void loadSessions();
+    void loadPending();
     void api.status().then(setStatus).catch((e) => setError(errorText(e)));
     void api.running().then((s) => setRunning(s.chat.running)).catch(() => undefined);
-  }, [loadSessions]);
+  }, [loadSessions, loadPending]);
 
   useEffect(() => {
     const unlisten = [
@@ -108,7 +151,11 @@ export default function ChatPanel({ api, agent, learning, onGoSettings, onLearni
           case "step_done":
             setLive((l) => (l ? { ...l, steps: l.steps.map((s) => (s.id === ev.id ? { ...s, ok: ev.ok, summary: ev.summary } : s)) } : l));
             break;
+          case "proposal":
+            void loadPending();
+            break;
           case "done":
+            void loadPending();
             setCandidateIds(ev.candidateIds ?? []);
             setLive(null);
             setRunning(false);
@@ -136,7 +183,7 @@ export default function ChatPanel({ api, agent, learning, onGoSettings, onLearni
       }),
     ];
     return () => unlisten.forEach((p) => void p.then((fn) => fn()));
-  }, [loadSessions, openSession, onLearningChange]);
+  }, [loadSessions, loadPending, openSession, onLearningChange]);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
@@ -157,6 +204,19 @@ export default function ChatPanel({ api, agent, learning, onGoSettings, onLearni
       setError(errorText(e));
       setRunning(false);
       setLive(null);
+    }
+  }
+
+  async function decide(proposal: Proposal, approve: boolean) {
+    setError(null);
+    try {
+      await api.decideProposal(proposal.id, approve);
+      setPending((all) => all.filter((p) => p.id !== proposal.id));
+      // Approving continues the work: the agent resumes with the exact arguments it proposed.
+      if (approve) await send(`Aprobado #${proposal.id}`);
+    } catch (e) {
+      setError(errorText(e));
+      void loadPending();
     }
   }
 
@@ -242,6 +302,10 @@ export default function ChatPanel({ api, agent, learning, onGoSettings, onLearni
                 </>
               )}
             </article>
+          ))}
+
+          {!live && pending.map((p) => (
+            <ApprovalCard key={p.id} proposal={p} disabled={running} onDecide={(approve) => void decide(p, approve)} />
           ))}
 
           {live && (

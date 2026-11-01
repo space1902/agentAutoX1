@@ -1,7 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence, motion } from "framer-motion";
-import { BarChart3, BrainCircuit, Cpu, Flame, Hash, LogOut, MessageCircleMore, Settings as SettingsIcon, Smartphone, type LucideIcon } from "lucide-react";
+import { AudioLines, BarChart3, BrainCircuit, Cpu, Flame, Hash, LogOut, MessageCircleMore, Settings as SettingsIcon, Smartphone, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { api, type LogLine, type PairingCard } from "./lib/api";
 import { usePodCreation } from "./lib/podCreation";
@@ -14,8 +14,9 @@ import IA from "./sections/IA";
 import CalentadorBots from "./sections/CalentadorBots";
 import MultiWhatsApp from "./sections/MultiWhatsApp";
 import Numeros from "./sections/Numeros";
+import Voces from "./sections/Voces";
 
-type SectionId = "pods" | "bots" | "numeros" | "anuncios" | "agentes" | "ia" | "ajustes";
+type SectionId = "pods" | "bots" | "numeros" | "anuncios" | "agentes" | "voces" | "ia" | "ajustes";
 
 const SECTIONS: { id: SectionId; label: string; icon: LucideIcon }[] = [
   { id: "pods", label: "MultiWhatsApp", icon: Smartphone },
@@ -23,6 +24,7 @@ const SECTIONS: { id: SectionId; label: string; icon: LucideIcon }[] = [
   { id: "numeros", label: "Números", icon: Hash },
   { id: "anuncios", label: "Anuncios", icon: BarChart3 },
   { id: "agentes", label: "Agentes", icon: BrainCircuit },
+  { id: "voces", label: "Voces", icon: AudioLines },
   { id: "ia", label: "IA", icon: Cpu },
   { id: "ajustes", label: "Ajustes", icon: SettingsIcon },
 ];
@@ -127,6 +129,7 @@ export default function App() {
             {section === "numeros" && <Numeros />}
             {section === "anuncios" && <Anuncios />}
             {section === "agentes" && <Agentes />}
+            {section === "voces" && <Voces />}
             {section === "ia" && <IA warmupRunning={warmup.running} />}
             {section === "ajustes" && <Ajustes theme={theme} onTheme={setTheme} />}
             </ErrorBoundary>

@@ -1,7 +1,7 @@
 import { Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
-import { type AgentApi, type AgentInfo, type AnalistaSettings, type AnalistaStatus } from "../../lib/agentApi";
+import { type AgentApi, type AgentInfo, type AnalistaSettings, type AnalistaStatus, type CodexStatus } from "../../lib/agentApi";
 import { Card, Notice, Pill, Skeleton } from "../ui";
 
 const MODELS = [
@@ -11,6 +11,13 @@ const MODELS = [
   { id: "haiku", label: "Haiku (rápido y liviano)" },
 ];
 
+const EFFORTS = [
+  { id: "minimal", label: "Mínimo" },
+  { id: "low", label: "Bajo (recomendado)" },
+  { id: "medium", label: "Medio" },
+  { id: "high", label: "Alto" },
+];
+
 export default function AnalistaSettingsPanel({ api, agent, showLearning = true, onSaved }: { api: AgentApi; agent?: AgentInfo; showLearning?: boolean; onSaved: (s: AnalistaSettings) => void }) {
   const label = agent?.shortName ?? "Analista";
   const [status, setStatus] = useState<AnalistaStatus | null>(null);
@@ -18,6 +25,9 @@ export default function AnalistaSettingsPanel({ api, agent, showLearning = true,
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [codex, setCodex] = useState<CodexStatus | null>(null);
+  const creativo = api.agentId === "creativo";
+  const models = creativo ? MODELS.filter((m) => m.id !== "") : MODELS;
 
   useEffect(() => {
     api
@@ -30,6 +40,20 @@ export default function AnalistaSettingsPanel({ api, agent, showLearning = true,
   }, []);
 
   if (!form) return error ? <Notice>{error}</Notice> : <Skeleton height={240} />;
+
+  async function checkCodex() {
+    setBusy(true);
+    setError(null);
+    try {
+      // Save first so the check uses the folder and path just typed.
+      if (form) await api.saveSettings(form);
+      setCodex(await api.codexStatus());
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function save() {
     if (!form) return;
@@ -69,13 +93,49 @@ export default function AnalistaSettingsPanel({ api, agent, showLearning = true,
 
       <div className="field">
         <label htmlFor="an-model">Modelo</label>
-        <select id="an-model" className="input" value={MODELS.some((m) => m.id === form.model) ? form.model : ""} onChange={(e) => setForm({ ...form, model: e.target.value })}>
-          {MODELS.map((m) => (
+        <select id="an-model" className="input" value={models.some((m) => m.id === form.model) ? form.model : creativo ? "sonnet" : ""} onChange={(e) => setForm({ ...form, model: e.target.value })}>
+          {models.map((m) => (
             <option key={m.id} value={m.id}>{m.label}</option>
           ))}
         </select>
-        <small>Cada pregunta gasta del límite de tu plan; un modelo más pequeño rinde más preguntas.</small>
+        <small>Cada pregunta gasta del límite de tu plan; un modelo más pequeño rinde más preguntas.{creativo ? " Sonnet es el recomendado para este agente." : ""}</small>
       </div>
+
+      {creativo && (
+        <>
+          <h3>Imágenes con GPT (Codex)</h3>
+          <p className="muted">Las imágenes y el arte de los PDF se generan con Codex usando tu plan de ChatGPT, no una clave de API. Si no has entrado, abre una terminal y ejecuta <code>codex login</code>.</p>
+          <div className="field">
+            <label htmlFor="cx-model">Modelo de Codex</label>
+            <input id="cx-model" className="input" value={form.codexModel ?? ""} onChange={(e) => setForm({ ...form, codexModel: e.target.value })} />
+          </div>
+          <div className="field">
+            <label htmlFor="cx-effort">Esfuerzo de razonamiento</label>
+            <select id="cx-effort" className="input" value={form.codexEffort ?? "low"} onChange={(e) => setForm({ ...form, codexEffort: e.target.value })}>
+              {EFFORTS.map((m) => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
+            </select>
+            <small>Se envía siempre de forma explícita para no heredar el ajuste de tu configuración de Codex.</small>
+          </div>
+          <div className="field">
+            <label htmlFor="cx-home">Carpeta de Codex (CODEX_HOME, opcional)</label>
+            <input id="cx-home" className="input" value={form.codexHome ?? ""} placeholder="Vacío = la variable CODEX_HOME de tu sistema o ~/.codex" onChange={(e) => setForm({ ...form, codexHome: e.target.value })} />
+          </div>
+          <div className="field">
+            <label htmlFor="cx-path">Ruta de Codex (opcional)</label>
+            <input id="cx-path" className="input" value={form.codexPath ?? ""} placeholder="Vacío = buscarlo solo (PATH, npm)" onChange={(e) => setForm({ ...form, codexPath: e.target.value })} />
+          </div>
+          <div className="field">
+            <button type="button" className="btn secondary sm" disabled={busy} onClick={() => void checkCodex()}>Comprobar Codex</button>
+            {codex && (
+              <small>
+                {codex.loggedIn ? <Pill tone="green">Listo</Pill> : <Pill tone="red">Falta</Pill>} {codex.message} <code>{codex.codexHome}</code>
+              </small>
+            )}
+          </div>
+        </>
+      )}
 
       <div className="field">
         <button type="button" className="switch" role="switch" aria-checked={form.web} onClick={() => setForm({ ...form, web: !form.web })}>
