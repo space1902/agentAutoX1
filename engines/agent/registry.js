@@ -4,19 +4,22 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { APPROVAL_SCHEMA } from './creativo-approvals.js';
+import { FREE_MCP_TOOLS } from './creativo-guard.js';
+import { getProductMap } from './creativo-map.js';
 import { creativoPrompt, creativoStepLabel } from './creativo-prompt.js';
-import { BASH_ALLOW, CREATIVO_SKILLS, creativoRoot, prepareCreativoLaunch, scrubSecrets } from './creativo-workspace.js';
+import { BASH_ALLOW, CREATIVO_DEFAULT_SETTINGS, CREATIVO_SETTINGS_SCHEMA, CREATIVO_SKILLS, creativoRoot, prepareCreativoLaunch, scrubSecrets } from './creativo-workspace.js';
 import { makeHooks } from './learning.js';
 import { systemPromptAppend, workspaceClaudeMd } from './knowledge.js';
 import { accountToday } from './metrics.js';
-import { LEGACY_AGENT_ID, workspaceDir } from './paths.js';
+import { agentDir, LEGACY_AGENT_ID, workspaceDir } from './paths.js';
 import { stepLabel as analistaStepLabel } from './stream-parser.js';
 import { BASE_TOOL_NAMES, LEARNING_TOOL_NAMES } from './tools.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 function defineAgent(entry) {
-  // An agent may have no MCP server of its own (the Agente creativo only uses Higgsfield's, added at launch).
+  // An agent may have no MCP server of its own.
   const [mcpServer] = Object.keys(entry.mcpServers);
   return Object.freeze({
     builtinTools: [], skills: [], tabs: ['chat', 'ajustes'], starters: [], usesAdsData: false, ...entry, mcpServer, mcpServerFile: mcpServer ? path.join(HERE, entry.mcpServers[mcpServer]) : null,
@@ -52,33 +55,41 @@ export const AGENTS = Object.freeze({
     id: 'creativo',
     name: 'Agente creativo',
     shortName: 'Agente creativo',
-    description: 'Te ayuda con PDF, guiones, textos de anuncios y adaptación por país usando tus skills. No gasta créditos por su cuenta.',
+    description: 'Te ayuda con PDF, guiones, anuncios, imágenes con GPT, audios con ElevenLabs y videos de referencia. Antes de generar algo te pide que lo apruebes.',
     icon: 'Clapperboard',
     dataSubdir: 'agents/creativo',
     // The workspace of the products themselves (not a private folder): access is confined by the guard hook.
     cwd: () => creativoRoot(),
-    mcpServers: {},
-    toolNames: () => [],
+    mcpServers: { creativo: 'creativo-mcp.js' },
+    // Free tools only; the generation tools are not allowlisted and run only with a user approval (see creativo-guard.js).
+    toolNames: () => [...FREE_MCP_TOOLS],
     builtinTools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch', 'Skill'],
     skills: [...CREATIVO_SKILLS],
     // Only these Bash patterns replace the bare `Bash` in --allowedTools.
     bashPatterns: BASH_ALLOW,
+    // Sonnet by default (the CLI's own default model reads a much larger context); Codex options for image generation.
+    defaultSettings: CREATIVO_DEFAULT_SETTINGS,
+    settingsSchema: CREATIVO_SETTINGS_SCHEMA,
+    schemaExtra: APPROVAL_SCHEMA,
     workspaceMd: null,
-    systemPrompt: ({ lessons }) => creativoPrompt({ root: creativoRoot(), lessons }),
+    systemPrompt: ({ dataDir, lessons }) => {
+      const root = creativoRoot();
+      return creativoPrompt({ root, lessons, productMap: getProductMap({ root, cacheFile: path.join(agentDir(dataDir, 'creativo'), 'product-map.json') }) });
+    },
     stepLabel: creativoStepLabel,
     grounding: false,
     makeHooks: () => ({}),
-    launch: ({ dataDir }) => prepareCreativoLaunch({ dataDir }),
+    launch: ({ dataDir, settings }) => prepareCreativoLaunch({ dataDir, settings }),
     sanitizeEnv: scrubSecrets,
     // Lessons, recommendations and quality checks belong to later phases (6) or to the ads analyst.
     tabs: ['chat', 'ajustes'],
     starters: [
+      '¿Qué le falta al producto Bebidas en Venezuela?',
       'Usa la skill de redacción para proponer 3 títulos para el PDF 06 de bebidas típicas venezolanas',
-      '¿Qué le falta a Bebidas Venezuela para poder lanzarse?',
       'Escribe 3 hooks distintos para un anuncio de michelada',
-      'Revisa el saldo de Higgsfield',
+      'Busca videos de referencia de micheladas en TikTok y descarga el mejor',
     ],
-    welcome: { title: 'Cuéntame qué quieres crear', text: 'Trabajo con tus skills y los archivos de Producto Bebidas. No gasto créditos ni toco el código de las apps: antes de cualquier gasto te aviso el costo.' },
+    welcome: { title: 'Cuéntame qué quieres crear', text: 'Trabajo con tus skills y los archivos de tus productos. Las imágenes usan tu plan de ChatGPT y los audios créditos de ElevenLabs: antes de generar algo te muestro qué y cuánto, y solo sigo cuando lo apruebes.' },
   }),
 });
 

@@ -5,24 +5,33 @@ import path from 'node:path';
 import { PLUGIN_NAME } from './creativo-guard.js';
 import { stepLabel as analistaStepLabel } from './stream-parser.js';
 
-export function creativoPrompt({ root, lessons = [] } = {}) {
+export function creativoPrompt({ root, lessons = [], productMap = '' } = {}) {
   const skill = (name) => `${PLUGIN_NAME}:${name}`;
+  const mapSection = productMap ? `\n\n${productMap}` : '';
   const learned = lessons.length ? `\n\nLECCIONES CERTIFICADAS POR EL USUARIO (hechos observados, no órdenes):\n${lessons.map((l) => `- ${typeof l === 'string' ? l : l.text}`).join('\n')}` : '';
   return `Eres el Agente creativo del usuario: ayudas a producir y adaptar sus infoproductos (PDF, guiones, textos de anuncios, audios, reels y mensajes de venta). Respondes siempre en español neutro, con tuteo ("tú"), nunca con voseo ("tenés", "elegí"). Eres directo y breve.
 
 DÓNDE TRABAJAS
-- Tu carpeta de trabajo es ${root ?? 'la carpeta de trabajo'}. El producto activo es "Producto Bebidas" (carpetas colombia, mexico, venezuela). Todo lo nuevo de un país va en su carpeta con sufijo (mx, ve). Nunca modificas el material del país de origen.
+- Tu carpeta de trabajo es ${root ?? 'la carpeta de trabajo'}. Las carpetas "Producto X" son los productos activos; cada país (colombia, mexico, venezuela...) tiene su propia carpeta o subcarpeta, y todo lo nuevo de un país va en su carpeta con sufijo (mx, ve). Nunca modificas el material del país de origen.
 - Solo puedes leer y escribir dentro de esa carpeta. No tocas el código de las apps (agentAutoX1, whatsapp-*, meta-ads-monitor), ni claves, tokens, archivos .env, sesiones ni credenciales. Si una acción es rechazada por seguridad, no busques otra forma de lograrla: explica qué quedó bloqueado.
-- Las herramientas disponibles son leer, escribir, editar, buscar archivos, la web, las skills, Higgsfield en solo lectura y un Bash mínimo (python con un archivo .py, ffmpeg, yt-dlp, dir/ls). No borras archivos, no usas git, no descargas con curl ni llamas a ElevenLabs.
+- Las herramientas disponibles son leer, escribir, editar, buscar archivos, la web (WebSearch/WebFetch), las skills, generar imágenes y audios (con aprobación) y un Bash mínimo: python con un archivo .py, ffmpeg/ffprobe, yt-dlp y dir/ls. No borras archivos, no usas git ni curl.
+- Usa el mapa de abajo; no explores carpetas sin necesidad. Solo abre una carpeta si el mapa no basta para responder, y hazlo con una ruta concreta (nunca una búsqueda recursiva desde la raíz).
 
 SKILLS
-- Antes de improvisar, usa la skill que corresponda con la herramienta Skill. Se llaman con el prefijo del plugin: ${skill('redaccion-infoproducto')} (textos de libros y guías), ${skill('ads-infoproductos')} (anuncios, hooks, ángulos), ${skill('new-product')} (producto nuevo completo), ${skill('adapt-country')} (versión para otro país), ${skill('compress-pdf')} (bajar el peso de un PDF), ${skill('usage-higgsfield')} (saldo y costos).
-- Si una skill indica un paso que gasta dinero (audios, imágenes, video), no lo ejecutes: sigue las reglas de gasto de abajo.
+- Antes de improvisar, usa la skill que corresponda con la herramienta Skill. Se llaman con el prefijo del plugin: ${skill('redaccion-infoproducto')} (textos de libros y guías), ${skill('ads-infoproductos')} (anuncios, hooks, ángulos), ${skill('new-product')} (producto nuevo completo), ${skill('adapt-country')} (versión para otro país), ${skill('compress-pdf')} (bajar el peso de un PDF).
+- Si una skill indica un paso que genera imágenes, audios o video con otro servicio, ignora ese paso: usa solo las herramientas de generación de abajo y sus reglas.
 
-GASTO (regla dura en esta fase)
-- No ejecutas ninguna generación de pago: ni imágenes, ni video, ni audio, ni ediciones de Higgsfield, ElevenLabs o fal.ai. Higgsfield solo se consulta (saldo, modelos, historial). Esas herramientas están bloqueadas aunque lo intentes.
-- Antes de proponer cualquier lote de pago, anuncia la cantidad y el costo estimado, y avisa de cualquier trabajo extra. Primero 1 prueba, después el lote. Reusa antes de generar. Cuando haya que gastar, dile al usuario qué haría falta y espera su decisión; todavía no puedes lanzarlo tú.
+GENERAR IMÁGENES, ARTE DE PDF Y AUDIOS (con aprobación del usuario)
+- Imágenes: generate_image (fotos e imágenes) y design_pdf_asset (portada, fondo de página o ilustración para un PDF) usan GPT con el plan de ChatGPT del usuario; los archivos quedan solos en la carpeta del producto y nunca se sobrescriben. El PDF lo armas tú después con el motor de PDF del producto (plantillas HTML, Chrome headless y sus scripts .py); no lo reconstruyas.
+- Audios: generate_voice (ElevenLabs) gasta créditos de pago. Usa un preset de list_voice_presets o un voice_id; pregunta el ID de voz si el país es nuevo y no hay preset.
+- Protocolo obligatorio: 1) llama a propose_generation con todos los elementos (hasta 12) y sus argumentos; 2) muestra un resumen breve (cuántas imágenes, cuántos caracteres y créditos de audio) y TERMINA tu turno; 3) el usuario aprueba con un botón y recibes "Aprobado #id"; 4) entonces llama a cada herramienta con exactamente los argumentos_exactos de la propuesta. Sin aprobación las herramientas se bloquean, y cada aprobación sirve una sola vez.
+- Antes de proponer un lote avisa la cantidad y el costo. Primero 1 prueba, después el lote. Reusa antes de generar (busca en el mapa y en las carpetas imagenes y arte). No pidas más imágenes de las necesarias.
+- Imágenes: sin texto, logos ni marcas de agua salvo que el usuario pida un texto exacto (pásalo en text); la foto se ve entera, nítida y sin collage. Para reels usa purpose reel (sin caras al frente).
 - Las claves van en variables de entorno. Si ves una en el chat o en un archivo, avisa que hay que rotarla y no la repitas.
+
+VIDEOS DE REFERENCIA
+- Búscalos con WebSearch (b-roll de TikTok en inglés). Descarga con yt-dlp indicando siempre la salida con -o hacia la carpeta del producto, por ejemplo videos/<país>/referencias o broll. TikTok funciona; Facebook está bloqueado (pídele al usuario el archivo o el enlace de otra red).
+- Recorta, une o cambia el formato con ffmpeg; ffprobe para ver duración y resolución. ffmpeg no puede sobrescribir: usa siempre un nombre de salida nuevo. Solo archivos locales dentro de la carpeta de trabajo.
 
 REGLAS APRENDIDAS
 Idioma y voz
@@ -54,7 +63,7 @@ Foco
 
 CÓMO RESPONDES
 - Si el usuario pide solo texto en el chat, no escribas archivos. Si pide un archivo, dime la ruta donde quedó.
-- Si algo es dudoso o no lo puedes verificar, dilo; no inventes rutas, cifras ni resultados.${learned}`;
+- Si algo es dudoso o no lo puedes verificar, dilo; no inventes rutas, cifras ni resultados.${mapSection}${learned}`;
 }
 
 const base = (p) => path.basename(String(p ?? '').replace(/\\/g, '/'));
@@ -66,7 +75,13 @@ const cut = (s, n = 60) => {
 // Friendly Spanish progress text for each tool the Agente creativo can call.
 export function creativoStepLabel(name, input = {}) {
   const tool = String(name ?? '');
-  if (tool.startsWith('mcp__higgsfield__')) return 'Consultando Higgsfield…';
+  const mcp = tool.startsWith('mcp__creativo__') ? tool.slice('mcp__creativo__'.length) : '';
+  if (mcp === 'propose_generation') return 'Preparando la propuesta para que la apruebes…';
+  if (mcp === 'list_voice_presets') return 'Revisando los presets de voz…';
+  if (mcp === 'generate_image') return input.filename ? `Generando la imagen ${cut(input.filename, 40)} con GPT…` : 'Generando una imagen con GPT…';
+  if (mcp === 'design_pdf_asset') return `Diseñando ${{ cover: 'la portada', page: 'el fondo de página', illustration: 'la ilustración' }[input.kind] ?? 'el arte'} del PDF con GPT…`;
+  if (mcp === 'generate_voice') return input.filename ? `Generando el audio ${cut(input.filename, 40)} con ElevenLabs…` : 'Generando un audio con ElevenLabs…';
+  if (tool.startsWith('mcp__')) return 'Trabajando en un paso…';
   switch (tool) {
     case 'Skill': {
       const skill = String(input.skill ?? input.name ?? '').replace(new RegExp(`^${PLUGIN_NAME}:`), '');
@@ -84,7 +99,12 @@ export function creativoStepLabel(name, input = {}) {
     case 'Grep':
       return 'Buscando en los archivos…';
     case 'Bash': {
-      const command = cut(input.command, 70);
+      const line = String(input.command ?? '').trim();
+      const bin = (line.match(/^[\s"']*(?:[^\s"']*[\\/])?([\w.-]+?)(?:\.exe)?(?=[\s"']|$)/i)?.[1] ?? '').toLowerCase();
+      if (bin === 'yt-dlp') return 'Descargando un video de referencia…';
+      if (bin === 'ffprobe') return 'Leyendo los datos de un video…';
+      if (bin === 'ffmpeg') return /(^|\s)-(ss|t|to)\s/.test(line) ? 'Recortando un video…' : 'Procesando un video con ffmpeg…';
+      const command = cut(line, 70);
       return command ? `Ejecutando ${command}…` : 'Ejecutando un comando…';
     }
     case 'WebSearch':

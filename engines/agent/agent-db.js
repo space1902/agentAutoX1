@@ -73,11 +73,13 @@ const lessonRow = (r) => ({
 
 const MAX_SOURCE_CHARS = 120_000;
 
-export function createAgentStore(file = ':memory:', { now = Date.now } = {}) {
+export function createAgentStore(file = ':memory:', { now = Date.now, schemaExtra = '' } = {}) {
   if (file !== ':memory:') fs.mkdirSync(path.dirname(file), { recursive: true });
   const db = new DatabaseSync(file);
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  // Tables only one agent owns (e.g. the creativo's generation approvals); the Analista's database never gets them.
+  if (schemaExtra) db.exec(schemaExtra);
   const q = (sql) => db.prepare(sql);
   const tx = (fn) => {
     db.exec('BEGIN');
@@ -264,5 +266,5 @@ export function createAgentStore(file = ':memory:', { now = Date.now } = {}) {
 
 // `agent` = id or registry entry; omitted = the Analista (legacy <data>/analista/agent.db, opened as-is).
 export function openAgentStore(dataDir, options, agent) {
-  return createAgentStore(agentDbPath(dataDir, agent), options);
+  return createAgentStore(agentDbPath(dataDir, agent), { schemaExtra: typeof agent === 'object' ? agent?.schemaExtra : undefined, ...options });
 }

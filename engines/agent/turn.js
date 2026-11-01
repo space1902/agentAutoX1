@@ -104,13 +104,15 @@ export async function runTurn({ dataDir, agentId, sessionId, text, emit, registe
     }
 
     ensureWorkspace(dataDir, cfg, agent);
-    const launch = agent.launch?.({ dataDir }) ?? {};
-    mcpFile = writeMcpConfig(dataDir, { turnId, sessionId, question: text, learning: cfg.learning, extraServers: launch.mcpServers }, agent);
+    const launch = agent.launch?.({ dataDir, settings: cfg }) ?? {};
+    mcpFile = writeMcpConfig(dataDir, { turnId, sessionId, question: text, learning: cfg.learning, toolsEnv: launch.toolsEnv, extraServers: launch.mcpServers }, agent);
+    // An empty model means the CLI's own default, except for agents that declare theirs (the creativo: Sonnet).
+    const model = cfg.model || agent.defaultSettings?.model || '';
     const lessons = cfg.learning && hooks.lessons ? hooks.lessons({ store }) : [];
     const args = [
       ...located.prefixArgs,
       ...buildClaudeArgs({
-        agent, mcpConfigFile: mcpFile, toolNames: agent.toolNames(cfg), web: cfg.web, model: cfg.model, resume: session.claudeSessionId, extra: launch,
+        agent, mcpConfigFile: mcpFile, toolNames: agent.toolNames(cfg), web: cfg.web, model, resume: session.claudeSessionId, extra: launch,
         appendSystemPrompt: agent.systemPrompt({ dataDir, now: now(), lessons, settings: cfg }),
       }),
     ];
@@ -178,7 +180,7 @@ export async function runTurn({ dataDir, agentId, sessionId, text, emit, registe
     for (const r of parser.toolResults) store.addSource({ sessionId, tool: r.tool, text: r.text });
     if (result.claudeSessionId) store.setClaudeSessionId(sessionId, result.claudeSessionId);
     const meta = {
-      usage: result.usage, durationMs: result.durationMs, turns: result.turns, steps, plan: plan ? { fiveHour: plan.fiveHour, resetsAt: plan.resetsAt, status: plan.status } : null, ungrounded: uniqueRaw(figures), model: cfg.model || 'predeterminado',
+      usage: result.usage, ...(result.baseContext ? { baseContext: result.baseContext } : {}), durationMs: result.durationMs, turns: result.turns, steps, plan: plan ? { fiveHour: plan.fiveHour, resetsAt: plan.resetsAt, status: plan.status } : null, ungrounded: uniqueRaw(figures), model: model || 'predeterminado',
     };
     const messageId = store.addMessage({ sessionId, role: 'assistant', text: answer, meta });
     store.attachSources(sessionId, messageId);

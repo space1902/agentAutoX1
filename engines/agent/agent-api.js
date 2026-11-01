@@ -6,6 +6,7 @@ import { locateClaude } from './claude-cli.js';
 import { adsDbPath, agentDbPath } from './paths.js';
 import { getAgent, publicAgents, UnknownAgentError } from './registry.js';
 import { loadSettings, saveSettings, SettingsError } from './settings.js';
+import { createApprovals } from './creativo-approvals.js';
 import { editLesson, learningSummary, recordFeedback, runLearningCycle, setLessonStatus } from './learning.js';
 import { runTurn } from './turn.js';
 import { bankForUi, estimateRun, runEval } from './evals/runner.js';
@@ -14,7 +15,9 @@ import { loadDataset } from './metrics.js';
 export class AgentError extends Error {}
 
 export const STREAMING = ['turn', 'eval-run'];
-const COMMANDS = ['agents-list', 'status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail'];
+const COMMANDS = ['agents-list', 'status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail', 'proposals', 'proposal-decide'];
+// Generation approvals exist only for the agent that generates files.
+const CREATIVO_ONLY = ['proposals', 'proposal-decide'];
 
 const ADS_ONLY = ['queries', 'recommendations', 'learning-run', 'eval-runs', 'eval-run-detail'];
 
@@ -79,8 +82,15 @@ export async function runCommand(command, payload, { dataDir, agentId }) {
   }
   // Ads-metrics commands only make sense for the agent that reads the ads database.
   need(!ADS_ONLY.includes(command) || agent.usesAdsData, 'Ese comando solo existe para el Analista.');
+  need(!CREATIVO_ONLY.includes(command) || agent.id === 'creativo', 'Ese comando solo existe para el Agente creativo.');
   const store = openAgentStore(dataDir, undefined, agent);
   try {
+    if (command === 'proposals') return { proposals: createApprovals(store.db, { now: store.now }).list({ status: payload.status ? String(payload.status) : undefined, limit: Math.min(Number(payload.limit) || 30, 100) }) };
+    if (command === 'proposal-decide') {
+      const res = createApprovals(store.db, { now: store.now }).decide(Number(payload.id), payload.approve === true);
+      need(res.ok, res.error);
+      return { id: Number(payload.id), status: res.status };
+    }
     if (command === 'eval-runs') return { runs: store.evalRuns() };
     if (command === 'eval-run-detail') return { run: store.evalRuns(500).find((r) => r.id === Number(payload.runId)) ?? null, results: store.evalResults(Number(payload.runId)) };
     if (command === 'sessions') return { sessions: store.listSessions() };

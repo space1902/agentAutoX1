@@ -8,7 +8,7 @@ for await (const chunk of process.stdin) chunks.push(chunk);
 const prompt = Buffer.concat(chunks).toString('utf8');
 
 if (process.env.FAKE_CLAUDE_DUMP) {
-  fs.writeFileSync(process.env.FAKE_CLAUDE_DUMP, JSON.stringify({ argv: process.argv.slice(2), prompt, envKeys: Object.keys(process.env), cwd: process.cwd() }));
+  fs.writeFileSync(process.env.FAKE_CLAUDE_DUMP, JSON.stringify({ argv: process.argv.slice(2), prompt, envKeys: Object.keys(process.env), cwd: process.cwd(), mcpConfig: (() => { try { return JSON.parse(fs.readFileSync(process.argv[process.argv.indexOf('--mcp-config') + 1], 'utf8')); } catch { return null; } })() }));
 }
 
 const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);

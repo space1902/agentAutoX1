@@ -6,9 +6,9 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { buildClaudeArgs, childEnv } from './claude-cli.js';
-import { bashDecision, decide, hookOutput, HIGGSFIELD_READ_TOOLS, makeContext, parseCommand, resolvePath } from './creativo-guard.js';
+import { bashDecision, decide, hookOutput, makeContext, parseCommand, resolvePath } from './creativo-guard.js';
 import { creativoPrompt, creativoStepLabel } from './creativo-prompt.js';
-import { buildCreativoPlugin, buildGuardSettings, CREATIVO_SKILLS, higgsfieldAllowedTools, prepareCreativoLaunch, readHiggsfieldServer, scrubSecrets } from './creativo-workspace.js';
+import { buildCreativoPlugin, buildGuardSettings, CREATIVO_SKILLS, prepareCreativoLaunch, scrubSecrets } from './creativo-workspace.js';
 import { AGENTS } from './registry.js';
 import { runTurn } from './turn.js';
 import { makeDataDir } from './seed-fixture.js';
@@ -27,8 +27,8 @@ const mkTmp = (name) => fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
 // ---- args ------------------------------------------------------------------------------------------------------
 
 test('creativo args: skills on (no --disable-slash-commands), plugin, settings, strict MCP and a Bash allowlist', () => {
-  const extra = { pluginDir: 'P', settingsFile: 'S.json', allowedTools: ['Bash(python *)', ...higgsfieldAllowedTools()], mcpServers: {} };
-  const args = buildClaudeArgs({ agent: AGENTS.creativo, mcpConfigFile: 'm.json', toolNames: [], web: true, model: 'haiku', resume: null, appendSystemPrompt: 'X', extra });
+  const extra = { pluginDir: 'P', settingsFile: 'S.json', allowedTools: ['Bash(python *)'], mcpServers: {} };
+  const args = buildClaudeArgs({ agent: AGENTS.creativo, mcpConfigFile: 'm.json', toolNames: AGENTS.creativo.toolNames({}), web: true, model: 'sonnet', resume: null, appendSystemPrompt: 'X', extra });
   const at = (flag) => args[args.indexOf(flag) + 1];
   assert.ok(!args.includes('--disable-slash-commands'));
   assert.ok(args.includes('--strict-mcp-config'));
@@ -41,8 +41,10 @@ test('creativo args: skills on (no --disable-slash-commands), plugin, settings, 
   assert.ok(allowed.includes('Skill') && allowed.includes('Read') && allowed.includes('Write'));
   assert.ok(!allowed.includes('Bash'), 'no unrestricted Bash');
   assert.ok(allowed.includes('Bash(python *)') && allowed.includes('Bash(ffmpeg *)') && allowed.includes('Bash(yt-dlp *)'));
-  assert.ok(allowed.includes('mcp__higgsfield__balance') && allowed.includes('mcp__higgsfield__models_explore') && allowed.includes('mcp__higgsfield__jobs_wait'));
-  assert.ok(!allowed.some((t) => /generate|execute_preset|upscale|outpaint|reframe|remove_background|dubbing|create_voice|ai_influencer|media_upload|motion_control/.test(t)), 'nothing that can spend');
+  assert.equal(at('--model'), 'sonnet');
+  assert.ok(allowed.includes('mcp__creativo__propose_generation') && allowed.includes('mcp__creativo__list_voice_presets'));
+  assert.ok(!allowed.some((t) => /generate_|design_pdf_asset|higgsfield/i.test(t)), 'the generation tools are not allowlisted: only an approval lets them through');
+  assert.ok(!args.join(' ').toLowerCase().includes('higgsfield'), 'no Higgsfield anywhere in the launch');
   const denied = at('--disallowedTools').split(',');
   for (const t of ['PowerShell', 'Task', 'Agent', 'NotebookEdit']) assert.ok(denied.includes(t), t);
   for (const t of ['Skill', 'Read', 'Bash']) assert.ok(!denied.includes(t), t);
@@ -143,7 +145,7 @@ test('guard: Bash allows only the minimal allowlist and refuses everything dange
     'python3 "Producto Bebidas/x.py"',
     `python "${SKILLS}\\new-product\\assets\\check_pdf_source.py" a.pdf`,
     'python -u "Producto Bebidas/x.py" && ffmpeg -i in.mp4 out.mp4',
-    'ffmpeg -y -i in.mp4 -filter_complex "[0:v]scale=iw/2:-1;[0:a]anull" out.mp4',
+    'ffmpeg -i in.mp4 -filter_complex "[0:v]scale=iw/2:-1;[0:a]anull" out.mp4',
     'ffprobe -v error -show_format a.mp4',
     'yt-dlp -o "Producto Bebidas/videos/venezuela/broll_tiktok/%(id)s.%(ext)s" https://www.tiktok.com/@a/video/1',
     'dir "Producto Bebidas"',
@@ -182,22 +184,15 @@ test('guard: the command parser honours quotes and refuses substitutions', () =>
   assert.equal(parseCommand('a "oops'), null);
 });
 
-// ---- guard: Higgsfield and Skill ------------------------------------------------------------------------------
+// ---- guard: MCP tools and Skill --------------------------------------------------------------------------------
 
-test('guard: Higgsfield passes only read/free tools and every spender is denied', () => {
-  for (const t of HIGGSFIELD_READ_TOOLS) assert.equal(verdict(run(`mcp__higgsfield__${t}`, {})), 'allow', t);
-  for (const t of ['balance', 'models_explore', 'get_presets', 'show_generations', 'list_voices', 'jobs_wait']) assert.equal(verdict(run(`mcp__higgsfield__${t}`, {})), 'allow', t);
-  const spenders = [
-    'generate_image', 'generate_image_batch', 'generate_video', 'generate_video_batch', 'generate_audio', 'generate_audio_batch', 'generate_3d', 'execute_preset', 'upscale_image', 'upscale_video',
-    'outpaint_image', 'reframe', 'remove_background', 'dubbing', 'voice_change', 'motion_control', 'create_voice', 'ai_influencer_generate', 'build_ai_influencer', 'ads_studio_generate',
-    'shorts_studio_create', 'media_upload', 'media_import_url', 'apps_invoke', 'scene_builder_3d_generate_video', 'show_marketing_studio_v2', 'create_website', 'deploy_website', 'tiktok_publish_status',
-    'update_preferences', 'delete_project', 'sandbox_exec', 'unknown_future_tool',
-  ];
-  for (const t of spenders) assert.equal(verdict(run(`mcp__higgsfield__${t}`, {})), 'deny', t);
-  assert.match(run('mcp__higgsfield__generate_image', {}).reason, /créditos/);
-  assert.equal(verdict(run('mcp__other__thing', {})), 'deny');
-  // The allowlist handed to the CLI is exactly what the hook lets through.
-  for (const name of higgsfieldAllowedTools()) assert.equal(verdict(run(name, {})), 'allow', name);
+test('guard: free creativo tools pass, generation tools need an approval, every other MCP server is refused', () => {
+  assert.equal(verdict(run('mcp__creativo__propose_generation', {})), 'pass');
+  assert.equal(verdict(run('mcp__creativo__list_voice_presets', {})), 'pass');
+  // No way to check an approval (no database handed to the hook): fail closed.
+  for (const t of ['generate_image', 'design_pdf_asset', 'generate_voice']) assert.equal(verdict(run(`mcp__creativo__${t}`, { prompt: 'x' })), 'deny', t);
+  assert.equal(verdict(run('mcp__creativo__surprise', {})), 'deny');
+  for (const name of ['mcp__other__thing', 'mcp__higgsfield__balance', 'mcp__higgsfield__generate_image']) assert.equal(verdict(run(name, {})), 'deny', name);
 });
 
 test('guard: only the plugin skills can be invoked', () => {
@@ -248,8 +243,8 @@ test('plugin builder: copies only the whitelist, logs missing skills, skips cach
     const logs = [];
     const res = buildCreativoPlugin({ dataDir: path.join(tmp, 'data'), skillsSource: src, log: (m) => logs.push(m) });
     assert.deepEqual(res.included.sort(), ['compress-pdf', 'new-product', 'redaccion-infoproducto']);
-    assert.deepEqual(res.missing.sort(), ['ads-infoproductos', 'adapt-country', 'usage-higgsfield'].sort());
-    assert.equal(logs.length, 3);
+    assert.deepEqual(res.missing.sort(), ['ads-infoproductos', 'adapt-country'].sort());
+    assert.equal(logs.length, 2);
     assert.ok(logs.every((l) => /no encontrada/.test(l)));
     const skillsOut = path.join(res.pluginDir, 'skills');
     assert.deepEqual(fs.readdirSync(skillsOut).sort(), ['compress-pdf', 'new-product', 'redaccion-infoproducto']);
@@ -259,7 +254,7 @@ test('plugin builder: copies only the whitelist, logs missing skills, skips cach
     const manifest = JSON.parse(fs.readFileSync(path.join(res.pluginDir, '.claude-plugin', 'plugin.json'), 'utf8'));
     assert.equal(manifest.name, 'creativo');
     assert.deepEqual(res.pluginDir, path.join(tmp, 'data', 'agents', 'creativo', 'plugin'));
-    assert.ok(CREATIVO_SKILLS.length === 6 && !CREATIVO_SKILLS.includes('leona-receipts'));
+    assert.ok(CREATIVO_SKILLS.length === 5 && !CREATIVO_SKILLS.includes('leona-receipts'));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -294,17 +289,7 @@ test('plugin builder: refreshes a skill only when the source is newer, and drops
   }
 });
 
-// ---- Higgsfield config and settings ---------------------------------------------------------------------------
-
-test('Higgsfield server: only type and url come out of ~/.claude.json, never a token', () => {
-  const json = JSON.stringify({ mcpServers: { higgsfield: { type: 'http', url: 'https://mcp.higgsfield.ai/mcp', headers: { Authorization: 'Bearer SECRET' }, oauth: { accessToken: 'SECRET2' } }, other: { url: 'https://x' } } });
-  const server = readHiggsfieldServer({ home: 'H', readFile: () => json });
-  assert.deepEqual(server, { type: 'http', url: 'https://mcp.higgsfield.ai/mcp' });
-  assert.ok(!JSON.stringify(server).includes('SECRET'));
-  assert.equal(readHiggsfieldServer({ home: 'H', readFile: () => '{}' }), null);
-  assert.equal(readHiggsfieldServer({ home: 'H', readFile: () => { throw new Error('nope'); } }), null);
-  assert.equal(readHiggsfieldServer({ home: 'H', readFile: () => JSON.stringify({ mcpServers: { higgsfield: { url: 'http://insecure' } } }) }), null);
-});
+// ---- settings --------------------------------------------------------------------------------------------------
 
 test('guard settings: deny rules for the protected places and a PreToolUse hook pointing at the guard', () => {
   const s = buildGuardSettings({ root: ROOT, pluginDir: PLUGIN, skillsDir: SKILLS, nodePath: 'C:\\Program Files\\nodejs\\node.exe' });
@@ -318,7 +303,9 @@ test('guard settings: deny rules for the protected places and a PreToolUse hook 
   for (const t of ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'Skill']) assert.match(hook.matcher, new RegExp(t));
   assert.match(hook.matcher, /mcp__/);
   const command = hook.hooks[0].command;
-  assert.match(command, /^"C:\/Program Files\/nodejs\/node\.exe" ".*creativo-guard\.js" --root "C:\/Users\/victo\/Proyectos\/ventas automaticas" --plugin ".*plugin" --skills ".*skills"$/);
+  assert.match(command, /^"C:\/Program Files\/nodejs\/node\.exe" --disable-warning=ExperimentalWarning ".*creativo-guard\.js" --root "C:\/Users\/victo\/Proyectos\/ventas automaticas" --plugin ".*plugin" --skills ".*skills"$/);
+  const withDb = buildGuardSettings({ root: ROOT, pluginDir: PLUGIN, skillsDir: SKILLS, dbFile: 'C:\\data\\agents\\creativo\\agent.db', nodePath: 'node' }).hooks.PreToolUse[0].hooks[0].command;
+  assert.match(withDb, / --db "C:\/data\/agents\/creativo\/agent\.db"$/);
   assert.ok(!command.includes('\\'), 'forward slashes only so the shell cannot mangle it');
 });
 
@@ -328,7 +315,7 @@ test('the prompt encodes the lessons learned in neutral Spanish with tuteo', () 
   const p = creativoPrompt({ root: ROOT });
   for (const re of [
     /sin repetirse/, /enteras/, /Sin subtítulos/, /sin caras/i, /logos/, /no llevan costos, precios/, /guías de emprender/, /autónomo/, /Un texto por video/, /8 MB/, /Bebidas/, /Barf ya no es relevante/,
-    /costo estimado/, /ninguna generación de pago/, /creativo:redaccion-infoproducto/, /creativo:new-product/, /creativo:adapt-country/, /IDIOMA OBLIGATORIO/, /Un solo video piloto/, /nunca con voseo/,
+    /propose_generation/, /TERMINA tu turno/, /no explores carpetas sin necesidad/, /yt-dlp/, /creativo:redaccion-infoproducto/, /creativo:new-product/, /creativo:adapt-country/, /IDIOMA OBLIGATORIO/, /Un solo video piloto/, /nunca con voseo/,
     /ElevenLabs/, /ID de voz/, /dólar|USD/, /perfil temporal/,
   ]) assert.match(p, re, String(re));
   assert.ok(!/\b(querés|podés|sos|hacé|mirá|escribí)\b/.test(p), 'no voseo');
@@ -342,7 +329,13 @@ test('step labels are Spanish and never show raw tool names', () => {
   assert.equal(creativoStepLabel('Write', { file_path: 'x/y.txt' }), 'Escribiendo y.txt…');
   assert.equal(creativoStepLabel('Edit', { file_path: 'x/y.txt' }), 'Editando y.txt…');
   assert.equal(creativoStepLabel('Bash', { command: 'python build.py --libro 06' }), 'Ejecutando python build.py --libro 06…');
-  assert.equal(creativoStepLabel('mcp__higgsfield__balance', {}), 'Consultando Higgsfield…');
+  assert.equal(creativoStepLabel('mcp__creativo__generate_image', { filename: 'hero' }), 'Generando la imagen hero con GPT…');
+  assert.equal(creativoStepLabel('mcp__creativo__design_pdf_asset', { kind: 'cover' }), 'Diseñando la portada del PDF con GPT…');
+  assert.equal(creativoStepLabel('mcp__creativo__generate_voice', {}), 'Generando un audio con ElevenLabs…');
+  assert.equal(creativoStepLabel('mcp__creativo__propose_generation', {}), 'Preparando la propuesta para que la apruebes…');
+  assert.equal(creativoStepLabel('Bash', { command: 'yt-dlp -o x https://t.co/a' }), 'Descargando un video de referencia…');
+  assert.equal(creativoStepLabel('Bash', { command: 'ffmpeg -ss 1 -t 3 -i a.mp4 b.mp4' }), 'Recortando un video…');
+  assert.equal(creativoStepLabel('Bash', { command: 'ffprobe -v error a.mp4' }), 'Leyendo los datos de un video…');
   assert.equal(creativoStepLabel('Glob', {}), 'Buscando archivos…');
   assert.match(creativoStepLabel('WebSearch', { query: 'michelada' }), /Buscando en la web/);
   assert.equal(creativoStepLabel('Whatever', {}), 'Trabajando en un paso…');
@@ -363,7 +356,6 @@ test('a creativo turn launches claude with the plugin, the guard settings and a 
     const home = path.join(tmp, 'home');
     fs.mkdirSync(root, { recursive: true });
     fakeSkills(path.join(home, '.claude', 'skills'), ['redaccion-infoproducto']);
-    fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({ mcpServers: { higgsfield: { type: 'http', url: 'https://mcp.higgsfield.ai/mcp' } } }));
     Object.assign(process.env, { AGENTAUTO_CREATIVO_ROOT: root, USERPROFILE: home, HOME: home, ELEVENLABS_API_KEY: 'must-not-leak', FAKE_CLAUDE_SCENARIO: 'ok', FAKE_CLAUDE_DUMP: dump });
     const events = [];
     const res = await runTurn({ dataDir: fx.dataDir, agentId: 'creativo', text: 'hola', emit: (e) => events.push(e), claude: { command: process.execPath, prefixArgs: [FAKE] }, now: () => fx.now, locate: () => null });
@@ -393,21 +385,28 @@ test('a creativo turn launches claude with the plugin, the guard settings and a 
   }
 });
 
-test('prepareCreativoLaunch writes the settings file and lists the Higgsfield read tools only when the server is configured', () => {
+test('prepareCreativoLaunch writes the settings file and the env of the creativo MCP server (no other MCP server)', () => {
   const tmp = mkTmp('launch');
   try {
     const home = path.join(tmp, 'home');
     fs.mkdirSync(home, { recursive: true });
     const quiet = () => undefined;
-    const without = prepareCreativoLaunch({ dataDir: path.join(tmp, 'd'), root: ROOT, home, log: quiet });
-    assert.deepEqual(without.mcpServers, {});
-    assert.ok(without.allowedTools.every((t) => t.startsWith('Bash(')));
-    fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({ mcpServers: { higgsfield: { type: 'http', url: 'https://mcp.higgsfield.ai/mcp' } } }));
-    const withHf = prepareCreativoLaunch({ dataDir: path.join(tmp, 'd'), root: ROOT, home, log: quiet });
-    assert.deepEqual(withHf.mcpServers, { higgsfield: { type: 'http', url: 'https://mcp.higgsfield.ai/mcp' } });
-    assert.ok(withHf.allowedTools.includes('mcp__higgsfield__balance'));
-    const settings = JSON.parse(fs.readFileSync(withHf.settingsFile, 'utf8'));
-    assert.ok(settings.hooks.PreToolUse[0].hooks[0].command.includes('creativo-guard.js'));
+    const env = { PATH: '', ELEVENLABS_X: '1' };
+    const launch = prepareCreativoLaunch({ dataDir: path.join(tmp, 'd'), root: ROOT, home, log: quiet, env, settings: { codexModel: 'm1', codexEffort: 'medium', codexHome: 'C:/codex-home' } });
+    assert.deepEqual(launch.mcpServers, {});
+    assert.ok(launch.allowedTools.every((t) => t.startsWith('Bash(')));
+    assert.equal(launch.toolsEnv.AGENTAUTO_CREATIVO_ROOT, ROOT);
+    assert.equal(launch.toolsEnv.AGENTAUTO_CODEX_HOME, 'C:/codex-home');
+    assert.equal(launch.toolsEnv.AGENTAUTO_CODEX_MODEL, 'm1');
+    assert.equal(launch.toolsEnv.AGENTAUTO_CODEX_EFFORT, 'medium');
+    assert.ok(!('AGENTAUTO_ELEVEN_KEY' in launch.toolsEnv), 'no key reference when the app has none');
+    // With a key in the environment the config only carries a reference that Claude Code expands, never the value.
+    const withKey = prepareCreativoLaunch({ dataDir: path.join(tmp, 'd'), root: ROOT, home, log: quiet, env: { AGENTAUTO_ELEVEN_KEY: 'sk-secret-value' } });
+    assert.equal(withKey.toolsEnv.AGENTAUTO_ELEVEN_KEY, '${AGENTAUTO_ELEVEN_KEY}');
+    assert.ok(!JSON.stringify(withKey).includes('sk-secret-value'));
+    const settings = JSON.parse(fs.readFileSync(launch.settingsFile, 'utf8'));
+    const command = settings.hooks.PreToolUse[0].hooks[0].command;
+    assert.ok(command.includes('creativo-guard.js') && command.includes('--db') && command.includes('agent.db'));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

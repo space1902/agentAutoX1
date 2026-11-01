@@ -18,7 +18,11 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
 export class SettingsError extends Error {}
 
-export function mergeSettings(partial = {}, base = DEFAULT_SETTINGS) {
+/**
+ * `extra` = { key: validator } for settings only some agents have (e.g. the creativo's Codex options); a validator returns the
+ * cleaned value or throws SettingsError.
+ */
+export function mergeSettings(partial = {}, base = DEFAULT_SETTINGS, extra = {}) {
   const p = partial ?? {};
   const out = { ...base };
   if (p.claudePath !== undefined) {
@@ -33,19 +37,24 @@ export function mergeSettings(partial = {}, base = DEFAULT_SETTINGS) {
   }
   if (p.web !== undefined) out.web = Boolean(p.web);
   if (p.learning !== undefined) out.learning = Boolean(p.learning);
+  for (const [key, check] of Object.entries(extra)) if (p[key] !== undefined) out[key] = check(p[key]);
   return out;
 }
 
+// An agent may bring its own defaults (`defaultSettings`) and extra validated keys (`settingsSchema`); the Analista has neither.
+const baseOf = (agent) => ({ ...DEFAULT_SETTINGS, ...(agent && typeof agent === 'object' ? agent.defaultSettings : {}) });
+const schemaOf = (agent) => (agent && typeof agent === 'object' ? (agent.settingsSchema ?? {}) : {});
+
 export function loadSettings(dataDir, agent) {
   try {
-    return mergeSettings(JSON.parse(fs.readFileSync(settingsPath(dataDir, agent), 'utf8').replace(/^﻿/, '')));
+    return mergeSettings(JSON.parse(fs.readFileSync(settingsPath(dataDir, agent), 'utf8').replace(/^﻿/, '')), baseOf(agent), schemaOf(agent));
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    return { ...baseOf(agent) };
   }
 }
 
 export function saveSettings(dataDir, partial, agent) {
-  const next = mergeSettings(partial, loadSettings(dataDir, agent));
+  const next = mergeSettings(partial, loadSettings(dataDir, agent), schemaOf(agent));
   const file = settingsPath(dataDir, agent);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;

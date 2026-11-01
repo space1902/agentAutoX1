@@ -8,7 +8,9 @@
 //   { type: 'step', id, tool, label }               a tool call started (friendly progress text)
 //   { type: 'step_done', id, tool, ok, summary }    its result arrived
 //   { type: 'plan', status, fiveHour, resetsAt }      plan usage window reported by the CLI (subscription limits)
-//   { type: 'result', ok, text, claudeSessionId, durationMs, turns, usage, subtype, error? }
+//   { type: 'proposal', id }                        the creativo proposed generations (the UI shows the approval card)
+//   { type: 'result', ok, text, claudeSessionId, durationMs, turns, usage, baseContext?, subtype, error? }
+// baseContext = tokens of the first model call (system prompt + tool schemas + skills list), read from the first assistant message.
 
 // Name of the Analista's MCP server (other agents declare their own in the registry).
 export const SERVER_NAME = 'analista';
@@ -83,6 +85,8 @@ export function summarizeResult(tool, text, isError) {
   if (data && Array.isArray(data.cambios)) return `${data.cambios.length} cambios de presupuesto`;
   if (data && Array.isArray(data.anuncios)) return `${data.anuncios.length} anuncios`;
   if (data && Array.isArray(data.paises)) return `${data.paises.length} países`;
+  if (data && typeof data.proposal_id === 'number') return 'esperando tu aprobación';
+  if (data && typeof data.ruta === 'string') return cut(data.ruta_relativa ?? data.ruta, 90);
   if (data && Array.isArray(data.lecciones)) return `${data.lecciones.length} lecciones`;
   if (data && data.totales) return 'listo';
   return 'listo';
@@ -111,6 +115,7 @@ export function createStreamParser({ stepLabel: labelOf = stepLabel } = {}) {
   const toolResults = []; // { id, tool, text, isError }
   let claudeSessionId = null;
   let lastAssistantText = '';
+  let baseContext = null;
 
   return {
     toolResults,
@@ -146,6 +151,10 @@ export function createStreamParser({ stepLabel: labelOf = stepLabel } = {}) {
         case 'assistant': {
           const events = [];
           const blocks = msg.message?.content ?? [];
+          if (baseContext === null && msg.message?.usage) {
+            const u = usageOf(msg.message.usage);
+            baseContext = u.input + u.cacheRead + u.cacheCreate;
+          }
           const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('');
           if (text) lastAssistantText = text;
           for (const b of blocks) {
@@ -165,6 +174,14 @@ export function createStreamParser({ stepLabel: labelOf = stepLabel } = {}) {
             const isError = b.is_error === true;
             toolResults.push({ id: b.tool_use_id, tool, text, isError });
             events.push({ type: 'step_done', id: b.tool_use_id, tool, ok: !isError && !/^\{"error"/.test(text.trim()), summary: summarizeResult(tool, text, isError) });
+            if (tool === 'propose_generation' && !isError) {
+              try {
+                const id = Number(JSON.parse(text).proposal_id);
+                if (id > 0) events.push({ type: 'proposal', id });
+              } catch {
+                /* an error result has no proposal */
+              }
+            }
           }
           return events;
         }
@@ -172,7 +189,7 @@ export function createStreamParser({ stepLabel: labelOf = stepLabel } = {}) {
           const ok = msg.is_error !== true && msg.subtype === 'success';
           return [{
             type: 'result', ok, subtype: msg.subtype ?? null, text: typeof msg.result === 'string' ? msg.result : lastAssistantText, claudeSessionId: msg.session_id ?? claudeSessionId,
-            durationMs: Number(msg.duration_ms ?? 0), turns: Number(msg.num_turns ?? 0), usage: usageOf(msg.usage), ...(ok ? {} : { error: friendlyError(msg.result ?? msg.subtype) }),
+            durationMs: Number(msg.duration_ms ?? 0), turns: Number(msg.num_turns ?? 0), usage: usageOf(msg.usage), ...(baseContext === null ? {} : { baseContext }), ...(ok ? {} : { error: friendlyError(msg.result ?? msg.subtype) }),
           }];
         }
         case 'rate_limit_event': {

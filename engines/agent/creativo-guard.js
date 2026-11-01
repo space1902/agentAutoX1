@@ -5,32 +5,24 @@
 // holds the app's own code, bot sessions and credential files) is protected here:
 //   - file tools: path allow-roots + a list of protected places (code of the apps, secrets, auth sessions, node_modules)
 //   - Bash: a small allowlist of programs, quote-aware, no inline code, no deletion, no git, no free network, no ElevenLabs
-//   - Higgsfield: default-deny; only read/free tools pass, everything that can spend credits is refused
+//   - MCP: only the creativo server. Its free tools pass; the generation tools (image, PDF art, voice) pass only with a
+//     single-use user approval matching the arguments (creativo-approvals.js); every other MCP server is refused
 //   - Skill: only the plugin's own skills
-// Decisions: { decision: 'deny', reason } | { decision: 'allow' } (only for validated Bash / Higgsfield reads) | { decision: 'pass' }
+// Decisions: { decision: 'deny', reason } | { decision: 'allow' } (validated Bash, free MCP tools and approved generations) | { decision: 'pass' }
 // ('pass' = no opinion, the normal permission flow with --allowedTools applies).
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { argsHash, createApprovals, GENERATION_TOOLS } from './creativo-approvals.js';
+
 export const PLUGIN_NAME = 'creativo';
 
-// Higgsfield tools the agent may call in this phase: read-only or free. Everything else (generate_*, execute_preset,
-// upscale/outpaint/reframe/remove_background, dubbing, voices, apps, websites...) is refused by default.
-export const HIGGSFIELD_READ_TOOLS = Object.freeze([
-  'balance', 'models_explore', 'get_presets', 'jobs_wait',
-  'list_folders', 'list_projects', 'list_project_assets', 'list_voices', 'list_websites', 'list_website_categories', 'list_workspaces',
-  'show_characters', 'show_credit_reset', 'show_generation_by_ids', 'show_generations', 'show_katana_result', 'show_marketing_studio_generations',
-  'show_medias', 'show_plans_and_credits', 'show_reference_elements', 'show_result',
-]);
-// show_* / list_* tools that exist but open a generation flow: never allowed.
-const HIGGSFIELD_NEVER = new Set(['show_marketing_studio_v2']);
-const HIGGSFIELD_PREFIX = 'mcp__higgsfield__';
-
-export function isHiggsfieldRead(shortName) {
-  if (HIGGSFIELD_NEVER.has(shortName)) return false;
-  return HIGGSFIELD_READ_TOOLS.includes(shortName) || /^(list|show)_[a-z0-9_]+$/.test(shortName);
-}
+// MCP server of the Agente creativo (creativo-mcp.js). Free tools go through the normal permission flow
+// (--allowedTools); the generation tools are NOT in --allowedTools: only an approved single-use ticket lets them run.
+export const CREATIVO_SERVER = 'creativo';
+const CREATIVO_PREFIX = `mcp__${CREATIVO_SERVER}__`;
+export const FREE_MCP_TOOLS = Object.freeze(['propose_generation', 'list_voice_presets']);
 
 // ---- paths -----------------------------------------------------------------------------------------------------
 
@@ -230,9 +222,16 @@ const PY_SAFE_FLAGS = new Set(['-u', '-b', '-e', '-s', '-o', '-oo']);
 const SPEND = [
   [/eleven|xi-api-key|tts_elevenlabs/, 'ElevenLabs gasta dinero y está bloqueado para este agente en esta fase.'],
   [/gen_image_fal|fal\.ai|fal_key|fal-key/, 'fal.ai gasta dinero y está bloqueado para este agente en esta fase.'],
-  [/higgsfield\.ai|hf_api/, 'Higgsfield solo se consulta con sus herramientas de lectura, no desde la terminal.'],
+  [/higgsfield\.ai|hf_api/, 'Ese servicio de generación no está disponible para este agente.'],
 ];
-const YT_FORBIDDEN = /^--?(exec|exec-before-download|cookies|cookies-from-browser|netrc|netrc-cmd|netrc-location|username|password|config-locations?|plugin-dirs|ap-mso|ap-username|ap-password|video-password)(=|$)/i;
+// yt-dlp options that run programs, read credentials, change the tool itself or point it at other binaries.
+const YT_FORBIDDEN = /^--?(exec|exec-before-download|cookies|cookies-from-browser|netrc|netrc-cmd|netrc-location|username|password|config-locations?|config-location|plugin-dirs|ap-mso|ap-username|ap-password|video-password|downloader|external-downloader|external-downloader-args|downloader-args|ffmpeg-location|update|update-to|U|use-postprocessor|cache-dir|load-info-json|batch-file|a|proxy|print-to-file|no-config|ignore-config)(=|$)/i;
+// With none of these, yt-dlp saves into the working folder: an explicit output is mandatory when it downloads.
+const YT_OUTPUT = /^(-o|-P|--output|--paths)(=|$)/;
+const YT_NO_DOWNLOAD = /^(-s|--simulate|--skip-download|-F|--list-formats|-j|--dump-json|-J|--dump-single-json|--get-title|--get-url|--get-id|--get-duration|--list-subs|--version|--help|-h)$/;
+// ffmpeg: no overwriting (-y), no remote output, and filters that read arbitrary files or send commands.
+const FFMPEG_FORBIDDEN_FILTER = /(^|[=,;:'" ])(movie|amovie|subtitles|ass|sendcmd|asendcmd|zmq|azmq)\s*=|textfile\s*=|reinit_filter|filter_script|filter_complex_script|protocol_whitelist|-dump_attachment/i;
+const FFMPEG_FORBIDDEN_FLAGS = /^-(y|dump_attachment|filter_script|filter_complex_script|protocol_whitelist|f_fifo|tee|listen|rtsp_transport|headers|cookies|user_agent|http_proxy)(:.*)?$/i;
 const looksAbsolute = (t) => /^([a-zA-Z]:[\\/]|\/|\\\\|~)/.test(t) && !/^\/\d+$/.test(t);
 
 /** Decision for one Bash command line. */
@@ -263,18 +262,38 @@ export function bashDecision(command, ctx) {
       const bad = checkPath(script, ctx);
       if (bad) return bad;
     }
-    if (bin === 'yt-dlp' && args.some((a) => YT_FORBIDDEN.test(a))) return deny('Esa opción de yt-dlp (cookies, credenciales o ejecutar comandos) está bloqueada.');
+    if (bin === 'yt-dlp') {
+      if (args.some((a) => YT_FORBIDDEN.test(a))) return deny('Esa opción de yt-dlp (cookies, credenciales, ejecutar programas o actualizar la herramienta) está bloqueada.');
+      if (!args.some((a) => YT_NO_DOWNLOAD.test(a)) && !args.some((a) => YT_OUTPUT.test(a))) return deny('Indica dónde guardar el video con -o (por ejemplo -o "Producto X/videos/referencias/%(id)s.%(ext)s").');
+      if (!args.some((a) => /^[a-z][a-z0-9+.-]*:\/\//i.test(a)) && !args.some((a) => YT_NO_DOWNLOAD.test(a))) return deny('Falta la dirección (URL) del video que quieres descargar.');
+    }
+    if (bin === 'ffmpeg' || bin === 'ffprobe') {
+      if (args.some((a) => /^[a-z][a-z0-9+.-]*:\/\//i.test(a) && !/^(file):/i.test(a))) return deny('ffmpeg solo trabaja con archivos locales: descarga primero con yt-dlp.');
+      if (args.some((a) => FFMPEG_FORBIDDEN_FLAGS.test(a))) return deny(args.some((a) => /^-y$/i.test(a)) ? 'No uses -y: ffmpeg no puede sobrescribir archivos. Elige un nombre de salida nuevo.' : 'Esa opción de ffmpeg está bloqueada.');
+      if (args.some((a) => FFMPEG_FORBIDDEN_FILTER.test(a))) return deny('Ese filtro de ffmpeg lee archivos o recibe comandos de fuera y está bloqueado.');
+    }
     for (const a of args) {
       const value = a.includes('=') && !/^[a-zA-Z]:[\\/]/.test(a) && a.startsWith('-') ? a.slice(a.indexOf('=') + 1) : a;
       if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value) || value === '/dev/null') continue; // URL or the null device
       if (/(^|[\\/])\.\.([\\/]|$)/.test(value)) return deny('No uses ".." para salir de la carpeta de trabajo.');
       if (looksAbsolute(value)) {
-        const bad = checkPath(value, ctx, { write: bin === 'yt-dlp' || bin === 'mkdir' });
+        const bad = checkPath(value, ctx, { write: bin === 'yt-dlp' || bin === 'mkdir' || bin === 'ffmpeg' });
         if (bad) return bad;
       }
     }
   }
   return { decision: 'allow' };
+}
+
+// ---- creativo MCP tools ---------------------------------------------------------------------------------------
+
+/** Free tools pass; generation tools need a single-use approval (`consume(tool, hash)` spends it); anything else is refused. */
+export function mcpDecision(short, input, consume) {
+  if (FREE_MCP_TOOLS.includes(short)) return PASS;
+  if (!GENERATION_TOOLS.includes(short)) return deny(`La herramienta "${short}" no existe para este agente.`);
+  if (typeof consume !== 'function') return deny('No puedo comprobar la aprobación del usuario, así que la generación se bloquea.');
+  const spent = consume(short, argsHash(short, input));
+  return spent.ok ? { decision: 'allow' } : deny(spent.reason);
 }
 
 // ---- entry point -----------------------------------------------------------------------------------------------
@@ -284,10 +303,7 @@ export function decide(event, ctxOptions) {
   const tool = String(event?.tool_name ?? '');
   const input = event?.tool_input ?? {};
   const ctx = makeContext({ ...ctxOptions, cwd: event?.cwd || ctxOptions.cwd });
-  if (tool.startsWith(HIGGSFIELD_PREFIX)) {
-    const short = tool.slice(HIGGSFIELD_PREFIX.length);
-    return isHiggsfieldRead(short) ? { decision: 'allow' } : deny(`Higgsfield "${short}" puede gastar créditos: en esta fase solo se consulta (saldo, modelos, historial). Dile al usuario el costo estimado y espera.`);
-  }
+  if (tool.startsWith(CREATIVO_PREFIX)) return mcpDecision(tool.slice(CREATIVO_PREFIX.length), input, ctxOptions.consume);
   if (tool.startsWith('mcp__')) return deny('Ese servidor externo no está permitido para este agente.');
   if (tool === 'Skill') {
     const name = String(input.skill ?? input.name ?? '');
@@ -319,7 +335,23 @@ async function main() {
     const event = JSON.parse(Buffer.concat(chunks).toString('utf8').replace(/^﻿/, ''));
     const root = get('--root');
     if (!root) throw new Error('missing --root');
-    out = hookOutput(decide(event, { root, pluginDir: get('--plugin'), skillsDir: get('--skills') }));
+    const dbFile = get('--db');
+    let db = null;
+    const nodeSqlite = dbFile ? await import('node:sqlite') : null;
+    // The approval table is only opened for generation tools, so every other call stays as cheap as before.
+    const consume = dbFile
+      ? (tool, hash) => {
+          const { DatabaseSync } = nodeSqlite;
+          db ??= new DatabaseSync(dbFile);
+          db.exec('PRAGMA busy_timeout = 5000;');
+          return createApprovals(db).consume(tool, hash);
+        }
+      : undefined;
+    try {
+      out = hookOutput(decide(event, { root, pluginDir: get('--plugin'), skillsDir: get('--skills'), consume }));
+    } finally {
+      db?.close();
+    }
   } catch (error) {
     // Fail closed: if the guard cannot decide, nothing runs.
     out = hookOutput(deny(`El guardián de acceso falló y por seguridad se bloquea la acción (${String(error?.message ?? error).slice(0, 120)}).`));
