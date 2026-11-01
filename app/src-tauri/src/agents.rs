@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 
 /// Agents the engine knows (`engines/agent/registry.js`). Anything else is rejected before building arguments.
 /// Each entry: (id, short label used in messages).
-pub const AGENTS: &[(&str, &str)] = &[("analista", "Analista"), ("creativo", "Agente creativo")];
+pub const AGENTS: &[(&str, &str)] = &[("analista", "Analista"), ("creativo", "Agente creativo"), ("investigador", "Investigador")];
 /// The agent the legacy `analista_*` commands act on.
 pub const LEGACY_AGENT: &str = "analista";
 /// The agent that generates files and may be handed the ElevenLabs key.
@@ -45,7 +45,7 @@ fn label_of(id: &str) -> &'static str {
 const ONE_SHOT: &[&str] = &[
     "agents-list", "status", "sessions", "session-new", "session-rename", "session-delete", "messages", "settings-get", "settings-set", "queries",
     "lessons", "lesson-set", "lesson-edit", "learning-get", "learning-run", "feedback", "recommendations", "eval-bank", "eval-runs", "eval-run-detail",
-    "proposals", "proposal-decide", "codex-status",
+    "proposals", "proposal-decide", "codex-status", "roadmap-get", "item-set", "assets", "asset-set", "research-list", "research-launch",
 ];
 /// Commands that stream JSON events until they finish.
 const STREAMING: &[&str] = &["turn", "eval-run"];
@@ -299,6 +299,8 @@ mod tests {
     fn agent_ids_come_from_the_fixed_list() {
         assert_eq!(valid_agent_id("analista"), Ok("analista"));
         assert_eq!(valid_agent_id("creativo"), Ok("creativo"));
+        assert_eq!(valid_agent_id("investigador"), Ok("investigador"));
+        assert!(valid_agent_id("Investigador").is_err());
         for bad in ["", "Creativo", "creativo ", "creativo; calc", "../creativo", "Analista", "analista ", "../analista", "analista; calc", "constructor"] {
             assert!(valid_agent_id(bad).is_err(), "{bad:?} must be rejected");
         }
@@ -377,7 +379,7 @@ mod tests {
         let envs: Vec<_> = cmd.get_envs().collect();
         assert!(envs.iter().any(|(k, v)| *k == crate::voices::KEY_ENV && v.is_none()), "the key variable must be removed");
         assert!(envs.iter().any(|(k, v)| *k == crate::voices::ROOT_ENV && v.is_some()), "the products folder is passed");
-        for c in ["proposals", "proposal-decide", "codex-status"] {
+        for c in ["proposals", "proposal-decide", "codex-status", "roadmap-get", "item-set", "assets", "asset-set", "research-list", "research-launch"] {
             assert!(ONE_SHOT.contains(&c), "{c}");
         }
     }
@@ -386,6 +388,8 @@ mod tests {
     fn eval_runs_belong_to_the_analista_only() {
         assert!(check_stream_payload("analista", "eval-run", &json!({})).is_ok());
         assert!(check_stream_payload("creativo", "eval-run", &json!({})).is_err());
+        assert!(check_stream_payload("investigador", "eval-run", &json!({})).is_err());
+        assert!(check_stream_payload("investigador", "turn", &json!({ "text": "mide recetas" })).is_ok());
     }
 
     #[test]

@@ -4,9 +4,11 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { APPROVAL_SCHEMA } from './creativo-approvals.js';
+import { CREATIVO_SCHEMA } from './creativo-schema.js';
+import { refreshCreativoLessons } from './creativo-learning.js';
+import { AGENT_LEARNING_TOOL_NAMES } from './learning-tools.js';
 import { startKeyBroker } from './creativo-keybroker.js';
-import { FREE_MCP_TOOLS } from './creativo-guard.js';
+import { FREE_MCP_TOOLS, LEARNING_MCP_TOOLS } from './creativo-guard.js';
 import { getProductMap } from './creativo-map.js';
 import { creativoPrompt, creativoStepLabel } from './creativo-prompt.js';
 import { BASH_ALLOW, CREATIVO_DEFAULT_SETTINGS, ELEVEN_KEY_ENV, CREATIVO_SETTINGS_SCHEMA, CREATIVO_SKILLS, creativoRoot, prepareCreativoLaunch, scrubSecrets } from './creativo-workspace.js';
@@ -14,6 +16,11 @@ import { makeHooks } from './learning.js';
 import { systemPromptAppend, workspaceClaudeMd } from './knowledge.js';
 import { accountToday } from './metrics.js';
 import { agentDir, LEGACY_AGENT_ID, workspaceDir } from './paths.js';
+import { INVESTIGADOR_DEFAULT_SETTINGS, INVESTIGADOR_SKILLS, prepareInvestigadorLaunch, researchDirOf } from './investigador-workspace.js';
+import { investigadorPrompt, investigadorStepLabel } from './investigador-prompt.js';
+import { INVESTIGADOR_TOOL_NAMES, proposeUpdates } from './investigador-tools.js';
+import { createResearch, localDate, RESEARCH_SCHEMA } from './research-store.js';
+import { activeThresholds } from './research-thresholds.js';
 import { stepLabel as analistaStepLabel } from './stream-parser.js';
 import { BASE_TOOL_NAMES, LEARNING_TOOL_NAMES } from './tools.js';
 
@@ -63,7 +70,7 @@ export const AGENTS = Object.freeze({
     cwd: () => creativoRoot(),
     mcpServers: { creativo: 'creativo-mcp.js' },
     // Free tools only; the generation tools are not allowlisted and run only with a user approval (see creativo-guard.js).
-    toolNames: () => [...FREE_MCP_TOOLS],
+    toolNames: (settings = {}) => [...FREE_MCP_TOOLS.filter((t) => !LEARNING_MCP_TOOLS.includes(t)), ...(settings.learning === false ? [] : AGENT_LEARNING_TOOL_NAMES)],
     builtinTools: ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch', 'Skill'],
     skills: [...CREATIVO_SKILLS],
     // Only these Bash patterns replace the bare `Bash` in --allowedTools.
@@ -71,7 +78,7 @@ export const AGENTS = Object.freeze({
     // Sonnet by default (the CLI's own default model reads a much larger context); Codex options for image generation.
     defaultSettings: CREATIVO_DEFAULT_SETTINGS,
     settingsSchema: CREATIVO_SETTINGS_SCHEMA,
-    schemaExtra: APPROVAL_SCHEMA,
+    schemaExtra: CREATIVO_SCHEMA,
     workspaceMd: null,
     systemPrompt: ({ dataDir, lessons }) => {
       const root = creativoRoot();
@@ -79,7 +86,9 @@ export const AGENTS = Object.freeze({
     },
     stepLabel: creativoStepLabel,
     grounding: false,
-    makeHooks: () => ({}),
+    // Same loop as the Analista, over the creativo's own outcomes (see creativo-learning.js).
+    makeHooks: () => makeHooks({ chatCorrections: true, refresh: ({ store, dataDir }) => refreshCreativoLessons({ store, dataDir }) }),
+    learningCycle: ({ dataDir, store }) => ({ candidates: refreshCreativoLessons({ store, dataDir }) }),
     launch: async ({ dataDir, settings }) => {
       const launch = prepareCreativoLaunch({ dataDir, settings });
       // The ElevenLabs key (from the keyring, through the app) is handed to the MCP server once, over loopback: never in Claude Code's env.
@@ -89,8 +98,7 @@ export const AGENTS = Object.freeze({
       return { ...launch, toolsEnv: { ...launch.toolsEnv, AGENTAUTO_KEY_PORT: String(broker.port), AGENTAUTO_KEY_NONCE: broker.nonce }, cleanup: () => broker.close() };
     },
     sanitizeEnv: scrubSecrets,
-    // Lessons, recommendations and quality checks belong to later phases (6) or to the ads analyst.
-    tabs: ['chat', 'ajustes'],
+    tabs: ['chat', 'lecciones', 'hoja', 'ajustes'],
     starters: [
       '¿Qué le falta al producto Bebidas en Venezuela?',
       'Usa la skill de redacción para proponer 3 títulos para el PDF 06 de bebidas típicas venezolanas',
@@ -98,6 +106,46 @@ export const AGENTS = Object.freeze({
       'Busca videos de referencia de micheladas en TikTok y descarga el mejor',
     ],
     welcome: { title: 'Cuéntame qué quieres crear', text: 'Trabajo con tus skills y los archivos de tus productos. Las imágenes usan tu plan de ChatGPT y los audios créditos de ElevenLabs: antes de generar algo te muestro qué y cuánto, y solo sigo cuando lo apruebes.' },
+  }),
+  investigador: defineAgent({
+    id: 'investigador',
+    name: 'Investigador de productos',
+    shortName: 'Investigador',
+    description: 'Mide la competencia en la Biblioteca de anuncios de Meta, clasifica cada ángulo, estima si sería rentable y aprende de los productos que lanzas.',
+    icon: 'Search',
+    dataSubdir: 'agents/investigador',
+    // Private workspace: the agent writes nothing there (reports go through save_research into the owner's investigaciones folder).
+    cwd: (dataDir) => workspaceDir(dataDir, 'investigador'),
+    mcpServers: { investigador: 'investigador-mcp.js' },
+    toolNames: (settings = {}) => [...INVESTIGADOR_TOOL_NAMES, ...(settings.learning === false ? [] : AGENT_LEARNING_TOOL_NAMES)],
+    // Read for its own skill and past reports, the web tools (the browser tools come from agent.launch); everything is confined by investigador-guard.js.
+    builtinTools: ['Read', 'Skill', 'WebSearch', 'WebFetch'],
+    skills: [...INVESTIGADOR_SKILLS],
+    defaultSettings: INVESTIGADOR_DEFAULT_SETTINGS,
+    schemaExtra: RESEARCH_SCHEMA,
+    workspaceMd: null,
+    systemPrompt: ({ now, lessons, settings }) => investigadorPrompt({
+      researchDir: researchDirOf(), thresholds: activeThresholds(lessons.filter((l) => typeof l === 'object')), lessons: settings.learning === false ? [] : lessons, today: localDate(now),
+    }),
+    stepLabel: investigadorStepLabel,
+    grounding: false,
+    makeHooks: () => makeHooks({ chatCorrections: true }),
+    // "Medir ahora" in Lecciones: re-check the launched products and store the threshold candidates that follow.
+    learningCycle: ({ dataDir, store }) => {
+      const ctx = { dataDir, getStore: () => store, research: createResearch(store.db, { researchDir: researchDirOf() }), learning: true };
+      const res = proposeUpdates(ctx);
+      return { candidates: res.nuevas ?? 0, faltan_resultados: res.faltan_resultados ?? 0 };
+    },
+    launch: async ({ dataDir }) => prepareInvestigadorLaunch({ dataDir }),
+    sanitizeEnv: scrubSecrets,
+    tabs: ['chat', 'lecciones', 'informes', 'ajustes'],
+    starters: [
+      'Mide cuántos anuncios activos hay de «recetas air fryer» en Colombia y México',
+      '¿Qué ángulos de infoproducto de cocina están saturados y cuáles tienen hueco?',
+      'Revisa la competencia de «oraciones cristianas» en los países hispanos',
+      '¿Cómo les fue a los productos que investigamos y lanzamos?',
+    ],
+    welcome: { title: 'Cuéntame qué idea quieres validar', text: 'Mido cuántos anuncios activos hay en la Biblioteca de anuncios de Meta (solo lectura, sin iniciar sesión), clasifico el ángulo, estimo la rentabilidad y guardo un informe. Necesito tu Chrome abierto con la extensión de Claude.' },
   }),
 });
 

@@ -33,17 +33,21 @@ test('the Analista claude args are byte-for-byte what they were before the regis
   assert.deepEqual(bare, GOLDEN.nomodel);
 });
 
-test('the registry holds the Analista and the Agente creativo and rejects unknown ids', () => {
-  assert.deepEqual(AGENT_IDS, ['analista', 'creativo']);
+test('the registry holds the three agents and rejects unknown ids', () => {
+  assert.deepEqual(AGENT_IDS, ['analista', 'creativo', 'investigador']);
   assert.equal(getAgent().id, 'analista');
   assert.equal(getAgent('').id, 'analista');
   assert.equal(getAgent('creativo').id, 'creativo');
   assert.throws(() => getAgent('constructor'), /desconocido/);
   assert.throws(() => getAgent('../x'), /desconocido/);
-  assert.deepEqual(publicAgents().map((a) => a.id), ['analista', 'creativo']);
+  assert.deepEqual(publicAgents().map((a) => a.id), ['analista', 'creativo', 'investigador']);
   assert.equal(publicAgents()[0].name, 'Analista de publicidad');
   assert.equal(publicAgents()[1].name, 'Agente creativo');
-  assert.deepEqual(publicAgents()[1].tabs, ['chat', 'ajustes']);
+  assert.deepEqual(publicAgents()[1].tabs, ['chat', 'lecciones', 'hoja', 'ajustes']);
+  assert.equal(publicAgents()[2].name, 'Investigador de productos');
+  assert.deepEqual(publicAgents()[2].tabs, ['chat', 'lecciones', 'informes', 'ajustes']);
+  // Every agent that is not the Analista learns too: the Lecciones tab exists for all three.
+  assert.ok(publicAgents().every((a) => a.tabs.includes('lecciones')));
   assert.ok(publicAgents()[0].tabs.includes('recomendaciones'));
   // The UI gets plain data only: no functions or paths.
   assert.ok(!JSON.stringify(publicAgents()).includes('\\'));
@@ -126,7 +130,7 @@ test('agent-api rejects unknown agents and lists the registry', async () => {
     assert.equal((await runCommand('agents-list', {}, { dataDir: fx.dataDir })).agents[0].id, 'analista');
     assert.deepEqual((await runCommand('sessions', {}, { dataDir: fx.dataDir, agentId: 'analista' })).sessions, []);
     await assert.rejects(runCommand('eval-bank', {}, { dataDir: fx.dataDir, agentId: 'nope' }), AgentError);
-    await assert.rejects(runCommand('learning-run', {}, { dataDir: fx.dataDir, agentId: 'creativo' }), /solo existe para el Analista/);
+    await assert.rejects(runCommand('recommendations', {}, { dataDir: fx.dataDir, agentId: 'creativo' }), /solo existe para el Analista/);
     assert.deepEqual((await runCommand('sessions', {}, { dataDir: fx.dataDir, agentId: 'creativo' })).sessions, []);
   } finally {
     fx.cleanup();

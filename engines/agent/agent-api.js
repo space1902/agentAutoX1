@@ -3,10 +3,18 @@ import fs from 'node:fs';
 
 import { openAgentStore } from './agent-db.js';
 import { locateClaude } from './claude-cli.js';
-import { adsDbPath, agentDbPath } from './paths.js';
+import { adsDbPath, agentDbPath, agentDir } from './paths.js';
 import { getAgent, publicAgents, UnknownAgentError } from './registry.js';
 import { loadSettings, saveSettings, SettingsError } from './settings.js';
 import { createApprovals } from './creativo-approvals.js';
+import { creativoRoot } from './creativo-workspace.js';
+import { createOutputs, refreshCreativoLessons } from './creativo-learning.js';
+import { createRoadmap } from './creativo-roadmap.js';
+import { researchDirOf } from './investigador-workspace.js';
+import { markLaunched } from './investigador-tools.js';
+import { createResearch } from './research-store.js';
+import { activeThresholds } from './research-thresholds.js';
+import { SIGNAL_WEIGHTS } from './signals.js';
 import { codexEnv, CodexError, ensureChatGptLogin, locateCodex, resolveCodexHome } from './creativo-codex.js';
 import { editLesson, learningSummary, recordFeedback, runLearningCycle, setLessonStatus } from './learning.js';
 import { runTurn } from './turn.js';
@@ -16,11 +24,12 @@ import { loadDataset } from './metrics.js';
 export class AgentError extends Error {}
 
 export const STREAMING = ['turn', 'eval-run'];
-const COMMANDS = ['agents-list', 'status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail', 'proposals', 'proposal-decide', 'codex-status'];
+const COMMANDS = ['agents-list', 'status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail', 'proposals', 'proposal-decide', 'codex-status', 'roadmap-get', 'item-set', 'assets', 'asset-set', 'research-list', 'research-launch'];
 // Generation approvals and the Codex check exist only for the agent that generates files.
-const CREATIVO_ONLY = ['proposals', 'proposal-decide', 'codex-status'];
+const CREATIVO_ONLY = ['proposals', 'proposal-decide', 'codex-status', 'roadmap-get', 'item-set', 'assets', 'asset-set'];
+const INVESTIGADOR_ONLY = ['research-list', 'research-launch'];
 
-const ADS_ONLY = ['queries', 'recommendations', 'learning-run', 'eval-runs', 'eval-run-detail'];
+const ADS_ONLY = ['queries', 'recommendations', 'eval-runs', 'eval-run-detail'];
 
 const need = (cond, message) => {
   if (!cond) throw new AgentError(message);
@@ -88,13 +97,51 @@ export async function runCommand(command, payload, { dataDir, agentId }) {
   // Ads-metrics commands only make sense for the agent that reads the ads database.
   need(!ADS_ONLY.includes(command) || agent.usesAdsData, 'Ese comando solo existe para el Analista.');
   need(!CREATIVO_ONLY.includes(command) || agent.id === 'creativo', 'Ese comando solo existe para el Agente creativo.');
+  need(!INVESTIGADOR_ONLY.includes(command) || agent.id === 'investigador', 'Ese comando solo existe para el Investigador de productos.');
   const store = openAgentStore(dataDir, undefined, agent);
   try {
     if (command === 'proposals') return { proposals: createApprovals(store.db, { now: store.now }).list({ status: payload.status ? String(payload.status) : undefined, limit: Math.min(Number(payload.limit) || 30, 100) }) };
     if (command === 'proposal-decide') {
-      const res = createApprovals(store.db, { now: store.now }).decide(Number(payload.id), payload.approve === true);
+      const approvals = createApprovals(store.db, { now: store.now });
+      const res = approvals.decide(Number(payload.id), payload.approve === true);
       need(res.ok, res.error);
+      // The decision is learning material: approvals and rejections weigh on what the creativo proposes next.
+      const kind = res.status === 'approved' ? 'generacion_aprobada' : 'generacion_rechazada';
+      store.addSignal({ sessionId: approvals.get(payload.id)?.sessionId ?? null, kind, weight: SIGNAL_WEIGHTS[kind], note: String(approvals.get(payload.id)?.summary ?? '').slice(0, 200) || null });
       return { id: Number(payload.id), status: res.status };
+    }
+    if (command === 'roadmap-get' || command === 'item-set') {
+      const roadmap = createRoadmap(store.db, { root: creativoRoot(), agentDirPath: agentDir(dataDir, agent), now: store.now });
+      if (command === 'item-set') {
+        const res = roadmap.mark({ id: Number(payload.id), status: String(payload.status), note: payload.note, evidencePath: payload.evidencePath, by: 'usuario' });
+        need(!res.error, res.error);
+        return res;
+      }
+      const seeded = roadmap.seed();
+      // `next` = what to do now (dependencies met), computed in code like the propose_next tool.
+      return { seeded, board: roadmap.board({ product: payload.product ? String(payload.product) : undefined }).map((b) => ({ ...b, next: roadmap.proposeNext({ product: b.id, limit: 6 }) })) };
+    }
+    if (command === 'assets') return { assets: createOutputs(store.db, { now: store.now }).list({ status: payload.status ? String(payload.status) : undefined, limit: Math.min(Number(payload.limit) || 60, 200) }) };
+    if (command === 'asset-set') {
+      const res = createOutputs(store.db, { now: store.now }).setStatus(Number(payload.id), String(payload.status), { ctCode: payload.ctCode });
+      need(!res.error, res.error);
+      const kind = { used: 'activo_usado', discarded: 'activo_descartado' }[res.output.status];
+      if (kind && res.changed) store.addSignal({ kind, weight: SIGNAL_WEIGHTS[kind], note: res.output.path.split(/[\\/]/).pop() });
+      if (loadSettings(dataDir, agent).learning) refreshCreativoLessons({ store, dataDir });
+      return res;
+    }
+    if (command === 'research-list' || command === 'research-launch') {
+      const ctx = { dataDir, getStore: () => store, research: createResearch(store.db, { researchDir: researchDirOf() }), learning: true };
+      if (command === 'research-launch') {
+        const res = markLaunched(ctx, { ...payload, report_id: payload.reportId });
+        need(!res.error, res.error);
+        return res;
+      }
+      const launches = new Map(ctx.research.launches().map((l) => [l.reportId, l]));
+      return {
+        reports: ctx.research.reports({ limit: Math.min(Number(payload.limit) || 50, 200) }).map((r) => ({ ...r, measurements: ctx.research.measurements(r.id), launch: launches.get(r.id) ?? null })),
+        thresholds: activeThresholds(store.lessons('certified')),
+      };
     }
     if (command === 'eval-runs') return { runs: store.evalRuns() };
     if (command === 'eval-run-detail') return { run: store.evalRuns(500).find((r) => r.id === Number(payload.runId)) ?? null, results: store.evalResults(Number(payload.runId)) };
@@ -137,7 +184,9 @@ export async function runCommand(command, payload, { dataDir, agentId }) {
     if (command === 'recommendations') return { recommendations: store.recommendations(Number(payload.limit) || 200) };
     if (command === 'learning-run') {
       need(loadSettings(dataDir, agent).learning, 'El aprendizaje está desactivado en los ajustes.');
-      return runLearningCycle({ dataDir, store, force: true });
+      if (agent.usesAdsData) return runLearningCycle({ dataDir, store, force: true });
+      need(agent.learningCycle, 'Ese agente no mide resultados todavía.');
+      return agent.learningCycle({ dataDir, store });
     }
     if (command === 'queries') return { queries: store.recentQueries(Math.min(Number(payload.limit) || 50, 200)) };
   } finally {

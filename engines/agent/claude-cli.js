@@ -108,6 +108,7 @@ export function buildClaudeArgs({ agent = AGENTS.analista, mcpConfigFile, toolNa
     '--setting-sources', 'project',
     ...(extra.pluginDir ? ['--plugin-dir', extra.pluginDir] : []),
     ...(extra.settingsFile ? ['--settings', extra.settingsFile] : []),
+    ...(extra.flags ?? []),
     ...(agent.skills.length ? [] : ['--disable-slash-commands']),
     '--system-prompt-snapshot', 'off',
     '--append-system-prompt', appendSystemPrompt,
