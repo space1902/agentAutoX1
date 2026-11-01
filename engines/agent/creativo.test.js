@@ -53,7 +53,7 @@ test('creativo args: skills on (no --disable-slash-commands), plugin, settings, 
 
 test('creativo env: no keys, utf-8 for python, CLAUDE.md and auto-memory off, the login kept', () => {
   const env = scrubSecrets(childEnv({
-    PATH: 'C:\\bin', ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_API_KEY_SCRIPTS: 'k', ELEVENLABS_API_KEY: 'e', FAL_KEY: 'f', META_ACCESS_TOKEN: 't', GROQ_API_KEY: 'g', OPENAI_API_KEY: 'o',
+    PATH: 'C:\\bin', ANTHROPIC_API_KEY: 'sk-x', ANTHROPIC_API_KEY_SCRIPTS: 'k', ELEVENLABS_API_KEY: 'e', AGENTAUTO_ELEVEN_KEY: 'x', AGENTAUTO_META_TOKEN: 'm', AGENTAUTO_AI_KEY: 'a', FAL_KEY: 'f', META_ACCESS_TOKEN: 't', GROQ_API_KEY: 'g', OPENAI_API_KEY: 'o',
     AWS_SECRET_ACCESS_KEY: 'a', CLAUDE_CODE_OAUTH_TOKEN: 'login', CLAUDE_CODE_GIT_BASH_PATH: 'C:\\git\\bash.exe', USERPROFILE: HOME,
   }));
   assert.equal(env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, '1');
@@ -61,7 +61,7 @@ test('creativo env: no keys, utf-8 for python, CLAUDE.md and auto-memory off, th
   assert.equal(env.PYTHONUTF8, '1');
   assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, 'login');
   assert.equal(env.PATH, 'C:\\bin');
-  assert.deepEqual(Object.keys(env).filter((k) => /ANTHROPIC|ELEVEN|FAL_|META_|GROQ|OPENAI|AWS_/.test(k)), []);
+  assert.deepEqual(Object.keys(env).filter((k) => /ANTHROPIC|ELEVEN|FAL_|META_|GROQ|OPENAI|AWS_|AGENTAUTO_.*(KEY|TOKEN)/.test(k)), []);
 });
 
 // ---- guard: file tools -----------------------------------------------------------------------------------------
@@ -400,10 +400,10 @@ test('prepareCreativoLaunch writes the settings file and the env of the creativo
     assert.equal(launch.toolsEnv.AGENTAUTO_CODEX_MODEL, 'm1');
     assert.equal(launch.toolsEnv.AGENTAUTO_CODEX_EFFORT, 'medium');
     assert.ok(!('AGENTAUTO_ELEVEN_KEY' in launch.toolsEnv), 'no key reference when the app has none');
-    // With a key in the environment the config only carries a reference that Claude Code expands, never the value.
+    // The key never goes in the launch extras: the registry hands it over through the one-shot broker.
     const withKey = prepareCreativoLaunch({ dataDir: path.join(tmp, 'd'), root: ROOT, home, log: quiet, env: { AGENTAUTO_ELEVEN_KEY: 'sk-secret-value' } });
-    assert.equal(withKey.toolsEnv.AGENTAUTO_ELEVEN_KEY, '${AGENTAUTO_ELEVEN_KEY}');
     assert.ok(!JSON.stringify(withKey).includes('sk-secret-value'));
+    assert.ok(!('AGENTAUTO_ELEVEN_KEY' in withKey.toolsEnv));
     const settings = JSON.parse(fs.readFileSync(launch.settingsFile, 'utf8'));
     const command = settings.hooks.PreToolUse[0].hooks[0].command;
     assert.ok(command.includes('creativo-guard.js') && command.includes('--db') && command.includes('agent.db'));

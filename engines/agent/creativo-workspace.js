@@ -2,7 +2,7 @@
 //   - the local plugin <data>/agents/creativo/plugin/ with a whitelist of the user's skills (copied, refreshed when newer)
 //   - the --settings file with the deny rules and the PreToolUse guard hook (creativo-guard.js)
 //   - the env of the creativo MCP server (workspace root, Codex location, and a reference to the ElevenLabs key)
-//   - the child environment without any key-like variable (the ElevenLabs key is the one deliberate exception)
+//   - the child environment without any key-like variable (the ElevenLabs key too: it reaches only the MCP server)
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -134,7 +134,8 @@ export function buildGuardSettings({ root, pluginDir, skillsDir, dbFile, nodePat
 // ---- environment -----------------------------------------------------------------------------------------------
 
 const KEEP_ENV = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_GIT_BASH_PATH', 'CLAUDE_CONFIG_DIR']);
-// The ElevenLabs key reaches the creativo MCP server through `${AGENTAUTO_ELEVEN_KEY}` in its config, so Claude Code must see it.
+// The ElevenLabs key arrives in the turn process under this name and is stripped from Claude Code's env (its Bash tool
+// would inherit it); the MCP server gets it through the one-shot broker of creativo-keybroker.js instead.
 export const ELEVEN_KEY_ENV = 'AGENTAUTO_ELEVEN_KEY';
 const SECRET_ENV = /(api[_-]?key|token|secret|passw|credential|private[_-]?key|^eleven|^xi_|^fal_|^groq|^deepseek|^openai|^higgsfield|^agentauto_.*key|^leona|^xpag|^meta_|^fb_|^aws_|^gh_|^github_)/i;
 
@@ -142,7 +143,7 @@ const SECRET_ENV = /(api[_-]?key|token|secret|passw|credential|private[_-]?key|^
 export function scrubSecrets(env) {
   const out = {};
   for (const [key, value] of Object.entries(env)) {
-    if (key !== ELEVEN_KEY_ENV && !KEEP_ENV.has(key.toUpperCase()) && SECRET_ENV.test(key)) continue;
+    if (!KEEP_ENV.has(key.toUpperCase()) && (key === ELEVEN_KEY_ENV || SECRET_ENV.test(key))) continue;
     out[key] = value;
   }
   return { ...out, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' };
@@ -173,8 +174,6 @@ export function prepareCreativoLaunch({ dataDir, settings = {}, root = creativoR
       AGENTAUTO_CODEX_MODEL: settings.codexModel || DEFAULT_CODEX_MODEL,
       AGENTAUTO_CODEX_EFFORT: settings.codexEffort || DEFAULT_CODEX_EFFORT,
       ...(codex ? { AGENTAUTO_CODEX_CMD: JSON.stringify(codex) } : {}),
-      // Only a reference: Claude Code expands it from its own env, so the key never lands in the config file on disk.
-      ...(env[ELEVEN_KEY_ENV] ? { [ELEVEN_KEY_ENV]: `\${${ELEVEN_KEY_ENV}}` } : {}),
     },
     plugin,
   };

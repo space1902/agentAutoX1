@@ -45,14 +45,18 @@ const PDF_KIND_DIR = { cover: 'portadas', page: 'fondos', illustration: 'ilustra
 
 /**
  * Layout of the generated files inside a product folder (matches how the products are organised today):
- *   images        <product>/<country>/imagenes[/<subfolder>]
+ *   images        <product>/<country>/imagenes (or <product>/<country>/<subfolder> when one is given)
  *   PDF artwork   <product>/pdf/<country>/arte/<portadas|fondos|ilustraciones>
  *   voices        <product>/audios/<country>
  */
 export function outputDir({ root, product, country, kind, pdfKind, subfolder }) {
   const productDir = resolveProductDir(root, product);
   const slug = countrySlug(country);
-  if (kind === 'image') return path.join(productDir, slug, 'imagenes', ...safeSubfolder(subfolder).split('/').filter(Boolean));
+  if (kind === 'image') {
+    // A subfolder replaces the default `imagenes` (e.g. "pruebas-codex" -> <product>/<country>/pruebas-codex).
+    const sub = safeSubfolder(subfolder).split('/').filter(Boolean);
+    return path.join(productDir, slug, ...(sub.length ? sub : ['imagenes']));
+  }
   if (kind === 'pdf-asset') return path.join(productDir, 'pdf', slug, 'arte', PDF_KIND_DIR[pdfKind] ?? 'otros');
   if (kind === 'audio') return path.join(productDir, 'audios', slug);
   throw new MediaError(`Tipo de archivo desconocido: ${kind}.`);

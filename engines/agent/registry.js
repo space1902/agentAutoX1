@@ -5,10 +5,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { APPROVAL_SCHEMA } from './creativo-approvals.js';
+import { startKeyBroker } from './creativo-keybroker.js';
 import { FREE_MCP_TOOLS } from './creativo-guard.js';
 import { getProductMap } from './creativo-map.js';
 import { creativoPrompt, creativoStepLabel } from './creativo-prompt.js';
-import { BASH_ALLOW, CREATIVO_DEFAULT_SETTINGS, CREATIVO_SETTINGS_SCHEMA, CREATIVO_SKILLS, creativoRoot, prepareCreativoLaunch, scrubSecrets } from './creativo-workspace.js';
+import { BASH_ALLOW, CREATIVO_DEFAULT_SETTINGS, ELEVEN_KEY_ENV, CREATIVO_SETTINGS_SCHEMA, CREATIVO_SKILLS, creativoRoot, prepareCreativoLaunch, scrubSecrets } from './creativo-workspace.js';
 import { makeHooks } from './learning.js';
 import { systemPromptAppend, workspaceClaudeMd } from './knowledge.js';
 import { accountToday } from './metrics.js';
@@ -79,7 +80,14 @@ export const AGENTS = Object.freeze({
     stepLabel: creativoStepLabel,
     grounding: false,
     makeHooks: () => ({}),
-    launch: ({ dataDir, settings }) => prepareCreativoLaunch({ dataDir, settings }),
+    launch: async ({ dataDir, settings }) => {
+      const launch = prepareCreativoLaunch({ dataDir, settings });
+      // The ElevenLabs key (from the keyring, through the app) is handed to the MCP server once, over loopback: never in Claude Code's env.
+      const key = process.env[ELEVEN_KEY_ENV];
+      if (!key) return launch;
+      const broker = await startKeyBroker({ key });
+      return { ...launch, toolsEnv: { ...launch.toolsEnv, AGENTAUTO_KEY_PORT: String(broker.port), AGENTAUTO_KEY_NONCE: broker.nonce }, cleanup: () => broker.close() };
+    },
     sanitizeEnv: scrubSecrets,
     // Lessons, recommendations and quality checks belong to later phases (6) or to the ads analyst.
     tabs: ['chat', 'ajustes'],

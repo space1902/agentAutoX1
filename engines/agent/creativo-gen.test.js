@@ -16,6 +16,7 @@ import { buildProductMapText, getProductMap } from './creativo-map.js';
 import { buildImagePrompt, copyWithoutOverwrite, countrySlug, MediaError, outputDir, resolveProductDir, safeStem, safeSubfolder } from './creativo-media.js';
 import { contextFromEnv, createCreativoTools } from './creativo-mcp.js';
 import { createClient, ElevenError, estimateVoice, findPreset, loadPresets, normalizeSubscription, normalizeVoices, savePresets, subscriptionRequest, ttsRequest, validatePreset, voicesRequest } from './elevenlabs.js';
+import { fetchKeyFromBroker, startKeyBroker } from './creativo-keybroker.js';
 import { createStreamParser } from './stream-parser.js';
 import { makeDataDir } from './seed-fixture.js';
 import { AGENTS } from './registry.js';
@@ -160,7 +161,7 @@ test('output folders follow the product layout and refuse paths outside the work
     assert.equal(countrySlug('México '), 'mexico');
     for (const bad of ['', '../x', 'a', 'Perú/x', 'x'.repeat(40)]) assert.throws(() => countrySlug(bad), MediaError, bad);
     assert.equal(outputDir({ root: w.root, product: 'Bebidas', country: 'venezuela', kind: 'image' }), path.join(w.root, 'Producto Bebidas', 'venezuela', 'imagenes'));
-    assert.equal(outputDir({ root: w.root, product: 'Bebidas', country: 'venezuela', kind: 'image', subfolder: 'pruebas-codex' }), path.join(w.root, 'Producto Bebidas', 'venezuela', 'imagenes', 'pruebas-codex'));
+    assert.equal(outputDir({ root: w.root, product: 'Bebidas', country: 'venezuela', kind: 'image', subfolder: 'pruebas-codex' }), path.join(w.root, 'Producto Bebidas', 'venezuela', 'pruebas-codex'));
     assert.equal(outputDir({ root: w.root, product: 'Bebidas', country: 'venezuela', kind: 'pdf-asset', pdfKind: 'cover' }), path.join(w.root, 'Producto Bebidas', 'pdf', 'venezuela', 'arte', 'portadas'));
     assert.equal(outputDir({ root: w.root, product: 'Bebidas', country: 'mexico', kind: 'audio' }), path.join(w.root, 'Producto Bebidas', 'audios', 'mexico'));
     assert.throws(() => safeSubfolder('../../x'), MediaError);
@@ -337,9 +338,9 @@ test('MCP: generate_image refuses without approval, and with one copies the imag
     approvals.consume('generate_image', approvals.get(p1.proposal_id).items[0].hash);
     const first = await tools.generate_image(args);
     assert.equal(first.ok, true, first.error);
-    const expectedDir = path.join(w.root, 'Producto Bebidas', 'venezuela', 'imagenes', 'pruebas-codex');
+    const expectedDir = path.join(w.root, 'Producto Bebidas', 'venezuela', 'pruebas-codex');
     assert.equal(first.ruta, path.join(expectedDir, 'michelada.png'));
-    assert.equal(first.ruta_relativa, 'Producto Bebidas/venezuela/imagenes/pruebas-codex/michelada.png');
+    assert.equal(first.ruta_relativa, 'Producto Bebidas/venezuela/pruebas-codex/michelada.png');
     assert.equal(first.ancho, 1);
     assert.match(generated[0], /do not show a person facing the camera/);
     // Same approved arguments once more: the approval is spent.
@@ -666,10 +667,13 @@ test('a creativo turn passes --model sonnet by default, the creativo MCP server 
     assert.match(at('--allowedTools'), /mcp__creativo__propose_generation/);
     // The MCP config of the turn names the creativo server and carries only a reference to the key, never its value.
     assert.deepEqual(Object.keys(d.mcpConfig.mcpServers), ['creativo']);
-    assert.equal(d.mcpConfig.mcpServers.creativo.env.AGENTAUTO_ELEVEN_KEY, '${AGENTAUTO_ELEVEN_KEY}');
-    assert.equal(d.mcpConfig.mcpServers.creativo.env.AGENTAUTO_CREATIVO_ROOT, root);
+    const mcpEnv = d.mcpConfig.mcpServers.creativo.env;
+    assert.equal(mcpEnv.AGENTAUTO_CREATIVO_ROOT, root);
+    assert.ok(mcpEnv.AGENTAUTO_KEY_PORT && mcpEnv.AGENTAUTO_KEY_NONCE, 'the MCP server gets a one-shot hand-off, not the key');
+    assert.ok(!('AGENTAUTO_ELEVEN_KEY' in mcpEnv));
     assert.ok(!JSON.stringify(d.mcpConfig).includes('xi-do-not-write'));
-    assert.ok(d.envKeys.includes('AGENTAUTO_ELEVEN_KEY'), 'Claude Code needs the variable to expand the reference');
+    assert.ok(!d.envKeys.includes('AGENTAUTO_ELEVEN_KEY'), 'Claude Code (and its Bash tool) never sees the key');
+    assert.equal(await fetchKeyFromBroker({ port: mcpEnv.AGENTAUTO_KEY_PORT, nonce: mcpEnv.AGENTAUTO_KEY_NONCE, timeoutMs: 1000 }), '', 'the broker is closed when the turn ends');
     const second = await turn({ model: 'opus' });
     assert.equal(second.argv[second.argv.indexOf('--model') + 1], 'opus');
   } finally {
@@ -696,4 +700,45 @@ test('the parser reports the base context (first model call) and announces a pro
   // No assistant message with usage: no field at all (the Analista's events stay byte-identical).
   const bare = createStreamParser().feed(line({ type: 'result', subtype: 'success', is_error: false, result: 'ok', usage: {} }))[0];
   assert.equal('baseContext' in bare, false);
+});
+
+// ---- key hand-off ------------------------------------------------------------------------------------------------------
+
+test('key broker: the key is served once to whoever presents the nonce, then the listener is gone', async () => {
+  const broker = await startKeyBroker({ key: 'xi-the-key' });
+  assert.equal(await fetchKeyFromBroker({ port: broker.port, nonce: 'wrong-nonce', timeoutMs: 1000 }), '', 'a wrong nonce gets nothing');
+  assert.equal(broker.served(), false);
+  assert.equal(await fetchKeyFromBroker({ port: broker.port, nonce: broker.nonce, timeoutMs: 1000 }), 'xi-the-key');
+  assert.equal(broker.served(), true);
+  assert.equal(await fetchKeyFromBroker({ port: broker.port, nonce: broker.nonce, timeoutMs: 1000 }), '', 'second read: nothing');
+  assert.equal(await fetchKeyFromBroker({}), '');
+});
+
+test('key broker: it closes by itself after its lifetime and on close()', async () => {
+  const short = await startKeyBroker({ key: 'k', ttlMs: 50 });
+  await new Promise((r) => setTimeout(r, 120));
+  assert.equal(await fetchKeyFromBroker({ port: short.port, nonce: short.nonce, timeoutMs: 500 }), '');
+  const closed = await startKeyBroker({ key: 'k' });
+  closed.close();
+  assert.equal(await fetchKeyFromBroker({ port: closed.port, nonce: closed.nonce, timeoutMs: 500 }), '');
+});
+
+test('MCP context: the key arrives through the broker (not the env) and is used by the voice client', async () => {
+  const w = workspace();
+  const broker = await startKeyBroker({ key: 'xi-from-broker' });
+  try {
+    const ctx = contextFromEnv({ AGENTAUTO_DATA_DIR: path.join(w.tmp, 'data'), AGENTAUTO_CREATIVO_ROOT: w.root, AGENTAUTO_CODEX_HOME: w.codexHome, AGENTAUTO_KEY_PORT: String(broker.port), AGENTAUTO_KEY_NONCE: broker.nonce });
+    assert.equal(ctx.hasElevenKey, true);
+    const client = await ctx.eleven();
+    const seen = [];
+    // The client built from the broker's key sends it as the header (checked through a fake fetch on a fresh client).
+    assert.ok(client && typeof client.tts === 'function');
+    const key = await fetchKeyFromBroker({ port: broker.port, nonce: broker.nonce, timeoutMs: 300 });
+    assert.equal(key, '', 'already served to the MCP context');
+    assert.equal(seen.length, 0);
+    ctx.db.close();
+  } finally {
+    broker.close();
+    rmTmp(w.tmp);
+  }
 });

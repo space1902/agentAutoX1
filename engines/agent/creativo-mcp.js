@@ -1,7 +1,8 @@
 // MCP stdio server of the Agente creativo (spawned by Claude Code from the per-turn mcp config).
 //   env: AGENTAUTO_DATA_DIR (required), AGENTAUTO_SESSION_ID, AGENTAUTO_CREATIVO_ROOT (workspace), AGENTAUTO_CODEX_CMD (JSON
 //        { command, prefixArgs }), AGENTAUTO_CODEX_HOME, AGENTAUTO_CODEX_MODEL, AGENTAUTO_CODEX_EFFORT,
-//        AGENTAUTO_ELEVEN_KEY (ElevenLabs key; arrives from the OS keyring through the app, never through the model)
+//        AGENTAUTO_KEY_PORT / AGENTAUTO_KEY_NONCE (one-shot loopback hand-off of the ElevenLabs key, see creativo-keybroker.js;
+//        the key comes from the OS keyring through the app and never passes through the model or Claude Code's env)
 // Tools:
 //   free:      propose_generation, list_voice_presets
 //   approved:  generate_image, design_pdf_asset, generate_voice (the PreToolUse hook spends the user's approval before
@@ -15,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { APPROVAL_SCHEMA, argsHash, createApprovals, GENERATION_TOOLS } from './creativo-approvals.js';
 import { generateWithCodex, locateCodex, resolveCodexHome, DEFAULT_CODEX_EFFORT, DEFAULT_CODEX_MODEL } from './creativo-codex.js';
 import { buildImagePrompt, copyWithoutOverwrite, normalizeAspect, outputDir, PURPOSES, resolveProductDir, countrySlug, safeStem, safeSubfolder, writeWithoutOverwrite } from './creativo-media.js';
+import { fetchKeyFromBroker } from './creativo-keybroker.js';
 import { createClient, DEFAULT_MODEL, estimateVoice, findPreset, loadPresets, MAX_TEXT_CHARS } from './elevenlabs.js';
 import { createMcpServer, serveStdio } from './mcp-protocol.js';
 import { agentDbPath } from './paths.js';
@@ -158,7 +160,7 @@ export function createCreativoTools(ctx) {
         let remaining = null;
         if (total.credits && ctx.eleven) {
           try {
-            remaining = (await ctx.eleven().subscription()).remaining;
+            remaining = (await (await ctx.eleven()).subscription()).remaining;
           } catch {
             /* the card works without the balance */
           }
@@ -189,7 +191,7 @@ export function createCreativoTools(ctx) {
           aspect: { type: 'string', enum: ['portrait', 'square', 'landscape'], description: 'Proporción (por defecto portrait 1024x1536).' },
           purpose: { type: 'string', enum: PURPOSES, description: 'reel = sin caras al frente.' },
           text: { type: 'string', description: 'Texto exacto que debe aparecer, solo si el usuario lo pidió.' },
-          subfolder: { type: 'string', description: 'Subcarpeta dentro de imagenes (opcional).' },
+          subfolder: { type: 'string', description: 'Carpeta del país donde guardar en vez de imagenes (opcional), por ejemplo pruebas.' },
         },
         required: ['prompt', 'product', 'country'],
       },
@@ -232,7 +234,7 @@ export function createCreativoTools(ctx) {
       handler: (args) =>
         spend('generate_voice', args, async () => {
           const { voice, estimate } = validateVoiceArgs(ctx, args);
-          const bytes = await ctx.eleven().tts({ voiceId: voice.voiceId, text: args.text, modelId: voice.modelId, settings: voice.settings });
+          const bytes = await (await ctx.eleven()).tts({ voiceId: voice.voiceId, text: args.text, modelId: voice.modelId, settings: voice.settings });
           const dir = outputDir({ root: ctx.root, product: args.product, country: args.country, kind: 'audio' });
           const file = writeWithoutOverwrite(bytes, dir, safeStem(args.filename, `audio-${stamp()}`), '.mp3');
           return { ok: true, ruta: file, ruta_relativa: path.relative(ctx.root, file).replace(/\\/g, '/'), caracteres: estimate.chars, creditos_estimados: estimate.credits, preset: voice.presetName };
@@ -257,7 +259,8 @@ export function contextFromEnv(env = process.env) {
     codex = null;
   }
   codex ??= locateCodex({ env });
-  const key = env.AGENTAUTO_ELEVEN_KEY && env.AGENTAUTO_ELEVEN_KEY.trim() ? env.AGENTAUTO_ELEVEN_KEY.trim() : '';
+  // The key comes from the turn process once, at startup (before the model can run anything); the env variable is only a fallback for tests.
+  const keyPromise = env.AGENTAUTO_KEY_PORT ? fetchKeyFromBroker({ port: env.AGENTAUTO_KEY_PORT, nonce: env.AGENTAUTO_KEY_NONCE }) : Promise.resolve((env.AGENTAUTO_ELEVEN_KEY ?? '').trim());
   const ctx = {
     db,
     root: env.AGENTAUTO_CREATIVO_ROOT,
@@ -265,8 +268,8 @@ export function contextFromEnv(env = process.env) {
     sessionId: env.AGENTAUTO_SESSION_ID || null,
     approvals: createApprovals(db),
     presets: () => loadPresets(dataDir),
-    hasElevenKey: Boolean(key),
-    eleven: () => createClient({ key }),
+    hasElevenKey: Boolean(env.AGENTAUTO_KEY_PORT || env.AGENTAUTO_ELEVEN_KEY),
+    eleven: async () => createClient({ key: await keyPromise }),
     generateImage: (instruction) => generateWithCodex({ instruction, codex, codexHome, model: env.AGENTAUTO_CODEX_MODEL || DEFAULT_CODEX_MODEL, effort: env.AGENTAUTO_CODEX_EFFORT || DEFAULT_CODEX_EFFORT, env }),
   };
   return ctx;

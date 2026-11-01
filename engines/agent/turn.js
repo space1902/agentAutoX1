@@ -86,6 +86,7 @@ export async function runTurn({ dataDir, agentId, sessionId, text, emit, registe
   const cfg = settings ?? loadSettings(dataDir, agent);
   const turnId = `${now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
   let mcpFile = null;
+  let launch = {};
   try {
     if (!String(text ?? '').trim()) throw new Error('Escribe una pregunta.');
     let session = sessionId ? store.getSession(sessionId) : null;
@@ -104,7 +105,7 @@ export async function runTurn({ dataDir, agentId, sessionId, text, emit, registe
     }
 
     ensureWorkspace(dataDir, cfg, agent);
-    const launch = agent.launch?.({ dataDir, settings: cfg }) ?? {};
+    launch = (await agent.launch?.({ dataDir, settings: cfg })) ?? {};
     mcpFile = writeMcpConfig(dataDir, { turnId, sessionId, question: text, learning: cfg.learning, toolsEnv: launch.toolsEnv, extraServers: launch.mcpServers }, agent);
     // An empty model means the CLI's own default, except for agents that declare theirs (the creativo: Sonnet).
     const model = cfg.model || agent.defaultSettings?.model || '';
@@ -192,6 +193,7 @@ export async function runTurn({ dataDir, agentId, sessionId, text, emit, registe
     emit({ type: 'error', sessionId: sessionId ?? null, error: message });
     return { ok: false, sessionId: sessionId ?? null, error: message };
   } finally {
+    launch.cleanup?.();
     if (mcpFile) fs.rmSync(mcpFile, { force: true });
     if (own) store.close();
   }
