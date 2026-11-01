@@ -7,6 +7,7 @@ import { adsDbPath, agentDbPath } from './paths.js';
 import { getAgent, publicAgents, UnknownAgentError } from './registry.js';
 import { loadSettings, saveSettings, SettingsError } from './settings.js';
 import { createApprovals } from './creativo-approvals.js';
+import { codexEnv, CodexError, ensureChatGptLogin, locateCodex, resolveCodexHome } from './creativo-codex.js';
 import { editLesson, learningSummary, recordFeedback, runLearningCycle, setLessonStatus } from './learning.js';
 import { runTurn } from './turn.js';
 import { bankForUi, estimateRun, runEval } from './evals/runner.js';
@@ -15,9 +16,9 @@ import { loadDataset } from './metrics.js';
 export class AgentError extends Error {}
 
 export const STREAMING = ['turn', 'eval-run'];
-const COMMANDS = ['agents-list', 'status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail', 'proposals', 'proposal-decide'];
-// Generation approvals exist only for the agent that generates files.
-const CREATIVO_ONLY = ['proposals', 'proposal-decide'];
+const COMMANDS = ['agents-list', 'status', 'sessions', 'session-new', 'session-rename', 'session-delete', 'messages', 'settings-get', 'settings-set', 'queries', 'lessons', 'lesson-set', 'lesson-edit', 'learning-get', 'learning-run', 'feedback', 'recommendations', 'eval-bank', 'eval-runs', 'eval-run-detail', 'proposals', 'proposal-decide', 'codex-status'];
+// Generation approvals and the Codex check exist only for the agent that generates files.
+const CREATIVO_ONLY = ['proposals', 'proposal-decide', 'codex-status'];
 
 const ADS_ONLY = ['queries', 'recommendations', 'learning-run', 'eval-runs', 'eval-run-detail'];
 
@@ -74,6 +75,10 @@ export async function runCommand(command, payload, { dataDir, agentId }) {
       workspace: agent.cwd(dataDir),
       settings,
     };
+  }
+  if (command === 'codex-status') {
+    need(agent.id === 'creativo', 'Ese comando solo existe para el Agente creativo.');
+    return codexStatus(loadSettings(dataDir, agent));
   }
   if (command === 'eval-bank') {
     need(agent.id === 'analista', 'Las evaluaciones solo existen para el Analista.');
@@ -139,4 +144,18 @@ export async function runCommand(command, payload, { dataDir, agentId }) {
     store.close();
   }
   throw new AgentError(`Comando del Analista no permitido: ${command}.`);
+}
+
+/** Is Codex installed and logged in with the ChatGPT plan, with the CODEX_HOME this app would use? */
+export async function codexStatus(settings, { env = process.env, runFn } = {}) {
+  const codexHome = resolveCodexHome({ override: settings.codexHome, env });
+  const codex = locateCodex({ override: settings.codexPath, env });
+  if (!codex) return { found: false, loggedIn: false, codexHome, message: 'No encuentro Codex en este equipo. Instálalo con `npm i -g @openai/codex`.' };
+  try {
+    await ensureChatGptLogin(codex, { env: codexEnv({ env, codexHome }), ...(runFn ? { runFn } : {}) });
+    return { found: true, loggedIn: true, codexHome, message: 'Codex está listo y usa tu plan de ChatGPT.' };
+  } catch (error) {
+    if (!(error instanceof CodexError)) throw error;
+    return { found: true, loggedIn: false, codexHome, message: error.message };
+  }
 }

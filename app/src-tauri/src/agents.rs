@@ -25,6 +25,8 @@ use std::sync::{Arc, Mutex};
 pub const AGENTS: &[(&str, &str)] = &[("analista", "Analista"), ("creativo", "Agente creativo")];
 /// The agent the legacy `analista_*` commands act on.
 pub const LEGACY_AGENT: &str = "analista";
+/// The agent that generates files and may be handed the ElevenLabs key.
+const CREATIVO_AGENT: &str = "creativo";
 
 /// Returns the canonical id when `id` is a registered agent.
 pub fn valid_agent_id(id: &str) -> Result<&'static str, String> {
@@ -43,6 +45,7 @@ fn label_of(id: &str) -> &'static str {
 const ONE_SHOT: &[&str] = &[
     "agents-list", "status", "sessions", "session-new", "session-rename", "session-delete", "messages", "settings-get", "settings-set", "queries",
     "lessons", "lesson-set", "lesson-edit", "learning-get", "learning-run", "feedback", "recommendations", "eval-bank", "eval-runs", "eval-run-detail",
+    "proposals", "proposal-decide", "codex-status",
 ];
 /// Commands that stream JSON events until they finish.
 const STREAMING: &[&str] = &["turn", "eval-run"];
@@ -113,7 +116,7 @@ pub fn build_args(agent_id: &str, command: &str, payload: Option<&Value>) -> Vec
 }
 
 /// Variables that would let a child fall back to a paid API: never handed down, whatever the app was started with.
-const SCRUB_ENV: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_BEARER_TOKEN_BEDROCK"];
+const SCRUB_ENV: &[&str] = &["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_BEARER_TOKEN_BEDROCK", crate::voices::KEY_ENV];
 
 fn command_for(settings: &Settings, args: &[String], grouped: bool) -> Result<std::process::Command, String> {
     let dir = agent_dir(settings);
@@ -124,6 +127,10 @@ fn command_for(settings: &Settings, args: &[String], grouped: bool) -> Result<st
     cmd.args(args).current_dir(&dir).env("AGENTAUTO_DATA_DIR", &settings.data_dir);
     for key in SCRUB_ENV {
         cmd.env_remove(key);
+    }
+    // The folder with the products, so the engine does not depend on a path written in its code.
+    if let Some(root) = crate::voices::workspace_root() {
+        cmd.env(crate::voices::ROOT_ENV, root);
     }
     Ok(cmd)
 }
@@ -241,7 +248,13 @@ impl Agents {
         if let Some(busy) = self.busy_agent() {
             return Err(busy_message(agent_id, &busy));
         }
-        let cmd = command_for(settings, &build_args(agent_id, command, Some(payload)), true)?;
+        let mut cmd = command_for(settings, &build_args(agent_id, command, Some(payload)), true)?;
+        // Only the Agente creativo's chat turn may use the ElevenLabs key (through the approval flow); it travels in the env, like the Meta token.
+        if agent_id == CREATIVO_AGENT && command == "turn" {
+            if let Ok(Some(key)) = crate::voices::stored_key() {
+                cmd.env(crate::voices::KEY_ENV, key);
+            }
+        }
         let procs = self.procs(agent_id);
         let emit = tagging_emit(agent_id, emit);
         match command {
@@ -355,6 +368,18 @@ mod tests {
         assert!(other.starts_with("El Analista ya está trabajando.") && other.contains("un agente activo a la vez"));
         let creative = busy_message("analista", "creativo");
         assert!(creative.starts_with("El Agente creativo ya está trabajando.") && creative.contains("un agente activo a la vez"));
+    }
+
+    #[test]
+    fn the_elevenlabs_key_is_scrubbed_from_every_child_and_the_workspace_root_is_passed() {
+        let settings = Settings::defaults(&crate::settings::find_project_root());
+        let cmd = command_for(&settings, &build_args("analista", "status", None), false).expect("agent-cli.js exists in the repo");
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.iter().any(|(k, v)| *k == crate::voices::KEY_ENV && v.is_none()), "the key variable must be removed");
+        assert!(envs.iter().any(|(k, v)| *k == crate::voices::ROOT_ENV && v.is_some()), "the products folder is passed");
+        for c in ["proposals", "proposal-decide", "codex-status"] {
+            assert!(ONE_SHOT.contains(&c), "{c}");
+        }
     }
 
     #[test]

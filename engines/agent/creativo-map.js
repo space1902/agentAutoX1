@@ -165,3 +165,18 @@ export function getProductMap({ root, cacheFile, now = new Date() } = {}) {
     return '';
   }
 }
+
+/** Active products and their countries (for the pickers of the Voces section). */
+export function listProducts(root) {
+  try {
+    return dirs(root)
+      .filter((d) => /^producto\s+/i.test(d.name) && !/^producto ideas$/i.test(d.name))
+      .map((d) => {
+        const dir = path.join(root, d.name);
+        const top = dirs(dir).map((t) => ({ name: t.name, children: dirs(path.join(dir, t.name)).map((c) => c.name) }));
+        return { name: d.name.replace(/^producto\s+/i, ''), folder: d.name, countries: detectCountries(top).countries };
+      });
+  } catch {
+    return [];
+  }
+}

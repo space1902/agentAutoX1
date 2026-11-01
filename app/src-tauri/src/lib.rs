@@ -14,6 +14,7 @@ mod pods;
 mod profiles;
 mod settings;
 mod util;
+mod voices;
 mod pairing;
 mod warmup;
 
@@ -574,6 +575,30 @@ async fn ads_tick_now(app: AppHandle, state: State<'_, AppState>) -> Result<Valu
     Ok(result)
 }
 
+// ---- Voces section (ElevenLabs). The key lives in the Windows Credential Manager and is never returned.
+
+/// Engine commands of the Voces section; the key is injected only for the ones that call ElevenLabs.
+#[tauri::command]
+async fn voices_call(state: State<'_, AppState>, command: String, payload: Value) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || voices::call_with_stored_key(&settings, &command, &payload)).await
+}
+
+#[tauri::command]
+async fn voices_key_status() -> Result<ai::KeyStatus, String> {
+    blocking(voices::key_status).await
+}
+
+#[tauri::command]
+async fn voices_key_set(key: String) -> Result<ai::KeyStatus, String> {
+    blocking(move || voices::set_key(&key)).await
+}
+
+#[tauri::command]
+async fn voices_key_clear() -> Result<(), String> {
+    blocking(voices::clear_key).await
+}
+
 // ---- Agentes (chat agents on the local Claude Code; the engine's registry lists them)
 
 /// One-shot command of an agent. `agent_id` is checked against the fixed list before anything runs.
@@ -938,6 +963,10 @@ pub fn run() {
             ads_token_clear,
             ads_token_test,
             ads_token_import_from_monitor,
+            voices_call,
+            voices_key_status,
+            voices_key_set,
+            voices_key_clear,
             agent_call,
             agent_start,
             agent_cancel,
