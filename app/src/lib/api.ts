@@ -205,6 +205,10 @@ export interface KeepAliveStatus {
 export interface EmbedState {
   attached: string[];
   active: string | null;
+  /** Pods still starting: their window is not embedded yet. */
+  booting: string[];
+  /** Pods whose window stopped answering and was released by the watchdog. */
+  hung: string[];
 }
 
 export type Light = "verde" | "amarillo" | "rojo";
@@ -264,8 +268,10 @@ export const api = {
   cancelPodLinks: () => invoke<void>("cancel_pod_links"),
   getEmbedView: async () => Boolean(((await invoke<Settings>("get_settings")) as Settings & { embedView?: boolean }).embedView),
   setEmbedView: (enabled: boolean) => invoke<Settings>("set_embed_view", { enabled }),
-  embedAttach: (name: string, x: number, y: number, width: number, height: number, viewWidth: number, viewHeight: number, dpr: number) =>
-    invoke<EmbedState>("embed_attach", { name, x, y, width, height, viewWidth, viewHeight, dpr }),
+  embedAttach: (name: string, serial: string | null, x: number, y: number, width: number, height: number, viewWidth: number, viewHeight: number, dpr: number) =>
+    invoke<EmbedState>("embed_attach", { name, serial, x, y, width, height, viewWidth, viewHeight, dpr }),
+  embedState: () => invoke<EmbedState>("embed_state"),
+  embedRetry: (name: string) => invoke<EmbedState>("embed_retry", { name }),
   embedResize: (name: string, x: number, y: number, width: number, height: number, viewWidth: number, viewHeight: number, dpr: number) =>
     invoke<void>("embed_resize", { name, x, y, width, height, viewWidth, viewHeight, dpr }),
   embedActivate: (name: string | null) => invoke<EmbedState>("embed_activate", { name }),

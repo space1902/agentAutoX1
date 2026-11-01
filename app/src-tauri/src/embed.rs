@@ -11,11 +11,16 @@
 //! placeholder, so it is tall and narrow instead of stretched to the full width.
 //! Everything is restored (no owner, original position and size) when the tab is closed or the app exits.
 //!
+//! A pod window belongs to ANOTHER process, so nothing here may wait for it: an owned window that hangs (a BlueStacks
+//! that never finished booting) blocks every synchronous call on its owner, i.e. the whole app. Placement and
+//! visibility therefore use the asynchronous Win32 variants, ownership and region changes are skipped for a window
+//! that does not answer, a pod is only embedded once it has booted, and a watchdog releases a window that stays hung.
+//!
 //! The rules (aspect fitting, window choice, bookkeeping) are pure and tested here against a fake `WinApi`;
 //! `RealWin` is the user32 implementation and is exercised with dummy windows (never with a real pod in the tests).
 
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -107,6 +112,42 @@ pub fn pick_window(windows: &[WindowInfo], title: &str, exe_contains: Option<&st
     found.iter().find(|w| w.visible).or(found.first()).map(|w| w.hwnd)
 }
 
+/// How long a pod window may stay unresponsive before the watchdog lets go of it.
+pub const HANG_LIMIT_MS: u64 = 5_000;
+
+/// One watchdog observation. `since` is when the current hang started (`None` while responsive); returns the new
+/// `since` and whether the window must be released now. A responsive sample always resets the countdown.
+pub fn hang_step(since: Option<u64>, hung: bool, now_ms: u64, limit_ms: u64) -> (Option<u64>, bool) {
+    if !hung {
+        return (None, false);
+    }
+    let start = since.unwrap_or(now_ms);
+    (Some(start), now_ms.saturating_sub(start) >= limit_ms)
+}
+
+/// Whether a pod may be embedded yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Readiness {
+    Ready,
+    /// Still starting; the text says what is missing (for the log).
+    Booting(&'static str),
+}
+
+/// A pod is ready once adb knows its serial, Android reports `sys.boot_completed` = 1 and its window answers.
+/// `boot_completed` is only evaluated (it talks to adb) when the cheaper checks passed.
+pub fn readiness(serial: Option<&str>, window_hung: bool, boot_completed: impl FnOnce() -> bool) -> Readiness {
+    if serial.is_none_or(|s| s.trim().is_empty()) {
+        return Readiness::Booting("sin serial adb");
+    }
+    if window_hung {
+        return Readiness::Booting("ventana sin responder");
+    }
+    if !boot_completed() {
+        return Readiness::Booting("Android no terminó de arrancar");
+    }
+    Readiness::Ready
+}
+
 pub fn pod_window_title(pod_name: &str) -> String {
     format!("wa-{pod_name}")
 }
@@ -133,6 +174,10 @@ pub trait WinApi {
     /// Back to an ownerless window at its original position and size.
     fn restore(&self, hwnd: isize, original: &Original) -> Result<(), String>;
     fn focus(&self, hwnd: isize);
+    /// True when the window's thread does not answer (checked without waiting more than a fraction of a second).
+    fn is_hung(&self, hwnd: isize) -> bool;
+    /// Lets go of an unresponsive window without waiting for it: hidden, no owner, no region (if that is safe).
+    fn release(&self, hwnd: isize);
 }
 
 struct Attached {
@@ -144,11 +189,22 @@ struct Attached {
     container: Rect,
 }
 
+/// The part of an attached window the bookkeeping needs without touching the `attached` lock.
+#[derive(Clone, Debug)]
+struct Watched {
+    hwnd: isize,
+    original: Original,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbedState {
     pub attached: Vec<String>,
     pub active: Option<String>,
+    /// Pods waiting for Android to finish booting before their window is embedded.
+    pub booting: Vec<String>,
+    /// Pods whose window stopped answering and was released by the watchdog.
+    pub hung: Vec<String>,
 }
 
 pub struct Embedder<A: WinApi> {
@@ -159,11 +215,27 @@ pub struct Embedder<A: WinApi> {
     /// Visible part of the webview (client coordinates, physical pixels). Whatever of a pod falls outside it is
     /// clipped away, so a scrolled page never lets the native window draw over the title bar or other cards.
     viewport: Mutex<Option<Rect>>,
+    // Leaf locks, never held across a Win32 call: the watchdog and `state` use only these, so they keep working even
+    // when a worker is stuck inside a call made while holding `attached`.
+    watch: Mutex<BTreeMap<String, Watched>>,
+    hung: Mutex<BTreeMap<String, Watched>>,
+    hang_since: Mutex<BTreeMap<String, u64>>,
+    booting: Mutex<BTreeSet<String>>,
 }
 
 impl<A: WinApi> Embedder<A> {
     pub fn new(api: A, parent: isize) -> Embedder<A> {
-        Embedder { api, parent, attached: Mutex::new(BTreeMap::new()), active: Mutex::new(None), viewport: Mutex::new(None) }
+        Embedder {
+            api,
+            parent,
+            attached: Mutex::new(BTreeMap::new()),
+            active: Mutex::new(None),
+            viewport: Mutex::new(None),
+            watch: Mutex::new(BTreeMap::new()),
+            hung: Mutex::new(BTreeMap::new()),
+            hang_since: Mutex::new(BTreeMap::new()),
+            booting: Mutex::new(BTreeSet::new()),
+        }
     }
 
     pub fn set_viewport(&self, viewport: Rect) {
@@ -200,6 +272,10 @@ impl<A: WinApi> Embedder<A> {
 
     /// Shows/hides (as the tab and the scroll position require), places and clips one pod.
     fn layout(&self, entry: &Attached, visible: bool) -> Result<(), String> {
+        // A window that does not answer is left alone; the watchdog decides whether to release it.
+        if self.api.is_hung(entry.hwnd) {
+            return Ok(());
+        }
         if self.visible_part(entry).is_none() {
             self.api.set_visible(entry.hwnd, false);
             return Ok(());
@@ -218,7 +294,15 @@ impl<A: WinApi> Embedder<A> {
     }
 
     pub fn state(&self) -> EmbedState {
-        EmbedState { attached: self.attached.lock().unwrap().keys().cloned().collect(), active: self.active.lock().unwrap().clone() }
+        let (watch, hung) = (crate::util::lock(&self.watch), crate::util::lock(&self.hung));
+        let mut attached: Vec<String> = watch.keys().chain(hung.keys()).cloned().collect();
+        attached.sort();
+        EmbedState {
+            attached,
+            active: crate::util::lock(&self.active).clone(),
+            booting: crate::util::lock(&self.booting).iter().cloned().collect(),
+            hung: hung.keys().cloned().collect(),
+        }
     }
 
     /// Where the window goes on screen: the native aspect fitted and centred in the measured box.
@@ -226,21 +310,52 @@ impl<A: WinApi> Embedder<A> {
         to_screen(self.api.client_origin(self.parent), Self::pod_rect(entry))
     }
 
+    fn is_live(&self, pod: &str) -> bool {
+        crate::util::lock(&self.watch).contains_key(pod)
+    }
+
+    fn is_released(&self, pod: &str) -> bool {
+        crate::util::lock(&self.hung).contains_key(pod)
+    }
+
+    /// Decides whether `pod` may be embedded now. While it is not ready the pod is listed as "booting" (the UI shows
+    /// "Arrancando…") and its window is never touched.
+    pub fn prepare(&self, pod: &str, serial: Option<&str>, boot_completed: impl FnOnce() -> bool) -> Readiness {
+        if self.is_live(pod) || self.is_released(pod) {
+            return Readiness::Ready; // already embedded (or released): nothing new to wait for
+        }
+        let window_hung = self.api.find_window(&pod_window_title(pod)).is_some_and(|hwnd| self.api.is_hung(hwnd));
+        let result = readiness(serial, window_hung, boot_completed);
+        let mut booting = crate::util::lock(&self.booting);
+        match result {
+            Readiness::Ready => booting.remove(pod),
+            Readiness::Booting(_) => booting.insert(pod.to_string()),
+        };
+        result
+    }
+
     /// Embeds the pod's window inside `container` (client coordinates, physical pixels), or just re-places it when it
     /// is already embedded. The first call remembers the original look so `detach` can give it back.
     pub fn attach(&self, pod: &str, container: Rect) -> Result<(), String> {
+        if self.is_released(pod) {
+            return Err(format!("La ventana del pod «{pod}» no responde."));
+        }
         let mut attached = self.attached.lock().unwrap();
         if let Some(existing) = attached.get_mut(pod) {
-            if self.api.is_window(existing.hwnd) {
+            if self.is_live(pod) && self.api.is_window(existing.hwnd) {
                 existing.container = container;
                 return self.layout(existing, self.is_active(pod));
             }
-            attached.remove(pod); // the window was closed: embed the new one
+            attached.remove(pod); // closed (or detached while we were busy): embed the new one
+            crate::util::lock(&self.watch).remove(pod);
         }
         let hwnd = self
             .api
             .find_window(&pod_window_title(pod))
             .ok_or_else(|| format!("No encuentro la ventana de BlueStacks del pod «{pod}». ¿Está encendido?"))?;
+        if self.api.is_hung(hwnd) {
+            return Err(format!("La ventana del pod «{pod}» no responde."));
+        }
         let measured = self.api.snapshot(hwnd)?;
         let entry = Attached {
             hwnd,
@@ -248,16 +363,28 @@ impl<A: WinApi> Embedder<A> {
             original: Original { rect: restorable_rect(measured.rect) },
             container,
         };
-        self.api.embed(hwnd, self.parent, self.screen_rect(&entry))?;
-        if self.viewport.lock().unwrap().is_some() {
-            self.clip(&entry);
-            self.api.place(hwnd, self.screen_rect(&entry))?;
+        // Watched BEFORE the first owner change, so the watchdog can release it if that call finds a hung window.
+        crate::util::lock(&self.watch).insert(pod.to_string(), Watched { hwnd, original: entry.original.clone() });
+        let placed = self.api.embed(hwnd, self.parent, self.screen_rect(&entry)).and_then(|()| {
+            if self.viewport.lock().unwrap().is_some() {
+                self.clip(&entry);
+                self.api.place(hwnd, self.screen_rect(&entry))?;
+            }
+            Ok(())
+        });
+        if let Err(e) = placed {
+            crate::util::lock(&self.watch).remove(pod);
+            return Err(e);
         }
+        crate::util::lock(&self.booting).remove(pod);
         attached.insert(pod.to_string(), entry);
         Ok(())
     }
 
     pub fn resize(&self, pod: &str, container: Rect) -> Result<(), String> {
+        if self.is_released(pod) {
+            return Ok(());
+        }
         let mut attached = self.attached.lock().unwrap();
         let entry = attached.get_mut(pod).ok_or_else(|| format!("El pod «{pod}» no está en la vista embebida."))?;
         entry.container = container;
@@ -268,15 +395,17 @@ impl<A: WinApi> Embedder<A> {
     pub fn follow(&self) {
         let attached = self.attached.lock().unwrap();
         let active = self.active.lock().unwrap();
-        if let Some(entry) = active.as_deref().and_then(|name| attached.get(name)) {
-            let _ = self.layout(entry, true);
+        if let Some(name) = active.as_deref().filter(|n| self.is_live(n)) {
+            if let Some(entry) = attached.get(name) {
+                let _ = self.layout(entry, true);
+            }
         }
     }
 
     /// Shows `pod` (if any) and hides every other embedded window. `None` hides them all.
     pub fn activate(&self, pod: Option<&str>) {
         let attached = self.attached.lock().unwrap();
-        for (name, entry) in attached.iter() {
+        for (name, entry) in attached.iter().filter(|(n, _)| self.is_live(n)) {
             if pod == Some(name.as_str()) {
                 // Showing a Qt window lets it re-apply its own geometry: place and clip it again right after.
                 let _ = self.layout(entry, true);
@@ -284,31 +413,77 @@ impl<A: WinApi> Embedder<A> {
                 self.api.set_visible(entry.hwnd, false);
             }
         }
-        *self.active.lock().unwrap() = pod.filter(|p| attached.contains_key(*p)).map(str::to_string);
+        *self.active.lock().unwrap() = pod.filter(|p| attached.contains_key(*p) && self.is_live(p)).map(str::to_string);
     }
 
-    /// Gives the window back (no owner, original place and size) and forgets it.
+    /// Gives the window back (no owner, original place and size) and forgets it. Works for a released (hung) window too.
     pub fn detach(&self, pod: &str) -> Result<(), String> {
-        let entry = self.attached.lock().unwrap().remove(pod);
+        let watched = crate::util::lock(&self.watch).remove(pod).or_else(|| crate::util::lock(&self.hung).remove(pod));
+        crate::util::lock(&self.hang_since).remove(pod);
+        crate::util::lock(&self.booting).remove(pod);
         {
-            let mut active = self.active.lock().unwrap();
+            let mut active = crate::util::lock(&self.active);
             if active.as_deref() == Some(pod) {
                 *active = None;
             }
         }
-        let Some(entry) = entry else { return Ok(()) };
-        if !self.api.is_window(entry.hwnd) {
-            return Ok(());
-        }
-        self.api.restore(entry.hwnd, &entry.original)?;
-        self.api.focus(entry.hwnd);
-        Ok(())
+        let result = match watched {
+            Some(w) if self.api.is_window(w.hwnd) => self.api.restore(w.hwnd, &w.original).map(|()| self.api.focus(w.hwnd)),
+            _ => Ok(()),
+        };
+        // Last, because a worker stuck on a hung window may still hold this lock until that window is released.
+        self.attached.lock().unwrap().remove(pod);
+        result
     }
 
     /// Restores everything (app closing). Errors are collected, never stop the rest.
     pub fn detach_all(&self) -> Vec<String> {
-        let names: Vec<String> = self.attached.lock().unwrap().keys().cloned().collect();
+        let names: Vec<String> = {
+            let (watch, hung) = (crate::util::lock(&self.watch), crate::util::lock(&self.hung));
+            watch.keys().chain(hung.keys()).cloned().collect()
+        };
         names.iter().filter_map(|n| self.detach(n).err()).collect()
+    }
+
+    /// Forgets that `pod` was released as hung so it can be embedded again ("Reintentar"). The window itself stays
+    /// hidden and ownerless until `attach` embeds it again.
+    pub fn retry(&self, pod: &str) {
+        crate::util::lock(&self.hung).remove(pod);
+        crate::util::lock(&self.booting).remove(pod);
+        self.attached.lock().unwrap().remove(pod);
+    }
+
+    /// One watchdog pass (called every couple of seconds from a worker thread, never the UI thread). A window that
+    /// stayed unresponsive for `HANG_LIMIT_MS` is released and its pod name is returned.
+    pub fn check_hangs(&self, now_ms: u64) -> Vec<String> {
+        let watched: Vec<(String, isize)> = crate::util::lock(&self.watch).iter().map(|(n, w)| (n.clone(), w.hwnd)).collect();
+        let mut released = Vec::new();
+        for (pod, hwnd) in watched {
+            let hung = self.api.is_window(hwnd) && self.api.is_hung(hwnd);
+            let (next, release) = {
+                let since = crate::util::lock(&self.hang_since).get(&pod).copied();
+                hang_step(since, hung, now_ms, HANG_LIMIT_MS)
+            };
+            {
+                let mut map = crate::util::lock(&self.hang_since);
+                match next {
+                    Some(t) if !release => map.insert(pod.clone(), t),
+                    _ => map.remove(&pod),
+                };
+            }
+            if release {
+                self.api.release(hwnd);
+                if let Some(w) = crate::util::lock(&self.watch).remove(&pod) {
+                    crate::util::lock(&self.hung).insert(pod.clone(), w);
+                }
+                let mut active = crate::util::lock(&self.active);
+                if active.as_deref() == Some(pod.as_str()) {
+                    *active = None;
+                }
+                released.push(pod);
+            }
+        }
+        released
     }
 }
 
@@ -323,6 +498,12 @@ pub mod win {
     const SW_SHOWNA: i32 = 8;
     const SW_RESTORE: i32 = 9;
     const SWP_NOZORDER: u32 = 0x0004;
+    /// Post the request to the window's own thread instead of waiting for it: a hung pod can never block the caller.
+    const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+    const WM_NULL: u32 = 0;
+    /// How long a WM_NULL probe may wait for a window that is not (yet) flagged as hung by the system.
+    const PROBE_TIMEOUT_MS: u32 = 200;
     /// Skip WM_WINDOWPOSCHANGING: BlueStacks (Qt) uses it to force its own geometry back, which sent the re-parented
     /// window thousands of pixels off screen. Without the message our rectangle is applied as asked.
     const SWP_NOSENDCHANGING: u32 = 0x0400;
@@ -366,7 +547,9 @@ pub mod win {
         fn ClientToScreen(hwnd: isize, point: *mut Pt) -> i32;
         fn GetWindowRect(hwnd: isize, rect: *mut Rc) -> i32;
         fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
-        fn ShowWindow(hwnd: isize, cmd: i32) -> i32;
+        fn ShowWindowAsync(hwnd: isize, cmd: i32) -> i32;
+        fn IsHungAppWindow(hwnd: isize) -> i32;
+        fn SendMessageTimeoutW(hwnd: isize, msg: u32, wparam: usize, lparam: isize, flags: u32, timeout: u32, result: *mut usize) -> isize;
         fn SetForegroundWindow(hwnd: isize) -> i32;
         fn SetWindowRgn(hwnd: isize, region: isize, redraw: i32) -> i32;
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
@@ -385,6 +568,22 @@ pub mod win {
 
     fn last_os_error(what: &str) -> String {
         format!("{what}: {}", std::io::Error::last_os_error())
+    }
+
+    /// The window's thread does not answer: flagged by the system, or a WM_NULL probe gets no reply in time. A window
+    /// that no longer exists is not "hung".
+    fn hung(hwnd: isize) -> bool {
+        // SAFETY: both calls accept any handle value; the probe passes a valid out-pointer and never waits for long.
+        unsafe {
+            if IsWindow(hwnd) == 0 {
+                return false;
+            }
+            if IsHungAppWindow(hwnd) != 0 {
+                return true;
+            }
+            let mut result = 0usize;
+            SendMessageTimeoutW(hwnd, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, PROBE_TIMEOUT_MS, &mut result) == 0 && IsWindow(hwnd) != 0
+        }
     }
 
     fn exe_of(hwnd: isize) -> String {
@@ -472,13 +671,17 @@ pub mod win {
             // SAFETY: plain Win32 window calls on handles we just looked up. The owner is the only thing that changes:
             // style, parent and activation stay exactly as BlueStacks made them.
             unsafe {
+                // Owner changes are synchronous toward the other thread: never on a window that does not answer.
+                if hung(hwnd) {
+                    return Err("La ventana del pod no responde.".to_string());
+                }
                 if IsIconic(hwnd) != 0 {
-                    ShowWindow(hwnd, SW_RESTORE);
+                    ShowWindowAsync(hwnd, SW_RESTORE);
                 }
                 SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner);
                 // Show first and place after: showing a hidden Qt window runs its WM_WINDOWPOSCHANGING too.
-                ShowWindow(hwnd, SW_SHOWNA);
-                if SetWindowPos(hwnd, HWND_TOP, rect.x, rect.y, rect.w, rect.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE) == 0 {
+                ShowWindowAsync(hwnd, SW_SHOWNA);
+                if SetWindowPos(hwnd, HWND_TOP, rect.x, rect.y, rect.w, rect.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) == 0 {
                     return Err(last_os_error("No se pudo colocar la ventana del pod en la app"));
                 }
             }
@@ -487,16 +690,21 @@ pub mod win {
 
         fn place(&self, hwnd: isize, rect: Rect) -> Result<(), String> {
             // SAFETY: plain Win32 call. The z-order is left alone: the owner relation keeps the window above the app.
-            let ok = unsafe { SetWindowPos(hwnd, 0, rect.x, rect.y, rect.w, rect.h, SWP_NOZORDER | SWP_NOSENDCHANGING | SWP_NOACTIVATE) };
+            let ok = unsafe { SetWindowPos(hwnd, 0, rect.x, rect.y, rect.w, rect.h, SWP_NOZORDER | SWP_NOSENDCHANGING | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS) };
             if ok == 0 { Err(last_os_error("No se pudo mover la ventana del pod")) } else { Ok(()) }
         }
 
         fn set_visible(&self, hwnd: isize, visible: bool) {
             // SAFETY: plain Win32 call.
-            unsafe { ShowWindow(hwnd, if visible { SW_SHOWNA } else { SW_HIDE }) };
+            unsafe { ShowWindowAsync(hwnd, if visible { SW_SHOWNA } else { SW_HIDE }) };
         }
 
         fn set_clip(&self, hwnd: isize, visible: Option<Rect>) {
+            // SetWindowRgn is synchronous toward the window's thread (it sends WM_WINDOWPOSCHANGING) and has no async
+            // form: a window that does not answer keeps whatever region it has.
+            if hung(hwnd) {
+                return;
+            }
             // SAFETY: plain Win32 calls. After a successful SetWindowRgn the system owns the region handle.
             unsafe {
                 match visible {
@@ -516,17 +724,35 @@ pub mod win {
         fn restore(&self, hwnd: isize, original: &Original) -> Result<(), String> {
             // SAFETY: plain Win32 window calls.
             unsafe {
-                SetWindowRgn(hwnd, 0, 1); // the native window comes back whole
+                if !hung(hwnd) {
+                    SetWindowRgn(hwnd, 0, 1); // the native window comes back whole
+                }
                 SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
-                ShowWindow(hwnd, SW_SHOWNA);
+                ShowWindowAsync(hwnd, SW_SHOWNA);
                 let r = original.rect;
-                SetWindowPos(hwnd, HWND_TOP, r.x, r.y, r.w, r.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE);
+                SetWindowPos(hwnd, HWND_TOP, r.x, r.y, r.w, r.h, SWP_NOSENDCHANGING | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
             }
             Ok(())
         }
 
+        fn is_hung(&self, hwnd: isize) -> bool {
+            hung(hwnd)
+        }
+
+        fn release(&self, hwnd: isize) {
+            // SAFETY: plain Win32 calls; the hide is posted, the owner reset does not wait for the window.
+            unsafe {
+                ShowWindowAsync(hwnd, SW_HIDE);
+                SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, 0);
+                // The region can only be removed synchronously: do it only if the window woke up meanwhile.
+                if !hung(hwnd) {
+                    SetWindowRgn(hwnd, 0, 0);
+                }
+            }
+        }
+
         fn focus(&self, hwnd: isize) {
-            // SAFETY: plain Win32 call.
+            // SAFETY: plain Win32 call (it does not wait for the target window's thread).
             unsafe { SetForegroundWindow(hwnd) };
         }
     }
@@ -568,6 +794,18 @@ pub mod win {
         unsafe extern "system" {
             fn RegisterClassExW(class: *const WndClassExW) -> u16;
             fn DefWindowProcW(hwnd: isize, msg: u32, w: usize, l: isize) -> isize;
+            fn PeekMessageW(msg: *mut [usize; 6], hwnd: isize, min: u32, max: u32, remove: u32) -> i32;
+            fn DispatchMessageW(msg: *const [usize; 6]) -> isize;
+        }
+
+        /// Runs the messages queued for this thread: ShowWindowAsync only POSTS the request, and the dummy windows
+        /// live on the test thread (a real pod answers from its own thread).
+        pub fn pump() {
+            let mut msg = [0usize; 6]; // MSG: hwnd, message, wParam, lParam, time, pt (same size on x64)
+            // SAFETY: valid out-buffer the size of MSG; messages are dispatched to windows of this thread only.
+            while unsafe { PeekMessageW(&mut msg, 0, 0, 0, 1) } != 0 {
+                unsafe { DispatchMessageW(&msg) };
+            }
         }
 
         /// The geometry BlueStacks (Qt) forces on itself whenever Windows asks to move or size it.
@@ -774,6 +1012,7 @@ mod tests {
         closed: RefCell<Vec<isize>>,
         native: RefCell<Option<Rect>>,
         origin: RefCell<Option<(i32, i32)>>,
+        hung: RefCell<Vec<isize>>,
     }
 
     impl FakeWin {
@@ -826,6 +1065,12 @@ mod tests {
         }
         fn focus(&self, hwnd: isize) {
             self.log(format!("focus:{hwnd}"));
+        }
+        fn is_hung(&self, hwnd: isize) -> bool {
+            self.hung.borrow().contains(&hwnd)
+        }
+        fn release(&self, hwnd: isize) {
+            self.log(format!("release:{hwnd}"));
         }
     }
 
@@ -950,7 +1195,7 @@ mod tests {
         win.calls.borrow_mut().clear();
         embedder.detach("pod2").unwrap();
         assert_eq!(win.calls(), vec!["restore:22@100,50 400x800", "focus:22"]);
-        assert_eq!(embedder.state(), EmbedState { attached: vec![], active: None });
+        assert_eq!(embedder.state(), EmbedState { attached: vec![], active: None, booting: vec![], hung: vec![] });
         embedder.detach("pod2").unwrap(); // idempotent
     }
 
@@ -1067,6 +1312,133 @@ mod tests {
         assert_eq!(win.calls(), vec!["show:22", "clip:22@0,300 435x570", "place:22@1907,-100 435x870"]);
     }
 
+    // ----- never blocking on a foreign window: readiness, hang decisions, watchdog -----
+
+    #[test]
+    fn hang_step_releases_only_after_a_continuous_hang_of_the_limit() {
+        assert_eq!(hang_step(None, false, 1_000, HANG_LIMIT_MS), (None, false));
+        assert_eq!(hang_step(None, true, 1_000, HANG_LIMIT_MS), (Some(1_000), false), "the countdown starts");
+        assert_eq!(hang_step(Some(1_000), true, 5_999, HANG_LIMIT_MS), (Some(1_000), false), "not yet");
+        assert_eq!(hang_step(Some(1_000), true, 6_000, HANG_LIMIT_MS), (Some(1_000), true), "five seconds");
+        assert_eq!(hang_step(Some(1_000), false, 4_000, HANG_LIMIT_MS), (None, false), "one good answer resets it");
+        assert_eq!(hang_step(Some(9_000), true, 1_000, HANG_LIMIT_MS), (Some(9_000), false), "clock going backwards is harmless");
+    }
+
+    #[test]
+    fn readiness_needs_a_serial_a_responsive_window_and_a_finished_boot() {
+        let never = || -> bool { panic!("adb must not be asked yet") };
+        assert_eq!(readiness(None, false, never), Readiness::Booting("sin serial adb"));
+        assert_eq!(readiness(Some("  "), false, never), Readiness::Booting("sin serial adb"));
+        assert_eq!(readiness(Some("emulator-5564"), true, never), Readiness::Booting("ventana sin responder"));
+        assert_eq!(readiness(Some("emulator-5564"), false, || false), Readiness::Booting("Android no terminó de arrancar"));
+        assert_eq!(readiness(Some("emulator-5564"), false, || true), Readiness::Ready);
+    }
+
+    #[test]
+    fn a_pod_that_is_still_booting_is_never_touched_and_is_listed_as_booting() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        assert!(matches!(embedder.prepare("pod2", None, || true), Readiness::Booting(_)));
+        assert!(matches!(embedder.prepare("pod2", Some("emulator-5564"), || false), Readiness::Booting(_)));
+        assert_eq!(embedder.state().booting, vec!["pod2"]);
+        assert!(win.calls().is_empty(), "no Win32 call on a pod that has not booted: {:?}", win.calls());
+
+        assert_eq!(embedder.prepare("pod2", Some("emulator-5564"), || true), Readiness::Ready);
+        assert!(embedder.state().booting.is_empty());
+        embedder.attach("pod2", WIDE).unwrap();
+        assert!(win.calls().iter().any(|c| c.starts_with("embed:22")));
+    }
+
+    #[test]
+    fn a_hung_window_is_not_embedded_even_when_adb_says_the_pod_booted() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        win.hung.borrow_mut().push(22);
+        let embedder = Embedder::new(&win, 999);
+        assert!(matches!(embedder.prepare("pod2", Some("emulator-5564"), || true), Readiness::Booting(_)));
+        assert!(embedder.attach("pod2", WIDE).unwrap_err().contains("no responde"));
+        assert!(!win.calls().iter().any(|c| c.starts_with("embed") || c.starts_with("place") || c.starts_with("clip")));
+        assert!(embedder.state().attached.is_empty());
+    }
+
+    #[test]
+    fn layout_skips_a_window_that_stopped_answering() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.attach("pod2", WIDE).unwrap();
+        embedder.activate(Some("pod2"));
+        win.hung.borrow_mut().push(22);
+        win.calls.borrow_mut().clear();
+        embedder.resize("pod2", WIDE).unwrap();
+        embedder.follow();
+        embedder.activate(Some("pod2"));
+        assert!(win.calls().is_empty(), "{:?}", win.calls());
+    }
+
+    #[test]
+    fn the_watchdog_releases_a_window_that_stays_hung_and_lets_the_user_retry() {
+        let win = FakeWin::with(&[("wa-pod1", 11), ("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.attach("pod1", WIDE).unwrap();
+        embedder.attach("pod2", WIDE).unwrap();
+        embedder.activate(Some("pod2"));
+        win.hung.borrow_mut().push(22);
+        win.calls.borrow_mut().clear();
+
+        assert!(embedder.check_hangs(0).is_empty());
+        assert!(embedder.check_hangs(2_000).is_empty());
+        assert!(embedder.check_hangs(4_000).is_empty(), "under the limit");
+        assert_eq!(embedder.check_hangs(5_000), vec!["pod2"]);
+        assert_eq!(win.calls(), vec!["release:22"], "only the hung window is released, nothing else is touched");
+        let state = embedder.state();
+        assert_eq!(state.hung, vec!["pod2"]);
+        assert_eq!(state.attached, vec!["pod1", "pod2"]);
+        assert_eq!(state.active, None);
+        assert!(embedder.check_hangs(9_000).is_empty(), "released once, not again");
+
+        // A released window is neither re-placed nor re-embedded until the user retries.
+        win.calls.borrow_mut().clear();
+        embedder.resize("pod2", WIDE).unwrap();
+        assert!(embedder.attach("pod2", WIDE).is_err());
+        assert!(win.calls().is_empty());
+
+        // "Reintentar": once the window answers again it is embedded from scratch.
+        win.hung.borrow_mut().clear();
+        embedder.retry("pod2");
+        assert!(embedder.state().hung.is_empty());
+        embedder.attach("pod2", WIDE).unwrap();
+        assert!(win.calls().iter().any(|c| c.starts_with("embed:22")));
+    }
+
+    #[test]
+    fn a_window_that_recovers_in_time_is_never_released() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.attach("pod2", WIDE).unwrap();
+        win.hung.borrow_mut().push(22);
+        assert!(embedder.check_hangs(0).is_empty());
+        assert!(embedder.check_hangs(4_000).is_empty());
+        win.hung.borrow_mut().clear();
+        assert!(embedder.check_hangs(6_000).is_empty());
+        win.hung.borrow_mut().push(22);
+        assert!(embedder.check_hangs(7_000).is_empty());
+        assert!(embedder.check_hangs(11_000).is_empty(), "countdown restarted at 7 s");
+        assert_eq!(embedder.check_hangs(12_000), vec!["pod2"]);
+    }
+
+    #[test]
+    fn a_released_window_can_be_popped_out_to_its_original_place() {
+        let win = FakeWin::with(&[("wa-pod2", 22)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.attach("pod2", WIDE).unwrap();
+        win.hung.borrow_mut().push(22);
+        embedder.check_hangs(0);
+        embedder.check_hangs(5_000);
+        win.calls.borrow_mut().clear();
+        embedder.detach("pod2").unwrap();
+        assert_eq!(win.calls(), vec!["restore:22@100,50 400x800", "focus:22"]);
+        assert_eq!(embedder.state(), EmbedState { attached: vec![], active: None, booting: vec![], hung: vec![] });
+    }
+
     // ----- real user32 with dummy windows (never a pod) -----
 
     const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
@@ -1119,6 +1491,10 @@ mod tests {
         // 400x800 native (1:2) in a 300x600 box starting 100 px above the page: pod 300x600 at y = -100.
         embedder.attach("agentautox1-clip", Rect { x: 50, y: -100, w: 300, h: 600 }).unwrap();
         embedder.activate(Some("agentautox1-clip"));
+        // On a real pod the posted show and the posted placement reach its thread in order. Here the placement is
+        // applied at once (same thread) and the queued show lands after it, so run it and place once more.
+        dummy::pump();
+        embedder.resize("agentautox1-clip", Rect { x: 50, y: -100, w: 300, h: 600 }).unwrap();
 
         let r = dummy::rect_of(pod);
         assert_eq!((r.w, r.h), (300, 600), "full size even though 100 px are above the viewport");
@@ -1165,9 +1541,11 @@ mod tests {
         assert_eq!((dummy::rect_of(pod).w, dummy::rect_of(pod).h), (320, 240), "native 4:3 fills a 4:3 stage");
 
         embedder.activate(Some("agentautox1-test-pod"));
+        dummy::pump();
         assert!(dummy::visible(pod), "the active tab is shown");
         assert!(!dummy::visible(other), "the other tab is hidden");
         embedder.activate(None);
+        dummy::pump();
         assert!(!dummy::visible(pod) && !dummy::visible(other), "tabs hidden");
 
         assert!(embedder.detach_all().is_empty());

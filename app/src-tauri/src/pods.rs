@@ -122,6 +122,16 @@ pub fn is_allowed_action(action: &str) -> bool {
     matches!(action, "prender" | "apagar" | "ver")
 }
 
+/// Starting two BlueStacks instances at the same time can leave the second one stuck while it boots (a window that
+/// never answers, 30 MB of memory, no adb serial). `pods.ps1 prender` only returns once Android finished booting, so
+/// holding this gate for the whole call makes every start wait for the previous pod to be ready.
+static START_GATE: Mutex<()> = Mutex::new(());
+
+/// Actions that start an instance and therefore go through the gate one at a time.
+pub fn serializes_starts(action: &str) -> bool {
+    action == "prender"
+}
+
 pub fn run_action(settings: &Settings, action: &str, name: &str) -> Result<String, String> {
     if !is_allowed_action(action) {
         return Err(format!("Acción no permitida: {action}"));
@@ -129,6 +139,7 @@ pub fn run_action(settings: &Settings, action: &str, name: &str) -> Result<Strin
     if !is_valid_pod_name(name) {
         return Err(format!("Nombre de pod no válido: {name}"));
     }
+    let _gate = serializes_starts(action).then(|| crate::util::lock(&START_GATE));
     let out = run_pods(settings, &[action, name])?;
     if out.ok {
         Ok(last_lines(&out.stdout, 3))
@@ -136,6 +147,53 @@ pub fn run_action(settings: &Settings, action: &str, name: &str) -> Result<Strin
         let detail = if out.stderr.trim().is_empty() { &out.stdout } else { &out.stderr };
         Err(last_lines(detail, 4))
     }
+}
+
+/// `getprop sys.boot_completed` prints 1 once Android finished booting.
+pub fn parse_boot_completed(stdout: &str) -> bool {
+    stdout.trim() == "1"
+}
+
+/// Path of BlueStacks' adb, looked up once (it is a PowerShell round trip).
+fn adb_path(settings: &Settings) -> Result<String, String> {
+    static ADB: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(path) = ADB.get() {
+        return Ok(path.clone());
+    }
+    let path = bluestacks_info(settings)?.adb;
+    Ok(ADB.get_or_init(|| path).clone())
+}
+
+/// True when Android on `serial` reports `sys.boot_completed` = 1. Any failure or a slow adb counts as "not yet": it
+/// never waits more than a few seconds and never touches BlueStacks itself.
+pub fn boot_completed(settings: &Settings, serial: &str) -> bool {
+    let Ok(adb) = adb_path(settings) else { return false };
+    let Ok(mut child) = hidden_command(adb)
+        .args(["-s", serial, "shell", "getprop", "sys.boot_completed"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill(); // our own short-lived adb client, never the BlueStacks process
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+    let mut out = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut out);
+    }
+    parse_boot_completed(&out)
 }
 
 /// `[3/9] Primer arranque` -> (3, 9, "Primer arranque"). Other lines are not steps.
@@ -317,6 +375,21 @@ mod tests {
         let info = parse_info_json(out).unwrap();
         assert!(info.adb.ends_with("HD-Adb.exe") && info.hd_player.ends_with("HD-Player.exe"));
         assert!(parse_info_json("nada").is_err());
+    }
+
+    #[test]
+    fn boot_completed_is_exactly_one() {
+        assert!(parse_boot_completed("1
+"));
+        assert!(!parse_boot_completed(""));
+        assert!(!parse_boot_completed("0"));
+        assert!(!parse_boot_completed("error: device offline"));
+    }
+
+    #[test]
+    fn only_starting_a_pod_goes_through_the_one_at_a_time_gate() {
+        assert!(serializes_starts("prender"));
+        assert!(!serializes_starts("apagar") && !serializes_starts("ver"));
     }
 
     #[test]

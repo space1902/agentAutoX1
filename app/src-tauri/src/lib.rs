@@ -191,6 +191,9 @@ fn set_keep_alive(state: State<'_, AppState>, enabled: bool) -> Result<keepalive
 
 // ---------- embedded BlueStacks view (experimental, behind settings.embedView) ----------
 
+/// A `follow` is already queued on a worker thread.
+static FOLLOW_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// The embedder is created on first use, parented to the main window.
 fn embedder_for(window: &tauri::WebviewWindow, state: &AppState) -> Result<Arc<embed::Embedder<embed::win::RealWin>>, String> {
     if !state.current().embed_view {
@@ -204,6 +207,24 @@ fn embedder_for(window: &tauri::WebviewWindow, state: &AppState) -> Result<Arc<e
     let created = Arc::new(embed::Embedder::new(embed::win::RealWin::default(), hwnd.0 as isize));
     *slot = Some(created.clone());
     Ok(created)
+}
+
+/// Every couple of seconds, off the UI thread: a pod window that stays unresponsive is released (hidden, no owner),
+/// so it can never freeze the app. The BlueStacks process itself is never touched.
+fn spawn_embed_watchdog(app: AppHandle) {
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let embedder = crate::util::lock(&app.state::<AppState>().embedder).clone();
+            let Some(embedder) = embedder else { continue };
+            let now_ms = started.elapsed().as_millis() as u64;
+            for pod in embedder.check_hangs(now_ms) {
+                applog::log("embed", &format!("La ventana del pod {pod} no responde desde hace más de {} s: se soltó de la app (oculta y sin dueño). BlueStacks sigue encendido.", embed::HANG_LIMIT_MS / 1000));
+                let _ = app.emit("embed-hung", &pod);
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -222,15 +243,41 @@ fn set_embed_view(state: State<'_, AppState>, enabled: bool) -> Result<Settings,
 
 /// Shows the pod's BlueStacks window in its stage (CSS pixels + devicePixelRatio): the stage is the FULL box, even the
 /// part scrolled out of view; `view_*` is the visible webview, which the native window is clipped to.
+///
+/// The window is only embedded once the pod finished booting (`serial` known, `sys.boot_completed` = 1, window
+/// answering). Until then nothing is touched and the pod is reported in `booting`; the UI asks again.
 #[tauri::command]
-async fn embed_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String, x: f64, y: f64, width: f64, height: f64, view_width: f64, view_height: f64, dpr: f64) -> Result<embed::EmbedState, String> {
+async fn embed_attach(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String, serial: Option<String>, x: f64, y: f64, width: f64, height: f64, view_width: f64, view_height: f64, dpr: f64) -> Result<embed::EmbedState, String> {
     if !util::is_valid_pod_name(&name) {
         return Err(format!("Nombre de pod no válido: {name}"));
     }
     let embedder = embedder_for(&window, &state)?;
+    let settings = state.current();
     blocking(move || {
         embedder.set_viewport(embed::scale_rect(0.0, 0.0, view_width, view_height, dpr));
+        let ready = embedder.prepare(&name, serial.as_deref(), || serial.as_deref().is_some_and(|s| pods::boot_completed(&settings, s)));
+        if matches!(ready, embed::Readiness::Booting(_)) {
+            return Ok(embedder.state()); // not logged: the UI asks again every few seconds while the pod boots
+        }
         embedder.attach(&name, embed::scale_rect(x, y, width, height, dpr))?;
+        Ok(embedder.state())
+    })
+    .await
+}
+
+/// Current embedding state (attached, booting, released as hung), cheap and independent of the window locks.
+#[tauri::command]
+async fn embed_state(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<embed::EmbedState, String> {
+    let embedder = embedder_for(&window, &state)?;
+    blocking(move || Ok(embedder.state())).await
+}
+
+/// "Reintentar": forgets that the pod's window was released as hung so the next attach embeds it again.
+#[tauri::command]
+async fn embed_retry(window: tauri::WebviewWindow, state: State<'_, AppState>, name: String) -> Result<embed::EmbedState, String> {
+    let embedder = embedder_for(&window, &state)?;
+    blocking(move || {
+        embedder.retry(&name);
         Ok(embedder.state())
     })
     .await
@@ -770,15 +817,23 @@ pub fn run() {
                 alerts: alerts::Alerts::default(),
                 agents: agents::Agents::default(),
             });
+            spawn_embed_watchdog(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
             // An owned BlueStacks window does not travel with the app window: keep it glued to its placeholder.
+            // This handler runs on the UI thread: the Win32 calls go to a worker, coalescing the burst of events a drag makes.
             if let tauri::WindowEvent::Moved(_) = event {
                 let state = window.state::<AppState>();
                 let embedder = crate::util::lock(&state.embedder).clone();
                 if let Some(embedder) = embedder {
-                    embedder.follow();
+                    if !FOLLOW_PENDING.swap(true, Ordering::SeqCst) {
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(30));
+                            FOLLOW_PENDING.store(false, Ordering::SeqCst);
+                            embedder.follow();
+                        });
+                    }
                 }
             }
             // Never leave a warm-up profile orphaned when the window is closed.
@@ -834,6 +889,8 @@ pub fn run() {
             set_keep_alive,
             set_embed_view,
             embed_attach,
+            embed_state,
+            embed_retry,
             embed_resize,
             embed_activate,
             embed_detach,

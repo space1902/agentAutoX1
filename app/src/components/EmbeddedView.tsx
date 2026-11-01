@@ -1,6 +1,6 @@
-import { ExternalLink, MonitorSmartphone, X } from "lucide-react";
+import { ExternalLink, Loader2, MonitorSmartphone, RefreshCw, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorText, type Pod } from "../lib/api";
+import { api, errorText, type EmbedState, type Pod } from "../lib/api";
 import { Notice, Pill } from "./ui";
 
 interface Props {
@@ -28,6 +28,9 @@ export default function EmbeddedView({ pods, suspended }: Props) {
   const [active, setActive] = useState<string | null>(null);
   const [released, setReleased] = useState<string[]>([]); // pods the user popped out: not re-embedded until asked
   const [error, setError] = useState<string | null>(null);
+  const [embed, setEmbed] = useState<EmbedState>({ attached: [], active: null, booting: [], hung: [] });
+  const [serials, setSerials] = useState<Record<string, string | null>>({}); // fresher than `pods` while a pod boots
+  const [attempt, setAttempt] = useState(0); // bumped to try embedding again
   const stage = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -36,7 +39,10 @@ export default function EmbeddedView({ pods, suspended }: Props) {
 
   const tabs = pods.filter((p) => p.state === "running" && !released.includes(p.name)).map((p) => p.name);
   const current = active && tabs.includes(active) ? active : (tabs[0] ?? null);
-  const visible = enabled === true && !suspended && current !== null;
+  const currentHung = current !== null && embed.hung.includes(current);
+  const currentBooting = current !== null && embed.booting.includes(current) && !embed.attached.includes(current);
+  const visible = enabled === true && !suspended && current !== null && !currentHung;
+  const podSerial = current ? (serials[current] ?? pods.find((p) => p.name === current)?.serial ?? null) : null;
 
   const toggle = async (value: boolean) => {
     setError(null);
@@ -66,13 +72,24 @@ export default function EmbeddedView({ pods, suspended }: Props) {
     (async () => {
       try {
         const m = measure(el);
-        await api.embedAttach(current, m.x, m.y, m.width, m.height, m.viewWidth, m.viewHeight, m.dpr);
-        if (!cancelled) {
-          await api.embedActivate(current);
-          setError(null);
-          // The page slides in with a transform (no resize event): measure again once it settled.
-          settle = window.setTimeout(relayout, 450);
+        const state = await api.embedAttach(current, podSerial, m.x, m.y, m.width, m.height, m.viewWidth, m.viewHeight, m.dpr);
+        if (cancelled) return;
+        setEmbed(state);
+        if (!state.attached.includes(current)) {
+          // Still booting: nothing was touched. Look at the pod again in a few seconds, with a fresh adb serial.
+          settle = window.setTimeout(() => {
+            api
+              .listPods()
+              .then((list) => setSerials(Object.fromEntries(list.map((p) => [p.name, p.serial]))))
+              .catch(() => undefined)
+              .finally(() => setAttempt((n) => n + 1));
+          }, 4000);
+          return;
         }
+        setEmbed(await api.embedActivate(current));
+        setError(null);
+        // The page slides in with a transform (no resize event): measure again once it settled.
+        settle = window.setTimeout(relayout, 450);
       } catch (e) {
         if (!cancelled) setError(errorText(e));
       }
@@ -82,7 +99,14 @@ export default function EmbeddedView({ pods, suspended }: Props) {
       window.clearTimeout(settle);
       void api.embedActivate(null).catch(() => undefined);
     };
-  }, [visible, current, relayout]);
+  }, [visible, current, relayout, podSerial, attempt]);
+
+  // The native side watches the windows; this only learns what it decided (a window released as "No responde").
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = window.setInterval(() => void api.embedState().then(setEmbed).catch(() => undefined), 2500);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
 
   useEffect(() => {
     const el = stage.current;
@@ -112,10 +136,20 @@ export default function EmbeddedView({ pods, suspended }: Props) {
     setReleased((prev) => prev.filter((n) => !stopped.includes(n)));
   }, [pods, enabled]);
 
+  const retry = async (name: string) => {
+    setError(null);
+    try {
+      setEmbed(await api.embedRetry(name));
+      setAttempt((n) => n + 1);
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
   const popOut = async (name: string) => {
     setError(null);
     try {
-      await api.embedDetach(name);
+      setEmbed(await api.embedDetach(name));
       setReleased((prev) => [...prev, name]);
     } catch (e) {
       setError(errorText(e));
@@ -170,6 +204,8 @@ export default function EmbeddedView({ pods, suspended }: Props) {
                   <div key={name} className={`embed-tab ${name === current ? "active" : ""}`}>
                     <button role="tab" aria-selected={name === current} onClick={() => setActive(name)}>
                       {name}
+                      {embed.hung.includes(name) && <span className="muted"> · No responde</span>}
+                      {embed.booting.includes(name) && !embed.attached.includes(name) && <span className="muted"> · Arrancando…</span>}
                     </button>
                     <button className="embed-close" aria-label={`Sacar ${name} a una ventana aparte`} title="Sacar a una ventana aparte" onClick={() => void popOut(name)}>
                       <X size={12} aria-hidden />
@@ -184,6 +220,28 @@ export default function EmbeddedView({ pods, suspended }: Props) {
               </div>
               <div className="embed-stage" ref={stage} role="tabpanel">
                 {suspended && <span className="muted">La vista se oculta mientras hay un diálogo abierto.</span>}
+                {!suspended && currentBooting && (
+                  <div className="placeholder">
+                    <Loader2 size={30} className="spin" aria-hidden />
+                    <strong>Arrancando…</strong>
+                    <span>Android todavía está iniciando. La ventana se mostrará aquí cuando termine.</span>
+                  </div>
+                )}
+                {!suspended && currentHung && current && (
+                  <div className="placeholder">
+                    <MonitorSmartphone size={30} aria-hidden />
+                    <strong>No responde</strong>
+                    <span>La ventana de {current} dejó de responder y se soltó de la app para que no se congele. BlueStacks sigue encendido: tú decides si lo apagas.</span>
+                    <div className="head-actions">
+                      <button className="btn sm" onClick={() => void retry(current)}>
+                        <RefreshCw size={14} aria-hidden /> Reintentar
+                      </button>
+                      <button className="btn sm ghost" onClick={() => void popOut(current)}>
+                        <ExternalLink size={14} aria-hidden /> Abrir aparte
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </>
           )}
