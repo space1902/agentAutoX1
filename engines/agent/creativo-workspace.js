@@ -53,12 +53,16 @@ function newestMtime(dir) {
  * whitelist are removed. Returns { pluginDir, included, missing, refreshed, removed }.
  */
 export function buildCreativoPlugin({ dataDir, skillsSource = userSkillsDir(), skills = CREATIVO_SKILLS, log = (m) => process.stderr.write(`${m}\n`) } = {}) {
-  const pluginDir = pluginDirOf(dataDir);
+  return buildSkillsPlugin({ pluginDir: pluginDirOf(dataDir), pluginName: PLUGIN_NAME, description: 'Skills del Agente creativo (copia generada por la app; no la edites).', skillsSource, skills, log, label: 'creativo' });
+}
+
+/** The same build for any agent: a local plugin folder with a whitelist of the user's skills. */
+export function buildSkillsPlugin({ pluginDir, pluginName, description, skillsSource, skills, log, label }) {
   const skillsDir = path.join(pluginDir, 'skills');
   fs.mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
   fs.mkdirSync(skillsDir, { recursive: true });
   const manifest = path.join(pluginDir, '.claude-plugin', 'plugin.json');
-  const body = `${JSON.stringify({ name: PLUGIN_NAME, version: '1.0.0', description: 'Skills del Agente creativo (copia generada por la app; no la edites).' }, null, 2)}\n`;
+  const body = `${JSON.stringify({ name: pluginName, version: '1.0.0', description }, null, 2)}\n`;
   if (!fs.existsSync(manifest) || fs.readFileSync(manifest, 'utf8') !== body) fs.writeFileSync(manifest, body, 'utf8');
 
   const included = [];
@@ -68,7 +72,7 @@ export function buildCreativoPlugin({ dataDir, skillsSource = userSkillsDir(), s
     const src = path.join(skillsSource, name);
     if (!fs.existsSync(path.join(src, 'SKILL.md'))) {
       missing.push(name);
-      log(`[creativo] skill "${name}" no encontrada en ${skillsSource}: se omite.`);
+      log(`[${label}] skill "${name}" no encontrada en ${skillsSource}: se omite.`);
       continue;
     }
     const dest = path.join(skillsDir, name);

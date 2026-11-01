@@ -61,6 +61,15 @@ Foco
 - Solo se trabaja Bebidas. Barf ya no es relevante: no propongas auditorías ni cambios para Barf.
 - Los medios de pago y los flujos de Leona no los tocas.
 
+HOJA DE RUTA
+- list_roadmap te dice qué tiene cada producto por país (comprobado contra los archivos reales) y propose_next qué sigue. Úsalas antes de afirmar qué falta; no te fíes de documentos viejos.
+- Al terminar un entregable, márcalo con mark_item indicando evidence_path (ruta relativa de un archivo o carpeta que exista); sin evidencia en disco se rechaza. No cambias lo que marcó el usuario. Las dudas y bloqueos van con add_note.
+
+APRENDIZAJE
+- Al empezar un trabajo nuevo llama a get_lessons y respétalas. Lo que el usuario aprueba, rechaza, corrige, usa o descarta se registra solo: aprende de eso.
+- Si el usuario dice una regla con sus palabras ("sin precios en los recetarios"), regístrala con propose_rule citando su frase textual. Si ves un patrón con cifras, usa propose_lesson. Ambas quedan como candidatas hasta que el usuario las certifique en Lecciones; nunca las trates como aprendidas antes.
+- list_outputs muestra qué archivos que generaste le sirvieron al usuario (used) y cuáles descartó; úsalo para proponer mejor.
+
 CÓMO RESPONDES
 - Si el usuario pide solo texto en el chat, no escribas archivos. Si pide un archivo, dime la ruta donde quedó.
 - Si algo es dudoso o no lo puedes verificar, dilo; no inventes rutas, cifras ni resultados.${mapSection}${learned}`;
@@ -81,6 +90,13 @@ export function creativoStepLabel(name, input = {}) {
   if (mcp === 'generate_image') return input.filename ? `Generando la imagen ${cut(input.filename, 40)} con GPT…` : 'Generando una imagen con GPT…';
   if (mcp === 'design_pdf_asset') return `Diseñando ${{ cover: 'la portada', page: 'el fondo de página', illustration: 'la ilustración' }[input.kind] ?? 'el arte'} del PDF con GPT…`;
   if (mcp === 'generate_voice') return input.filename ? `Generando el audio ${cut(input.filename, 40)} con ElevenLabs…` : 'Generando un audio con ElevenLabs…';
+  if (mcp === 'list_roadmap') return 'Revisando la hoja de ruta…';
+  if (mcp === 'propose_next') return 'Calculando qué sigue…';
+  if (mcp === 'mark_item') return 'Marcando un avance en la hoja de ruta…';
+  if (mcp === 'add_note') return 'Agregando una nota a la hoja de ruta…';
+  if (mcp === 'list_outputs') return 'Revisando qué archivos te sirvieron…';
+  if (mcp === 'get_lessons') return 'Revisando las lecciones certificadas…';
+  if (mcp === 'propose_lesson' || mcp === 'propose_rule') return 'Proponiendo una lección para que la certifiques…';
   if (tool.startsWith('mcp__')) return 'Trabajando en un paso…';
   switch (tool) {
     case 'Skill': {

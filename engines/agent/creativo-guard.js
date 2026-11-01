@@ -22,7 +22,10 @@ export const PLUGIN_NAME = 'creativo';
 // (--allowedTools); the generation tools are NOT in --allowedTools: only an approved single-use ticket lets them run.
 export const CREATIVO_SERVER = 'creativo';
 const CREATIVO_PREFIX = `mcp__${CREATIVO_SERVER}__`;
-export const FREE_MCP_TOOLS = Object.freeze(['propose_generation', 'list_voice_presets']);
+// Spend-free tools: the roadmap board, the list of generated files and the learning tools (names mirrored in
+// creativo-extra-tools.js / learning-tools.js; a test keeps them in sync, this module stays light because a hook starts it on every tool call).
+export const FREE_MCP_TOOLS = Object.freeze(['propose_generation', 'list_voice_presets', 'list_roadmap', 'mark_item', 'add_note', 'propose_next', 'list_outputs', 'get_lessons', 'propose_lesson', 'propose_rule']);
+export const LEARNING_MCP_TOOLS = Object.freeze(['get_lessons', 'propose_lesson', 'propose_rule']);
 
 // ---- paths -----------------------------------------------------------------------------------------------------
 
@@ -118,7 +121,7 @@ function checkPath(raw, ctx, { write = false, recursive = false } = {}) {
   return null;
 }
 
-function fileToolDecision(tool, input, ctx) {
+export function fileToolDecision(tool, input, ctx) {
   switch (tool) {
     case 'Read':
       return checkPath(input.file_path, ctx);

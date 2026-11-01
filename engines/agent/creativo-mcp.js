@@ -13,13 +13,18 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
-import { APPROVAL_SCHEMA, argsHash, createApprovals, GENERATION_TOOLS } from './creativo-approvals.js';
+import { argsHash, createApprovals, GENERATION_TOOLS } from './creativo-approvals.js';
+import { createAgentStore } from './agent-db.js';
+import { createCreativoExtraTools } from './creativo-extra-tools.js';
+import { createOutputs } from './creativo-learning.js';
+import { createRoadmap } from './creativo-roadmap.js';
+import { CREATIVO_SCHEMA } from './creativo-schema.js';
 import { generateWithCodex, locateCodex, resolveCodexHome, DEFAULT_CODEX_EFFORT, DEFAULT_CODEX_MODEL } from './creativo-codex.js';
 import { buildImagePrompt, copyWithoutOverwrite, normalizeAspect, outputDir, PURPOSES, resolveProductDir, countrySlug, safeStem, safeSubfolder, writeWithoutOverwrite } from './creativo-media.js';
 import { fetchKeyFromBroker } from './creativo-keybroker.js';
 import { createClient, DEFAULT_MODEL, estimateVoice, findPreset, loadPresets, MAX_TEXT_CHARS } from './elevenlabs.js';
 import { createMcpServer, serveStdio } from './mcp-protocol.js';
-import { agentDbPath } from './paths.js';
+import { agentDbPath, agentDir } from './paths.js';
 import { resolveDataDir } from '../warmup/data-dir.js';
 
 const MAX_ITEMS = 12;
@@ -103,6 +108,12 @@ export function createCreativoTools(ctx) {
     try {
       const result = await run();
       ctx.approvals.finish(itemId, { ok: true, result });
+      try {
+        // The file the user will later keep or discard: this is what the creativo learns from.
+        ctx.outputs?.record({ tool, args, result, proposalItemId: itemId });
+      } catch {
+        /* remembering the file must never fail the generation */
+      }
       return result;
     } catch (error) {
       const message = String(error?.message ?? error);
@@ -250,7 +261,7 @@ export function contextFromEnv(env = process.env) {
   fs.mkdirSync(path.dirname(dbFile), { recursive: true });
   const db = new DatabaseSync(dbFile);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-  db.exec(APPROVAL_SCHEMA);
+  db.exec(CREATIVO_SCHEMA);
   const codexHome = resolveCodexHome({ override: env.AGENTAUTO_CODEX_HOME, env });
   let codex = null;
   try {
@@ -260,6 +271,7 @@ export function contextFromEnv(env = process.env) {
   }
   codex ??= locateCodex({ env });
   // The key comes from the turn process once, at startup (before the model can run anything); the env variable is only a fallback for tests.
+  let store = null;
   const keyPromise = env.AGENTAUTO_KEY_PORT ? fetchKeyFromBroker({ port: env.AGENTAUTO_KEY_PORT, nonce: env.AGENTAUTO_KEY_NONCE }) : Promise.resolve((env.AGENTAUTO_ELEVEN_KEY ?? '').trim());
   const ctx = {
     db,
@@ -267,6 +279,11 @@ export function contextFromEnv(env = process.env) {
     dataDir,
     sessionId: env.AGENTAUTO_SESSION_ID || null,
     approvals: createApprovals(db),
+    outputs: createOutputs(db),
+    roadmap: createRoadmap(db, { root: env.AGENTAUTO_CREATIVO_ROOT, agentDirPath: agentDir(dataDir, 'creativo') }),
+    // Lessons live in the common tables of the same agent.db; a second connection is fine (WAL + busy timeout).
+    getStore: () => (store ??= createAgentStore(dbFile, { schemaExtra: CREATIVO_SCHEMA })),
+    learning: env.AGENTAUTO_LEARNING !== '0',
     presets: () => loadPresets(dataDir),
     hasElevenKey: Boolean(env.AGENTAUTO_KEY_PORT || env.AGENTAUTO_ELEVEN_KEY),
     eleven: async () => createClient({ key: await keyPromise }),
@@ -281,6 +298,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     process.stderr.write('AGENTAUTO_CREATIVO_ROOT is missing\n');
     process.exit(1);
   }
-  await serveStdio(createMcpServer({ name: 'creativo', version: '1.0.0', tools: createCreativoTools(ctx) }));
+  await serveStdio(createMcpServer({ name: 'creativo', version: '1.0.0', tools: [...createCreativoTools(ctx), ...createCreativoExtraTools(ctx)] }));
   ctx.db.close();
 }
