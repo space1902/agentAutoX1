@@ -18,7 +18,8 @@ import { addDays, daysBetween, isIsoDate, localParts } from './time.js';
 
 export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
-const GROUPS = ['ct', 'campaign', 'ad'];
+// 'ct' is the legacy name of the campaign grouping (the report never merges campaigns by CT code anymore).
+const GROUPS = ['campaign', 'ct', 'ad'];
 const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-accept', 'activities-probe'];
 const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
@@ -189,7 +190,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
         config,
         from: args.from,
         to: args.to,
-        group: 'ct',
+        group: 'campaign',
         today,
         country: args.country === true ? '' : (args.country ?? ''),
       });
@@ -199,8 +200,8 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
     // report
     checkRange(args);
     if (args.country && args.country !== true && !/^(all|-|[A-Z]{2})$/.test(args.country)) throw new AdsError('El país debe ser un código de 2 letras o «all».');
-    const group = args.group ?? 'ct';
-    if (!GROUPS.includes(group)) throw new AdsError('La agrupación debe ser ct, campaign o ad.');
+    const group = args.group ?? 'campaign';
+    if (!GROUPS.includes(group)) throw new AdsError('La agrupación debe ser campaign o ad.');
     const report = buildReport({
       insights: store.insightsBetween(args.from, args.to),
       comprobantes: store.comprobantesBetween(args.from, args.to),

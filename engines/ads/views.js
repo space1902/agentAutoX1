@@ -1,13 +1,23 @@
 // Allowlisted analysis views over ads.db. They are the ONLY relations the "Analista" agent may query (see
 // engines/agent/sql-guard.js). Helper tables `ad_ct`, `country_rates` and `spend_vat` exist so the views can be pure SQL:
-// the CT code is derived in JS (extractCt) and the exchange rates live in the JSON config.
+// the CT tag is derived in JS (extractCt) and is only informational: rows are keyed by the real Meta campaign (campaign_id) and the exchange rates live in the JSON config.
 import { extractCt } from './parse.js';
 
-export const VIEWS_VERSION = 4;
+export const VIEWS_VERSION = 5;
+
+// Views of earlier versions that no longer exist (dropped on upgrade).
+const LEGACY_VIEWS = ['v_ct_daily'];
 export const NO_COUNTRY_LABEL = 'Sin país';
 
 export const HELPER_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ad_ct (ad_id TEXT PRIMARY KEY, ct TEXT NOT NULL);
+-- Campaign that owns each ad: Meta's ad list first, else the latest insight row (ads that left the list keep their history).
+CREATE VIEW IF NOT EXISTS ad_campaign AS
+  SELECT a.ad_id AS ad_id, a.campaign_id AS campaign_id, a.campaign_name AS campaign_name FROM ads a
+  UNION ALL
+  SELECT i.ad_id, i.campaign_id, i.campaign_name FROM insights i
+    JOIN (SELECT ad_id, MAX(date) AS date FROM insights GROUP BY ad_id) m ON i.ad_id = m.ad_id AND i.date = m.date
+    WHERE i.ad_id NOT IN (SELECT ad_id FROM ads) GROUP BY i.ad_id;
 CREATE TABLE IF NOT EXISTS spend_vat (id INTEGER PRIMARY KEY CHECK (id = 1), pct REAL NOT NULL);
 INSERT OR IGNORE INTO spend_vat (id, pct) VALUES (1, 19);
 CREATE TABLE IF NOT EXISTS country_rates (
@@ -23,15 +33,16 @@ const COUNTRY = (expr) => `COALESCE(NULLIF(${expr}, ''), '${NO_COUNTRY_LABEL}')`
 // name -> { sql (SELECT body), description, columns: [[name, description]] }
 export const VIEWS = {
   v_ads_daily: {
-    description: 'Gasto y resultados de Meta por día, país, CT y anuncio (una fila por día+anuncio+país de entrega). El gasto (spend) ya incluye el IVA que cobra Meta: úsalo tal cual para ROAS, costo por venta y ganancia; no le sumes IVA otra vez.',
-    sql: `SELECT i.date AS date, ${COUNTRY('i.country')} AS country, COALESCE(c.ct, 'Sin CT') AS ct, i.campaign_name AS campaign,
+    description: 'Gasto y resultados de Meta por día, país, campaña y anuncio (una fila por día+anuncio+país de entrega). El gasto (spend) ya incluye el IVA que cobra Meta: úsalo tal cual para ROAS, costo por venta y ganancia; no le sumes IVA otra vez.',
+    sql: `SELECT i.date AS date, ${COUNTRY('i.country')} AS country, COALESCE(c.ct, 'Sin CT') AS ct, i.campaign_id AS campaign_id, i.campaign_name AS campaign,
       i.ad_id AS ad_id, i.ad_name AS ad_name, i.gasto * ${VAT_FACTOR} AS spend, i.gasto AS spend_net, i.gasto * ${VAT_PCT} / 100.0 AS vat, i.mensajes AS messages, i.impressions AS impressions, i.clicks AS clicks
       FROM insights i LEFT JOIN ad_ct c ON c.ad_id = i.ad_id`,
     columns: [
       ['date', 'Día (AAAA-MM-DD, zona horaria de la cuenta).'],
       ['country', 'País donde Meta entregó el anuncio (CO, MX, VE...) o «Sin país».'],
-      ['ct', 'Código de la prueba creativa, p. ej. «CT 07», o «Sin CT».'],
-      ['campaign', 'Nombre de la campaña.'],
+      ['ct', 'Etiqueta «CT 07» leída del nombre (solo informativa: varias campañas pueden compartirla), o «Sin CT».'],
+      ['campaign_id', 'ID de la campaña en Meta. Agrupa por este campo, no por ct.'],
+      ['campaign', 'Nombre completo de la campaña.'],
       ['ad_id', 'ID del anuncio en Meta.'],
       ['ad_name', 'Nombre del anuncio.'],
       ['spend', 'Gasto en COP CON IVA (lo que realmente cobra Meta). Es el que debes usar para ROAS, costo por venta y ganancia.'],
@@ -43,17 +54,21 @@ export const VIEWS = {
     ],
   },
   v_sales: {
-    description: 'Pagos válidos (comprobantes) con su país y CT. Incluye el nombre del cliente. Incluye los de resultado «Pago válido» y los que el usuario aceptó a mano en la app (accepted_manually = 1); una fila = una venta.',
-    sql: `SELECT c.date AS date, ${COUNTRY('COALESCE(o.country, c.country)')} AS country, COALESCE(t.ct, 'Sin CT') AS ct, c.ad_id AS ad_id,
+    description: 'Pagos válidos (comprobantes) con su país y la campaña dueña del anuncio. Incluye el nombre del cliente. Incluye los de resultado «Pago válido» y los que el usuario aceptó a mano en la app (accepted_manually = 1); una fila = una venta.',
+    sql: `SELECT c.date AS date, ${COUNTRY('COALESCE(o.country, c.country)')} AS country, COALESCE(t.ct, 'Sin CT') AS ct,
+      COALESCE(ac.campaign_id, '') AS campaign_id, CASE WHEN c.ad_id = '' THEN 'Sin anuncio' ELSE COALESCE(ac.campaign_name, 'Anuncio desconocido') END AS campaign, c.ad_id AS ad_id,
       c.valor AS value, c.valor * COALESCE(r.rate_to_cop, 1) AS value_cop, c.flow AS flow, c.result AS result, c.bank AS bank, c.client_name AS client_name,
       CASE WHEN a.key IS NOT NULL AND c.result NOT LIKE 'pago v_lido' THEN 1 ELSE 0 END AS accepted_manually
       FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key LEFT JOIN comprobante_accepts a ON a.key = c.key LEFT JOIN ad_ct t ON t.ad_id = c.ad_id
+      LEFT JOIN ad_campaign ac ON ac.ad_id = c.ad_id
       LEFT JOIN country_rates r ON r.country = COALESCE(o.country, c.country)
       WHERE c.result LIKE 'pago v_lido' OR a.key IS NOT NULL`,
     columns: [
       ['date', 'Día del pago.'],
       ['country', 'País del cliente (por teléfono, campaña o flujo) o «Sin país».'],
-      ['ct', 'CT del anuncio que originó la venta, o «Sin CT» si no se pudo asignar.'],
+      ['ct', 'Etiqueta CT del nombre de la campaña (informativa), o «Sin CT».'],
+      ['campaign_id', 'ID de la campaña dueña del anuncio que originó la venta (vacío si no se pudo asignar).'],
+      ['campaign', 'Nombre de esa campaña, «Sin anuncio» si el pago no trae anuncio o «Anuncio desconocido».'],
       ['ad_id', 'ID del anuncio (vacío si no se pudo asignar).'],
       ['value', 'Valor en la moneda local del país (MXN en México, USD en Venezuela, COP en Colombia).'],
       ['value_cop', 'Valor convertido a COP con la tasa configurada (usa esta para sumar entre países).'],
@@ -66,7 +81,7 @@ export const VIEWS = {
   },
   v_ads: {
     description: 'Un anuncio por fila con su estado, su primer día de gasto y el presupuesto vigente.',
-    sql: `SELECT a.ad_id AS ad_id, COALESCE(t.ct, 'Sin CT') AS ct, a.campaign_name AS campaign, a.name AS ad_name, a.effective_status AS status,
+    sql: `SELECT a.ad_id AS ad_id, COALESCE(t.ct, 'Sin CT') AS ct, a.campaign_id AS campaign_id, a.campaign_name AS campaign, a.name AS ad_name, a.effective_status AS status,
       a.first_spend_date AS first_spend_date,
       CASE WHEN a.first_spend_date IS NULL THEN NULL
         ELSE CAST(julianday((SELECT MAX(date) FROM insights)) - julianday(a.first_spend_date) AS INTEGER) + 1 END AS day_n,
@@ -77,8 +92,9 @@ export const VIEWS = {
       FROM ads a LEFT JOIN ad_ct t ON t.ad_id = a.ad_id`,
     columns: [
       ['ad_id', 'ID del anuncio en Meta.'],
-      ['ct', 'Código CT o «Sin CT».'],
-      ['campaign', 'Campaña.'],
+      ['ct', 'Etiqueta CT del nombre (informativa) o «Sin CT».'],
+      ['campaign_id', 'ID de la campaña en Meta.'],
+      ['campaign', 'Nombre de la campaña.'],
       ['ad_name', 'Nombre del anuncio.'],
       ['status', 'Estado efectivo en Meta (ACTIVE, PAUSED...).'],
       ['first_spend_date', 'Primer día con gasto = «día 1» del anuncio.'],
@@ -112,9 +128,9 @@ export const VIEWS = {
       FROM decisions d`,
     columns: [
       ['id', 'Número de la decisión.'],
-      ['kind', '«test» (anuncio), «ct_test» (CT) o «budget» (tras subir presupuesto).'],
-      ['entity_type', 'ad, ct, adset o campaign.'],
-      ['entity_id', 'ID o código de la entidad.'],
+      ['kind', '«test» (anuncio), «campaign_test» (campaña; «ct_test» en decisiones antiguas por CT) o «budget» (tras subir presupuesto).'],
+      ['entity_type', 'ad, campaign, adset (o ct en decisiones antiguas).'],
+      ['entity_id', 'ID de la entidad (código CT en decisiones antiguas por CT).'],
       ['label', 'Nombre legible.'],
       ['day_n', 'Día en que se evaluó.'],
       ['due_date', 'Día en que correspondía la decisión.'],
@@ -124,21 +140,22 @@ export const VIEWS = {
       ['created', 'Día en que se emitió.'],
     ],
   },
-  v_ct_daily: {
-    description: 'Gasto (con IVA) y ventas por día, país y CT en una sola tabla (para tendencias). Para el ROAS de un periodo suma primero y divide después.',
-    sql: `SELECT date, country, ct, spend, spend_net, vat, messages, sales, revenue_cop,
+  v_campaign_daily: {
+    description: 'Gasto (con IVA) y ventas por día, país y campaña de Meta en una sola tabla (para tendencias). Una fila por campaña real: dos campañas con el mismo CT en el nombre son filas distintas. Para el ROAS de un periodo suma primero y divide después.',
+    sql: `SELECT date, country, campaign_id, campaign, spend, spend_net, vat, messages, sales, revenue_cop,
       CASE WHEN spend > 0 THEN revenue_cop / spend ELSE NULL END AS roas,
       CASE WHEN sales > 0 THEN spend / sales ELSE NULL END AS cost_per_sale
       FROM (
-        SELECT date, country, ct, SUM(spend) AS spend, SUM(spend_net) AS spend_net, SUM(vat) AS vat, SUM(messages) AS messages, SUM(sales) AS sales, SUM(revenue_cop) AS revenue_cop FROM (
-          SELECT date, country, ct, spend, spend_net, vat, messages, 0 AS sales, 0.0 AS revenue_cop FROM v_ads_daily
-          UNION ALL SELECT date, country, ct, 0.0, 0.0, 0.0, 0, 1, value_cop FROM v_sales
-        ) GROUP BY date, country, ct
+        SELECT date, country, campaign_id, MAX(campaign) AS campaign, SUM(spend) AS spend, SUM(spend_net) AS spend_net, SUM(vat) AS vat, SUM(messages) AS messages, SUM(sales) AS sales, SUM(revenue_cop) AS revenue_cop FROM (
+          SELECT date, country, campaign_id, campaign, spend, spend_net, vat, messages, 0 AS sales, 0.0 AS revenue_cop FROM v_ads_daily
+          UNION ALL SELECT date, country, campaign_id, campaign, 0.0, 0.0, 0.0, 0, 1, value_cop FROM v_sales
+        ) GROUP BY date, country, campaign_id
       )`,
     columns: [
       ['date', 'Día.'],
       ['country', 'País (el del gasto viene de Meta; el de la venta, del cliente).'],
-      ['ct', 'Código CT.'],
+      ['campaign_id', 'ID de la campaña en Meta (vacío = ventas sin anuncio).'],
+      ['campaign', 'Nombre completo de la campaña («Sin anuncio» para pagos sin anuncio).'],
       ['spend', 'Gasto en COP CON IVA (el real). Úsalo para ROAS y costo por venta.'],
       ['spend_net', 'Gasto en COP sin IVA (referencia; no lo mezcles con spend).'],
       ['vat', 'IVA del gasto (ya incluido en spend; no lo sumes otra vez).'],
@@ -162,7 +179,7 @@ export function installViews(db) {
   if (current && Number(JSON.parse(current.value)) === VIEWS_VERSION && VIEW_NAMES.every((n) => exists(db, n))) return false;
   db.exec('BEGIN');
   try {
-    for (const name of [...VIEW_NAMES].reverse()) db.exec(`DROP VIEW IF EXISTS ${name}`);
+    for (const name of [...VIEW_NAMES, ...LEGACY_VIEWS].reverse()) db.exec(`DROP VIEW IF EXISTS ${name}`);
     for (const name of VIEW_NAMES) db.exec(`CREATE VIEW ${name} AS ${VIEWS[name].sql}`);
     db.prepare("INSERT INTO kv (key, value) VALUES ('views_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(VIEWS_VERSION));
     db.exec('COMMIT');

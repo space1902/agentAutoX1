@@ -21,7 +21,8 @@ pub const TOKEN_ENV: &str = "AGENTAUTO_META_TOKEN";
 
 const ALLOWED: &[&str] = &["sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "comprobante-accept", "activities-probe"];
 const DECISION_STATUSES: &[&str] = &["pending", "done", "ignored"];
-const GROUPS: &[&str] = &["ct", "campaign", "ad"];
+// "ct" is the legacy name of the campaign grouping; the engine treats it as "campaign".
+const GROUPS: &[&str] = &["campaign", "ct", "ad"];
 
 // ---------------------------------------------------------------- engine location and arguments
 
@@ -57,7 +58,7 @@ pub struct AdsArgs<'a> {
     pub force: bool,
     /// `sync --auto`: incremental sync with the one-time history backfill (no dates needed).
     pub auto: bool,
-    /// `report --country CO|all|-` and `--split` (separate CT rows by country).
+    /// `report --country CO|all|-` and `--split` (separate campaign rows by country).
     pub country: Option<&'a str>,
     pub split: bool,
     /// `comprobante-country --key K --code MX` (an empty code removes the override).
@@ -86,7 +87,7 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
     }
     if let Some(g) = args.group {
         if !GROUPS.contains(&g) {
-            return Err("La agrupación debe ser ct, campaign o ad.".to_string());
+            return Err("La agrupación debe ser campaign o ad.".to_string());
         }
         out.push("--group".to_string());
         out.push(g.to_string());
@@ -634,11 +635,11 @@ mod tests {
         let status = run_engine(&settings, "status", &AdsArgs::default(), None, None).unwrap();
         assert_eq!(status["tokenPresent"], false);
         let cfg = config_get(&settings).unwrap();
-        assert_eq!(cfg["config"]["campaignPrefix"], "CT");
+        assert_eq!(cfg["config"]["campaignPrefix"], "all");
         let saved = config_set(&settings, &json!({"flowPrefix": "Barf"})).unwrap();
         assert_eq!(saved["config"]["flowPrefix"], "Barf");
         assert!(config_set(&settings, &json!({"token": "x"})).is_err());
-        let report = report(&settings, "2026-10-01", "2026-10-02", "ct", None, false).unwrap();
+        let report = report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false).unwrap();
         assert_eq!(report["kpis"]["gasto"], 0);
         assert_eq!(report["daily"].as_array().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);

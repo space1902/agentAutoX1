@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { validateSql } from './sql-guard.js';
 
-const KNOWN = ['kv', 'insights', 'ads', 'budget_history', 'comprobantes', 'comprobante_overrides', 'budget_events', 'decisions', 'wa_outbox', 'ad_ct', 'country_rates', 'v_ads_daily', 'v_sales', 'v_ads', 'v_budget_events', 'v_decisions', 'v_ct_daily'];
+const KNOWN = ['kv', 'insights', 'ads', 'budget_history', 'comprobantes', 'comprobante_overrides', 'budget_events', 'decisions', 'wa_outbox', 'ad_ct', 'country_rates', 'v_ads_daily', 'v_sales', 'v_ads', 'v_budget_events', 'v_decisions', 'v_campaign_daily'];
 const ok = (sql) => assert.equal(validateSql(sql, { knownTables: KNOWN }).ok, true, `${sql} -> ${JSON.stringify(validateSql(sql, { knownTables: KNOWN }))}`);
 const bad = (sql, layer) => {
   const res = validateSql(sql, { knownTables: KNOWN });
@@ -13,12 +13,12 @@ const bad = (sql, layer) => {
 
 test('accepts plain analytical queries over the views', () => {
   ok('SELECT ct, SUM(spend) AS spend FROM v_ads_daily WHERE date >= "2026-10-01" GROUP BY ct ORDER BY spend DESC LIMIT 10');
-  ok("select date, round(revenue_cop / spend, 2) as roas from v_ct_daily where ct = 'CT 07' and spend > 0;");
+  ok("select date, round(revenue_cop / spend, 2) as roas from v_campaign_daily where campaign_id = 'c1' and spend > 0;");
   ok('SELECT a.ct, COUNT(*) FROM v_ads a JOIN v_sales s ON s.ad_id = a.ad_id GROUP BY a.ct');
   ok('SELECT x.ct FROM v_ads x, v_sales y WHERE x.ad_id = y.ad_id');
   ok('WITH t AS (SELECT ct, SUM(spend) s FROM v_ads_daily GROUP BY ct) SELECT * FROM t WHERE s > 0');
   ok('WITH a(ct, s) AS (SELECT ct, spend FROM v_ads_daily), b AS (SELECT ct FROM a) SELECT * FROM b');
-  ok('SELECT ct, row_number() OVER (PARTITION BY country ORDER BY spend DESC) AS n FROM v_ct_daily');
+  ok('SELECT campaign, row_number() OVER (PARTITION BY country ORDER BY spend DESC) AS n FROM v_campaign_daily');
   ok('SELECT CASE WHEN spend > 0 THEN 1 ELSE 0 END, CAST(spend AS INTEGER), strftime("%Y-%m", date) FROM v_ads_daily WHERE ct IN ("CT 01", "CT 02")');
   ok('SELECT (SELECT MAX(date) FROM v_ads_daily) AS last_day, replace(ct, " ", "") FROM v_ads');
   ok("SELECT 'DROP TABLE x; -- hi' AS text FROM v_ads");

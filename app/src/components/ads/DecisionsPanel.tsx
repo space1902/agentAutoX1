@@ -6,11 +6,11 @@ import { Card, Pill } from "../ui";
 
 type KindFilter = "all" | DecisionKind;
 
-const KIND_LABEL: Record<DecisionKind, string> = { test: "Prueba de anuncio", ct_test: "Prueba de CT", budget: "Presupuesto" };
+const KIND_LABEL: Record<DecisionKind, string> = { test: "Prueba de anuncio", campaign_test: "Prueba de campaña", ct_test: "Prueba de CT (antigua)", budget: "Presupuesto" };
 const FILTERS: { id: KindFilter; label: string }[] = [
   { id: "all", label: "Todas" },
   { id: "test", label: "Anuncios" },
-  { id: "ct_test", label: "CT" },
+  { id: "campaign_test", label: "Campañas" },
   { id: "budget", label: "Presupuesto" },
 ];
 
@@ -81,15 +81,15 @@ function testLine(i: TrackingItem): string | null {
   return i.inTest ? `Prueba: día ${i.dayN} de ${i.testDays}` : null;
 }
 
-/** Informational day counters, one collapsible card per CT. Verdicts only come automatically (see the cards below). */
+/** Informational day counters, one collapsible card per campaign. Verdicts only come automatically (see the cards below). */
 function Following({ items }: { items: TrackingItem[] }) {
   const [open, setOpen] = useState<Set<string>>(new Set());
   const groups = useMemo(() => groupTracking(items), [items]);
   if (groups.length === 0) return null;
-  const toggle = (ct: string) =>
+  const toggle = (key: string) =>
     setOpen((prev) => {
       const next = new Set(prev);
-      if (!next.delete(ct)) next.add(ct);
+      if (!next.delete(key)) next.add(key);
       return next;
     });
   const allOpen = open.size === groups.length;
@@ -97,20 +97,20 @@ function Following({ items }: { items: TrackingItem[] }) {
     <Card>
       <div className="card-head">
         <h2 className="card-title">Seguimiento</h2>
-        <button className="btn ghost sm" onClick={() => setOpen(allOpen ? new Set() : new Set(groups.map((g) => g.ct)))}>
+        <button className="btn ghost sm" onClick={() => setOpen(allOpen ? new Set() : new Set(groups.map((g) => g.key)))}>
           {allOpen ? "Contraer todo" : "Expandir todo"}
         </button>
       </div>
       <p className="muted ads-note">Solo informativo: los veredictos llegan solos (día {items.find((i) => i.verdictDay)?.verdictDay ?? 4} de prueba y día {items.find((i) => i.checkDay)?.checkDay ?? 2} tras una subida).</p>
       <div className="ads-follow-list">
         {groups.map((g) => {
-          const expanded = open.has(g.ct);
+          const expanded = open.has(g.key);
           const day = g.summary?.dayN ?? Math.max(0, ...g.ads.map((a) => a.dayN));
           return (
-            <div key={g.ct} className="ads-follow-group">
-              <button className="ads-follow-head" onClick={() => toggle(g.ct)} aria-expanded={expanded}>
+            <div key={g.key} className="ads-follow-group">
+              <button className="ads-follow-head" onClick={() => toggle(g.key)} aria-expanded={expanded}>
                 {expanded ? <ChevronDown size={15} aria-hidden /> : <ChevronRight size={15} aria-hidden />}
-                <strong>{g.ct}</strong>
+                <strong>{g.name}</strong>
                 <span className="muted">
                   día {day} desde que empezó a gastar
                   {g.latestRaise ? ` · ${raiseText(g.latestRaise)}` : ""}
@@ -161,7 +161,8 @@ export default function DecisionsPanel({ range, tracking, decisions, activitiesO
   const today = toIso(new Date());
 
   const { current, history, hidden } = useMemo(() => {
-    const filtered = decisions.filter((d) => kind === "all" || d.kind === kind);
+    // Tests issued per CT code before campaigns replaced them stay in the history under "Campañas".
+    const filtered = decisions.filter((d) => kind === "all" || d.kind === kind || (kind === "campaign_test" && d.kind === "ct_test"));
     const isToday = (d: Decision) => toIso(new Date(d.createdAt)) === today;
     // A decision belongs to the day it refers to (its due day); the history follows the selected range.
     const inRange = (d: Decision) => d.dueDate >= range.from && d.dueDate <= range.to;

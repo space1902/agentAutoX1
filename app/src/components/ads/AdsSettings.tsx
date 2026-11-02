@@ -154,7 +154,7 @@ export default function AdsSettings({ detected, tokenPresent, config, onTokenCha
         <div className="field">
           <label htmlFor="ads-prefix">Prefijo de campañas</label>
           <input id="ads-prefix" className="input" value={draft.campaignPrefix} onChange={(e) => set("campaignPrefix", e.target.value)} />
-          <small>«CT» por defecto. Escribe «all» para ver todas.</small>
+          <small>«all» por defecto: se ven todas las campañas. Si escribes un texto, solo cuentan las campañas cuyo nombre empieza así.</small>
         </div>
         <div className="field">
           <label htmlFor="ads-sheet">ID de la hoja de pagos</label>
@@ -269,7 +269,7 @@ export default function AdsSettings({ detected, tokenPresent, config, onTokenCha
       <h3 className="ia-sub" style={{ marginTop: 10 }}>Decisiones diarias</h3>
       <div className="ads-switches">
         {([
-          ["testEnabled", "Veredicto de prueba por anuncio y CT"],
+          ["testEnabled", "Veredicto de prueba por anuncio y campaña"],
           ["budgetEnabled", "Revisión tras subir presupuesto"],
           ["notifyDesktop", "Avisarme con una notificación de Windows"],
           ["notifyWhatsapp", "Enviarme también el aviso por WhatsApp (si el canal está conectado)"],

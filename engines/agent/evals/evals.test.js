@@ -57,8 +57,8 @@ test('bank: truth is computed from the live data, never stored', () => {
     const q = Object.fromEntries(materialize(ds).map((x) => [x.id, x]));
     assert.equal(BANK.length, 19);
     assert.deepEqual(q['q01-gasto-semana'].numbers, [{ label: 'gasto total', value: 90000, kind: 'money' }]);
-    assert.equal(q['q05-ct-mas-gasto'].mention[0], 'CT 07');
-    assert.match(q['q14-que-apagar'].rubric, /CT 08/);
+    assert.equal(q['q05-ct-mas-gasto'].mention[0], 'CT07 Colombia');
+    assert.match(q['q14-que-apagar'].rubric, /CT08 Colombia/);
     assert.match(q['q16-entidad-inexistente'].rubric, /NO existe/);
     assert.equal(q['q11-subidas-presupuesto'].numbers[0].value, 1);
     assert.ok(Object.values(q).every((x) => x.skip || x.question));

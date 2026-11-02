@@ -37,7 +37,7 @@ export function stepLabel(name, input = {}) {
       if (input.purpose) return `Consultando ${cut(String(input.purpose).replace(/^consultando\s+/i, ''))}…`;
       return viewsIn(input.sql) ? `Consultando ${viewsIn(input.sql)}…` : 'Consultando los datos…';
     case 'metrics': {
-      const scope = input.ct ? ` de ${input.ct}` : '';
+      const scope = input.ct ? ` de ${input.ct}` : input.campaign_id ? ' de una campaña' : '';
       const what = { kpis: 'Calculando totales', table: 'Armando la tabla', daily: 'Calculando la serie diaria', countries: 'Comparando países', lifecycle: 'Revisando los días de cada anuncio', budget_compare: 'Comparando antes y después de la subida de presupuesto' }[input.kind] ?? 'Calculando métricas';
       return `${what}${scope}…`;
     }

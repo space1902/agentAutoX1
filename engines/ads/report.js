@@ -1,6 +1,7 @@
 // Report builder: joins daily Meta spend with valid payments (key = date|adId, as the Apps Script
 // trkJoin did; with a country, date|adId|country), derives metrics, per-country economics and suggested actions,
-// and groups by CT / campaign / ad. Pure.
+// and groups by campaign / ad. Pure. A campaign is a real Meta campaign (keyed by its id, labeled with its full name):
+// the CT code in a name is only a tag and never merges campaigns.
 import { COUNTRY_NAMES, DEFAULT_COUNTRY_TOKENS, deriveCountry, scopeCountry } from './country.js';
 import { ACTIONS, computeMetrics, isInactiveStatus, suggestAction } from './metrics.js';
 import { maskPhone, normalizeText, parseCt } from './parse.js';
@@ -9,6 +10,7 @@ import { daysBetween, eachDate } from './time.js';
 
 export const NO_AD = 'Sin anuncio';
 const NO_CT = 'Sin CT';
+const UNKNOWN_AD = 'unknown';
 export const NO_COUNTRY = 'Sin país';
 
 export function isMonitored(campaignName, prefix) {
@@ -91,8 +93,10 @@ const withMetrics = (t) => {
 const zero = () => ({ gasto: 0, spendNet: 0, vat: 0, mensajes: 0, valor: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
 
 export function buildReport({
-  insights, comprobantes, identities = {}, ads = {}, config, from, to, group = 'ct', today, country = '', splitCountry = false, raises = {},
+  insights, comprobantes, identities = {}, ads = {}, config, from, to, group = 'campaign', today, country = '', splitCountry = false, raises = {},
 }) {
+  // "ct" is the legacy name of the grouping that merged campaigns by code: it is now the campaign grouping.
+  if (group === 'ct') group = 'campaign';
   const prefix = config.campaignPrefix;
   const words = config.countryWords ?? DEFAULT_COUNTRY_TOKENS;
   const wanted = country && country !== 'all' ? country : '';
@@ -103,7 +107,12 @@ export function buildReport({
   const monitoredInsights = insights.filter((r) => inRange(r.date) && isMonitored(r.campaignName, prefix));
   const seen = {};
   for (const r of insights) seen[r.adId] = { adName: r.adName, campaignId: r.campaignId, campaignName: r.campaignName };
-  const identityOf = (adId) => (adId ? (identities[adId] ?? seen[adId] ?? null) : null);
+  // Ads known from Meta's ad list (even without spend in the loaded insights) still tell which campaign owns them.
+  const fromAds = (adId) => {
+    const ad = ads[adId];
+    return ad && (ad.campaignId || ad.campaignName) ? { adName: ad.name ?? '', campaignId: ad.campaignId ?? '', campaignName: ad.campaignName ?? '' } : null;
+  };
+  const identityOf = (adId) => (adId ? (identities[adId] ?? seen[adId] ?? fromAds(adId)) : null);
 
   // Country of a payment: manual/stored value, else derived (phone, then the ad's campaign, then the flow).
   const saleCountry = (c) => c.country || deriveCountry({ phone: c.phone, campaignName: identityOf(c.adId)?.campaignName, flow: c.flow }, words).country;
@@ -150,22 +159,22 @@ export function buildReport({
       campaignId: id?.campaignId ?? '',
       campaignName,
       known: Boolean(id),
+      // Informational tag read from the name; it never decides the group.
       ct: !adId ? NO_AD : (parsed.ct ?? NO_CT),
-      // The name could not be read as a CT ("sin_ct") or holds a split number such as "CT 1 0" ("ambiguo").
-      ctIssue: !adId || !id ? null : !parsed.ct ? 'sin_ct' : parsed.ambiguous ? 'ambiguo' : null,
     };
+  };
+
+  // The real campaign of an ad (payments follow their ad id to it). No ad id: "Sin anuncio"; an ad Meta never told us about: unknown.
+  const campaignGroupOf = (info) => {
+    if (!info.adId) return { key: NO_AD, label: NO_AD };
+    if (!info.known) return { key: UNKNOWN_AD, label: 'Anuncio desconocido' };
+    return { key: info.campaignId || info.campaignName, label: info.campaignName || '(campaña sin nombre)' };
   };
 
   // Group of an ad before the country split.
   const baseGroupOf = (info) => {
-    let g;
-    if (group === 'campaign') {
-      if (!info.adId) g = { key: NO_AD, label: NO_AD };
-      else g = info.known ? { key: info.campaignId || info.campaignName, label: info.campaignName || '(campaña sin nombre)' } : { key: 'unknown', label: 'Anuncio desconocido' };
-    } else if (group === 'ad') {
-      g = !info.adId ? { key: NO_AD, label: NO_AD } : { key: info.adId, label: info.adName || `Anuncio ${info.adId}` };
-    } else g = { key: info.ct, label: info.ct };
-    return g;
+    if (group === 'ad') return !info.adId ? { key: NO_AD, label: NO_AD } : { key: info.adId, label: info.adName || `Anuncio ${info.adId}` };
+    return campaignGroupOf(info);
   };
   const groupOf = (info, entryCountry) => {
     const g = baseGroupOf(info);
@@ -175,17 +184,22 @@ export function buildReport({
 
   // Delivery state per group, from the stored Meta status of EVERY known ad (not only the ones that spent in the range):
   // a group is "paused" only when it has known ads and none of them is delivering.
-  const adIdentity = (adId) => identityOf(adId) ?? (ads[adId]?.name === undefined ? null : { adName: ads[adId].name, campaignId: ads[adId].campaignId ?? '', campaignName: ads[adId].campaignName ?? '' });
-  const delivery = new Map();
-  for (const [adId, ad] of Object.entries(ads)) {
-    const id = adIdentity(adId);
-    if (!ad?.effectiveStatus || !id || !isMonitored(id.campaignName, prefix)) continue;
-    const key = baseGroupOf(describe(adId, id)).key;
-    const d = delivery.get(key) ?? { total: 0, active: 0 };
-    d.total += 1;
-    if (!isInactiveStatus(ad.effectiveStatus)) d.active += 1;
-    delivery.set(key, d);
-  }
+  const deliveryBy = (keyOf) => {
+    const map = new Map();
+    for (const [adId, ad] of Object.entries(ads)) {
+      const id = identityOf(adId);
+      if (!ad?.effectiveStatus || !id || !isMonitored(id.campaignName, prefix)) continue;
+      const key = keyOf(describe(adId, id));
+      const d = map.get(key) ?? { total: 0, active: 0 };
+      d.total += 1;
+      if (!isInactiveStatus(ad.effectiveStatus)) d.active += 1;
+      map.set(key, d);
+    }
+    return map;
+  };
+  const delivery = deliveryBy((info) => baseGroupOf(info).key);
+  const campaignDelivery = group === 'campaign' ? delivery : deliveryBy((info) => campaignGroupOf(info).key);
+  const isPaused = (d, adIds, hasKnown) => Boolean(hasKnown && d && d.total > 0 && d.active === 0 && [...adIds].every((id) => isInactiveStatus(ads[id]?.effectiveStatus)));
 
   // Per-country table (always over every country, whatever the filter).
   const byCountry = new Map();
@@ -205,27 +219,20 @@ export function buildReport({
     .sort((a, b) => b.gasto - a.gasto || b.valor - a.valor);
 
   const groups = new Map();
-  const issues = new Map();
   const daily = new Map(eachDate(from, to).map((d) => [d, blank(d, '')]));
   const total = zero();
-  // Daily series per CT (always by CT, whatever the table grouping), so the chart can focus on one CT.
-  const ctDays = new Map();
+  // Daily series per real campaign (whatever the table grouping), so the chart can focus on one campaign.
+  const campaignDays = new Map();
   for (const e of joined.values()) {
     if (!matches(e.country)) continue;
     const info = describe(e.adId);
-    if (info.ctIssue) {
-      const issue = issues.get(info.campaignName || info.adName) ?? { campaignName: info.campaignName, adName: info.adName, reason: info.ctIssue, gasto: 0, ventas: 0 };
-      issue.gasto += e.gasto;
-      issue.ventas += e.ventas;
-      issues.set(info.campaignName || info.adName, issue);
-    }
     const g = groupOf(info, e.country);
     if (!groups.has(g.key)) {
       groups.set(g.key, {
         ...zero(),
-        key: g.key, baseKey: baseGroupOf(info).key, label: g.label, ct: group === 'ct' ? g.label : info.ct, adId: group === 'ad' ? info.adId : '',
-        adName: group === 'ad' ? info.adName : '', campaignId: group === 'ad' || group === 'campaign' ? info.campaignId : '',
-        campaignName: group === 'ct' ? '' : info.campaignName, country: splitCountry ? e.country : '', hasAction: false, adIds: new Set(),
+        key: g.key, baseKey: baseGroupOf(info).key, label: g.label, ct: info.ct, adId: group === 'ad' ? info.adId : '',
+        adName: group === 'ad' ? info.adName : '', campaignId: info.campaignId,
+        campaignName: info.campaignName, country: splitCountry ? e.country : '', hasAction: false, adIds: new Set(),
       });
     }
     const row = groups.get(g.key);
@@ -235,23 +242,30 @@ export function buildReport({
     const day = daily.get(e.date);
     if (day) addTotals(day, e);
     if (inRange(e.date)) {
-      if (!ctDays.has(info.ct)) ctDays.set(info.ct, new Map(eachDate(from, to).map((d) => [d, blank(d, '')])));
-      addTotals(ctDays.get(info.ct).get(e.date), e);
+      const c = campaignGroupOf(info);
+      if (!campaignDays.has(c.key)) campaignDays.set(c.key, { campaignId: info.known ? info.campaignId : '', campaign: c.label, key: c.key, adIds: new Set(), known: false, days: new Map(eachDate(from, to).map((d) => [d, blank(d, '')])) });
+      const cd = campaignDays.get(c.key);
+      addTotals(cd.days.get(e.date), e);
+      if (e.adId) cd.adIds.add(e.adId);
+      if (info.known) cd.known = true;
     }
     addTotals(total, e);
   }
   const dailyPoint = ({ date, gasto, spendNet, vat, valor, ventas, mensajes }) => ({ date, gasto, spendNet, vat, valor, ventas, mensajes, roas: gasto ? valor / gasto : 0 });
-  const ctDaily = [...ctDays.entries()]
-    .map(([ct, days]) => ({ ct, daily: [...days.values()].map(dailyPoint) }))
+  const campaignDaily = [...campaignDays.values()]
+    .map((c) => ({
+      campaignId: c.campaignId, campaign: c.campaign, key: c.key, paused: isPaused(campaignDelivery.get(c.key), c.adIds, c.known),
+      daily: [...c.days.values()].map(dailyPoint),
+    }))
     .filter((c) => c.daily.some((d) => d.gasto > 0 || d.valor > 0))
-    .sort((a, b) => a.ct.localeCompare(b.ct, 'es', { numeric: true }));
+    .sort((a, b) => a.campaign.localeCompare(b.campaign, 'es', { numeric: true }));
 
   const rows = [...groups.values()]
     .map(({ adIds, hasAction, baseKey, ...row }) => {
       const metrics = withMetrics(row);
       const d = delivery.get(baseKey);
       // Paused: every known ad of the group is off in Meta and so is each ad that spent in the range.
-      const paused = Boolean(hasAction && d && d.total > 0 && d.active === 0 && [...adIds].every((id) => isInactiveStatus(ads[id]?.effectiveStatus)));
+      const paused = isPaused(d, adIds, hasAction);
       const suggested = hasAction ? suggestAction(metrics, config.thresholds) : null;
       const ages = [...adIds].map((id) => dayOf(ads[id], today)).filter((n) => n !== null);
       const single = group === 'ad' ? ads[row.adId] : null;
@@ -266,8 +280,6 @@ export function buildReport({
         action: paused ? ACTIONS.paused : suggested,
         suggestedAction: paused ? suggested : null,
         paused,
-        // The row groups campaigns whose name has no recognizable CT number.
-        ctIssue: group === 'ct' && row.ct === NO_CT,
       };
     })
     .sort((a, b) => b.gasto - a.gasto || b.valor - a.valor);
@@ -277,6 +289,7 @@ export function buildReport({
     .filter((c) => scopeCountry(withCountry.get(c), config) !== null && matches(scopeCountry(withCountry.get(c), config)))
     .map((c) => {
       const info = describe(c.adId);
+      const campaign = campaignGroupOf(info);
       const code = scopeCountry(withCountry.get(c), config);
       return {
         key: c.key ?? '',
@@ -289,6 +302,8 @@ export function buildReport({
         adId: c.adId,
         adName: info.adName,
         ct: info.ct,
+        campaignId: info.known ? info.campaignId : '',
+        campaign: campaign.label,
         result: c.result,
         status: resultStatus(c, config.validResult),
         accepted: Boolean(c.accepted),
@@ -314,9 +329,10 @@ export function buildReport({
     rows,
     countries,
     detected,
-    ctIssues: [...issues.values()].sort((a, b) => b.gasto - a.gasto),
     daily: [...daily.values()].map(dailyPoint),
-    ctDaily,
+    campaignDaily,
+    // What the paused/off rows spent in the range (it is part of the KPIs): lets the screen say so when it hides them.
+    inactive: { gasto: rows.filter((r) => r.paused).reduce((n, r) => n + r.gasto, 0), count: rows.filter((r) => r.paused).length },
     comprobantes: list,
     // Pending: not valid in the sheet and not accepted by hand (within the range and the enabled countries).
     reviewCount: list.filter((c) => c.status === 'review' || c.status === 'invalid').length,

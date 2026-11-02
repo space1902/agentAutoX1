@@ -19,7 +19,7 @@ const sale = (o) => ({
 
 function seeded() {
   const store = createStore(':memory:');
-  store.upsertInsights([insight({}), insight({ date: '2026-10-02', gasto: 20000 }), insight({ adId: 'a2', adName: 'Otro', campaignName: 'Otra', gasto: 500 })], 1);
+  store.upsertInsights([insight({}), insight({ date: '2026-10-02', gasto: 20000 }), insight({ adId: 'a2', adName: 'Otro', campaignId: 'c2', campaignName: 'Otra', gasto: 500 })], 1);
   store.upsertAds(
     [{ adId: 'a1', name: 'Video 1', createdTime: '2026-09-30', effectiveStatus: 'ACTIVE', campaignId: 'c1', campaignName: 'CT07 Colombia', adsetId: 's1', adsetName: 'Set 1' }],
     1,
@@ -60,7 +60,7 @@ test('spend in the views includes the IVA; spend_net and vat are exposed without
   const day = store.db.prepare("SELECT spend, spend_net, vat FROM v_ads_daily WHERE date = '2026-10-01' AND ad_id = 'a1'").get();
   assert.deepEqual({ ...day }, { spend: 11900, spend_net: 10000, vat: 1900 });
   store.setSpendVat(10);
-  const ct = store.db.prepare("SELECT spend, spend_net, vat, roas FROM v_ct_daily WHERE date = '2026-10-01' AND ct = 'CT 07'").get();
+  const ct = store.db.prepare("SELECT spend, spend_net, vat, roas FROM v_campaign_daily WHERE date = '2026-10-01' AND campaign_id = 'c1'").get();
   assert.equal(ct.spend, 11000);
   assert.equal(ct.spend_net, 10000);
   assert.equal(ct.vat, 1000);
@@ -85,9 +85,10 @@ test('v_ads reports the day counter and the current budget', () => {
   assert.equal(row.current_budget, 30000);
 });
 
-test('v_ct_daily joins spend and sales per day', () => {
+test('v_campaign_daily joins spend and sales per day and per real campaign', () => {
   const store = seeded();
-  const row = store.db.prepare("SELECT * FROM v_ct_daily WHERE ct = 'CT 07' AND date = '2026-10-01'").get();
+  const row = store.db.prepare("SELECT * FROM v_campaign_daily WHERE campaign_id = 'c1' AND date = '2026-10-01'").get();
+  assert.equal(row.campaign, 'CT07 Colombia');
   assert.equal(row.spend, 11900); // 10000 + 19 % IVA
   assert.equal(row.sales, 1);
   assert.equal(row.revenue_cop, 25000);
@@ -103,4 +104,26 @@ test('read-only stores skip migrations and cannot write', () => {
   assert.throws(() => ro.setKv('x', 1));
   ro.close();
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('campaigns that share a CT code are separate in the views, and sales follow their ad to the campaign', () => {
+  const store = createStore(':memory:');
+  store.setSpendVat(0);
+  store.upsertInsights([
+    insight({ adId: 'x1', campaignId: 'k1', campaignName: 'CT 01 Col 2 - ventas', gasto: 17106 }),
+    insight({ adId: 'x2', campaignId: 'k2', campaignName: 'CT 01 Col 2', gasto: 13011 }),
+    insight({ adId: 'x3', campaignId: 'k3', campaignName: 'Branding', gasto: 100 }),
+  ], 1);
+  store.upsertAds([{ adId: 'x4', name: 'Sin gasto', createdTime: '2026-09-30', effectiveStatus: 'ACTIVE', campaignId: 'k2', campaignName: 'CT 01 Col 2', adsetId: 's9', adsetName: 'S' }], 1);
+  store.syncComprobantes([sale({ adId: 'x1', valor: 50000 }), sale({ registered: '2026-10-01 11:00', adId: 'x4', valor: 7000 }), sale({ registered: '2026-10-01 12:00', adId: '', valor: 1000 })], 1);
+  const rows = store.db.prepare('SELECT campaign_id, campaign, ROUND(SUM(spend)) AS spend, SUM(sales) AS sales, SUM(revenue_cop) AS revenue FROM v_campaign_daily GROUP BY campaign_id ORDER BY campaign_id').all().map((r) => ({ ...r }));
+  assert.deepEqual(rows, [
+    { campaign_id: '', campaign: 'Sin anuncio', spend: 0, sales: 1, revenue: 1000 },
+    { campaign_id: 'k1', campaign: 'CT 01 Col 2 - ventas', spend: 17106, sales: 1, revenue: 50000 },
+    { campaign_id: 'k2', campaign: 'CT 01 Col 2', spend: 13011, sales: 1, revenue: 7000 },
+    { campaign_id: 'k3', campaign: 'Branding', spend: 100, sales: 0, revenue: 0 },
+  ]);
+  const sales = store.db.prepare('SELECT ad_id, campaign_id, campaign FROM v_sales ORDER BY value').all().map((r) => ({ ...r }));
+  assert.equal(sales.find((r) => r.ad_id === 'x4').campaign, 'CT 01 Col 2');
+  assert.equal(store.db.prepare("SELECT campaign_id FROM v_ads WHERE ad_id = 'x4'").get().campaign_id, 'k2');
 });

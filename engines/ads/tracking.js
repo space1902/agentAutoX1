@@ -1,6 +1,6 @@
 // "Seguimiento": informational day counters. There are NO verdicts here: those only come automatically
 // (test verdict on day 4, post-raise check on day 2, see decisions.js).
-//  - day N since an ad (or a CT) started to spend (day 1 = first day with spend),
+//  - day N since an ad (or a campaign) started to spend (day 1 = first day with spend),
 //  - day N since the last budget raise (day 1 = the day of the raise) with its date and percentage,
 //  - for ads still in the test, when the automatic verdict will come.
 import { scopeCountry } from './country.js';
@@ -53,23 +53,24 @@ export function buildTracking({ insights: allInsights, ads, changes, config, tod
   });
 
   const items = [];
-  const cts = new Map();
+  const campaigns = new Map();
   for (const adId of running) {
     const first = ads[adId].firstSpendDate;
     const dayN = daysBetween(first, today) + 1;
     const n = names[adId];
     items.push({
-      kind: 'ad', id: adId, label: n.adName || `Anuncio ${adId}`, ct: extractCt(n.campaignName, n.adName), dayN, firstSpendDate: first,
+      kind: 'ad', id: adId, label: n.adName || `Anuncio ${adId}`, ct: extractCt(n.campaignName, n.adName), campaignId: n.campaignId || '', campaignName: n.campaignName || '', dayN, firstSpendDate: first,
       inTest: dayN <= life.testDays, testDays: life.testDays, verdictDay: life.testNotifyDay, verdictAt: life.testNotifyAt,
       verdictDate: addDays(first, life.testNotifyDay - 1), raise: raises[adId] ?? null,
     });
-    const ct = extractCt(n.campaignName, n.adName);
-    if (ct && (!cts.has(ct) || first < cts.get(ct))) cts.set(ct, first);
+    // One entry per real campaign (never merged by CT code); its day 1 is the first spend of any of its ads.
+    const id = n.campaignId || n.campaignName;
+    if (id && (!campaigns.has(id) || first < campaigns.get(id).first)) campaigns.set(id, { first, label: n.campaignName || id, ct: extractCt(n.campaignName, n.adName) });
   }
-  for (const [ct, first] of cts) {
+  for (const [id, { first, label, ct }] of campaigns) {
     const dayN = daysBetween(first, today) + 1;
     items.push({
-      kind: 'ct', id: ct, label: ct, ct, dayN, firstSpendDate: first, inTest: dayN <= life.testDays, testDays: life.testDays,
+      kind: 'campaign', id, label, ct, dayN, firstSpendDate: first, inTest: dayN <= life.testDays, testDays: life.testDays,
       verdictDay: life.testNotifyDay, verdictAt: life.testNotifyAt, verdictDate: addDays(first, life.testNotifyDay - 1), raise: null,
     });
   }
@@ -81,11 +82,11 @@ export function buildTracking({ insights: allInsights, ads, changes, config, tod
     if (!owner || !isMonitored(owner.campaignName, config.campaignPrefix)) continue;
     items.push({
       kind: 'budget', id: c.id, entityId: c.entityId, label: (c.entityType === 'campaign' ? owner.campaignName : owner.adsetName) || c.entityId, entityType: c.entityType,
-      ct: extractCt(owner.campaignName, owner.adsetName), dayN: age + 1, date: c.date, pct: c.pct, exact: c.exact, checkDay: life.postBudgetNotifyDay, checkAt: life.postBudgetNotifyAt,
+      ct: extractCt(owner.campaignName, owner.adsetName), campaignId: owner.campaignId || '', campaignName: owner.campaignName || '', dayN: age + 1, date: c.date, pct: c.pct, exact: c.exact, checkDay: life.postBudgetNotifyDay, checkAt: life.postBudgetNotifyAt,
       checkDate: addDays(c.date, life.postBudgetNotifyDay - 1),
     });
   }
-  const order = { budget: 0, ct: 1, ad: 2 };
+  const order = { budget: 0, campaign: 1, ad: 2 };
   items.sort((a, b) => order[a.kind] - order[b.kind] || a.dayN - b.dayN || String(a.label).localeCompare(String(b.label)));
   return { today, items };
 }

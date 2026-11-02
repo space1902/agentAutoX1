@@ -8,8 +8,9 @@ import { DEFAULT_COUNTRY_TOKENS } from './country.js';
 export const DEFAULT_CONFIG = Object.freeze({
   adAccountId: 'act_1962423981398837',
   graphVersion: 'v26.0',
-  // "all" (or empty) monitors every campaign.
-  campaignPrefix: 'CT',
+  // "all" (or empty) monitors every campaign. Version 2 of the scope: before it the default was "CT" (CT campaigns only).
+  campaignPrefix: 'all',
+  prefixVersion: 2,
   sheetId: '1DnfAORSuDSbfgxCffJ7fkdBexcVrLSHT8gQqQkh8urw',
   sheetTab: 'Comprobantes',
   validResult: 'Pago válido',
@@ -179,7 +180,11 @@ export const configPath = (dataDir) => path.join(adsDir(dataDir), 'config.json')
 export function loadConfig(dataDir) {
   try {
     const raw = fs.readFileSync(configPath(dataDir), 'utf8').replace(/^﻿/, '');
-    return mergeConfig(JSON.parse(raw));
+    const parsed = JSON.parse(raw);
+    const cfg = mergeConfig(parsed);
+    // The old default only showed CT campaigns; it is not a choice the user made, so it widens to every campaign once.
+    if (parsed?.prefixVersion !== 2 && String(parsed?.campaignPrefix ?? '').trim() === 'CT') cfg.campaignPrefix = 'all';
+    return cfg;
   } catch {
     return mergeConfig({});
   }

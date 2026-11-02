@@ -122,7 +122,7 @@ export default function VouchersPanel({ vouchers, filter, onFilter, onCountry, o
                   <td className="num">{formatMoney(v.valor)}</td>
                   <td>{v.bank || "—"}</td>
                   <td>{v.flow || "—"}</td>
-                  <td>{v.ct}{v.adName ? <span className="muted"> · {v.adName}</span> : null}</td>
+                  <td>{v.campaign}{v.adName ? <span className="muted"> · {v.adName}</span> : null}</td>
                   <td><ClientCell v={v} /></td>
                   <td>
                     <select

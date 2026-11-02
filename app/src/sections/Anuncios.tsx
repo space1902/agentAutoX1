@@ -1,4 +1,4 @@
-import { AlertTriangle, Banknote, Bell, Coins, MessageCircle, Percent, RefreshCw, Target, TrendingUp, Wallet } from "lucide-react";
+import { Banknote, Bell, Coins, MessageCircle, Percent, RefreshCw, Target, TrendingUp, Wallet } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import AdsChart from "../components/ads/AdsChart";
 import AdsSettings from "../components/ads/AdsSettings";
@@ -10,6 +10,7 @@ import DateRangeBar from "../components/ads/DateRangeBar";
 import VouchersPanel, { type VoucherFilter } from "../components/ads/VouchersPanel";
 import { Banner, Card, Notice, Skeleton, StatCard } from "../components/ui";
 import { errorText } from "../lib/api";
+import { hiddenInactive, readShowInactive, visibleRows, writeShowInactive } from "../lib/adsView";
 import {
   adsApi,
   agoText,
@@ -35,7 +36,6 @@ import {
 } from "../lib/adsApi";
 
 const GROUPS: { id: Group; label: string }[] = [
-  { id: "ct", label: "CT" },
   { id: "campaign", label: "Campaña" },
   { id: "ad", label: "Anuncio" },
 ];
@@ -59,7 +59,9 @@ export default function Anuncios() {
   // Decisiones keeps its OWN range (default: this month); changing it does not touch the Resumen range.
   const [decPreset, setDecPreset] = useState<Preset>("month");
   const [decCustom, setDecCustom] = useState({ from: today, to: today });
-  const [group, setGroup] = useState<Group>("ct");
+  const [group, setGroup] = useState<Group>("campaign");
+  // Campaigns that are off in Meta are hidden by default; the choice is remembered on this device.
+  const [showInactive, setShowInactive] = useState(() => readShowInactive());
   const [report, setReport] = useState<Report | null>(null);
   const [status, setStatus] = useState<AdsStatus | null>(null);
   const [config, setConfig] = useState<AdsConfig | null>(null);
@@ -75,7 +77,7 @@ export default function Anuncios() {
   const [country, setCountry] = useState("");
   const [split, setSplit] = useState(false);
   const [tracking, setTracking] = useState<TrackingItem[]>([]);
-  const [chartCt, setChartCt] = useState("");
+  const [chartKey, setChartKey] = useState("");
   // The Comprobantes card has its own dates. null = it follows the page range (and reuses the report's list).
   const [vOwn, setVOwn] = useState<{ preset: Preset; custom: { from: string; to: string } } | null>(null);
   const [vData, setVData] = useState<VouchersData | null>(null);
@@ -249,10 +251,20 @@ export default function Anuncios() {
   useEffect(() => {
     if (report && country && country !== "-" && !report.countries.some((c) => c.country === country)) setCountry("");
   }, [report, country]);
-  // The chart focuses on one CT when it is picked; a CT that left the range falls back to "all".
-  const ctOptions = report?.ctDaily ?? [];
-  const chartSeries = ctOptions.find((c) => c.ct === chartCt);
-  const chartTitle = chartSeries ? `Gasto contra valor por día · ${chartSeries.ct}` : "Gasto contra valor por día · Todas las campañas";
+  const changeShowInactive = (value: boolean) => {
+    setShowInactive(value);
+    writeShowInactive(value);
+  };
+  const allRows = report?.rows ?? [];
+  const shownRows = visibleRows(allRows, showInactive);
+  // The totals above always include every campaign; when the off ones are hidden, say how much of the spend they hold.
+  const hidden = hiddenInactive(allRows, showInactive);
+  const one = hidden.count === 1;
+  const unit = group === "ad" ? (one ? "anuncio desactivado" : "anuncios desactivados") : one ? "campaña desactivada" : "campañas desactivadas";
+  // The chart focuses on one campaign when it is picked; one that left the range (or got hidden) falls back to "all".
+  const chartOptions = (report?.campaignDaily ?? []).filter((c) => showInactive || !c.paused || c.key === chartKey);
+  const chartSeries = chartOptions.find((c) => c.key === chartKey);
+  const chartTitle = chartSeries ? `Gasto contra valor por día · ${chartSeries.campaign}` : "Gasto contra valor por día · Todas las campañas";
   const updated = report?.lastSync.meta ?? status?.lastSync.meta ?? null;
   const ownReady = vOwn !== null && vData !== null && vData.range.from === vRange.from && vData.range.to === vRange.to;
   const vouchers = vOwn ? (ownReady ? vData : null) : report ? { comprobantes: report.comprobantes, reviewCount: report.reviewCount } : null;
@@ -360,25 +372,22 @@ export default function Anuncios() {
                 </button>
               ))}
             </div>
-            {group === "ct" && (
+            {group === "campaign" && (
               <label className="ads-check">
-                <input type="checkbox" checked={split} onChange={(e) => setSplit(e.target.checked)} /> Separar CT por país
+                <input type="checkbox" checked={split} onChange={(e) => setSplit(e.target.checked)} /> Separar campañas por país
               </label>
             )}
           </div>
         )}
+        <div className="ads-toggle-bar">
+          <label className="ads-check">
+            <input type="checkbox" checked={showInactive} onChange={(e) => changeShowInactive(e.target.checked)} /> Mostrar desactivadas
+          </label>
+          <span className="muted">Por defecto solo ves las campañas activas; las desactivadas siguen contando en los totales.</span>
+        </div>
         {report?.history && (
           <p className="muted ads-note ads-history">
             Historial: desde {dmy(report.history.from)} · {report.history.days} días guardados · {report.history.vouchers} comprobantes · última sincronización {agoText(report.lastSync.meta ?? report.lastSync.sheet, now)}
-          </p>
-        )}
-        {report && report.ctIssues.length > 0 && (
-          <p className="ads-warn" role="status">
-            <AlertTriangle size={14} aria-hidden />
-            <span>
-              Nombre sin CT reconocible: {report.ctIssues.slice(0, 4).map((i) => `«${i.campaignName || i.adName}»${i.reason === "ambiguo" ? " (ambiguo)" : ""}`).join(", ")}
-              {report.ctIssues.length > 4 ? ` y ${report.ctIssues.length - 4} más` : ""}. Ponle un número de CT al nombre (por ejemplo «CT 07 Col 2») para que cuente en su CT.
-            </span>
           </p>
         )}
         {!rangeValid && <p className="muted">Elige un rango válido: la fecha inicial no puede ser posterior a la final.</p>}
@@ -406,6 +415,12 @@ export default function Anuncios() {
           <StatCard icon={Percent} label="% conversión" value={k.mensajes > 0 ? formatPct(k.conversion) : "—"} caption="Ventas / mensajes" />
         </div>
       )}
+      {loaded && k && hidden.count > 0 && (
+        <p className="muted ads-note ads-inactive-note" role="status">
+          Incluye {formatMoney(hidden.gasto)} de {hidden.count} {unit}.{" "}
+          <button className="ads-sort" onClick={() => changeShowInactive(true)}>Mostrarlas</button>
+        </p>
+      )}
 
       <Card>
         <div className="card-head">
@@ -426,10 +441,10 @@ export default function Anuncios() {
             ))}
           </div>
         </div>
-        {report ? <AdsTable rows={report.rows} group={group} /> : <Skeleton height={160} />}
+        {report ? <AdsTable rows={shownRows} group={group} emptyText={allRows.length > 0 ? "Todo lo que gastó en este rango está desactivado. Marca «Mostrar desactivadas» para verlo." : undefined} /> : <Skeleton height={160} />}
         {report && (
           <p className="muted ads-note">
-            Solo campañas que empiezan por «{report.settings.campaignPrefix || "todas"}» y pagos del flujo «{report.settings.flowPrefix || "todos"}». El «día N» cuenta desde el primer día con gasto.
+            {report.settings.campaignPrefix && report.settings.campaignPrefix.toLowerCase() !== "all" ? `Solo campañas que empiezan por «${report.settings.campaignPrefix}»` : "Todas las campañas de la cuenta"} y pagos del flujo «{report.settings.flowPrefix || "todos"}». El «día N» cuenta desde el primer día con gasto.
           </p>
         )}
       </Card>
@@ -439,10 +454,10 @@ export default function Anuncios() {
           <h2 className="card-title">{chartTitle}</h2>
           <label className="ads-chart-select">
             <span className="muted">Campaña</span>
-            <select className="input" value={chartSeries ? chartSeries.ct : ""} onChange={(e) => setChartCt(e.target.value)} aria-label="Campaña del gráfico">
+            <select className="input" value={chartSeries ? chartSeries.key : ""} onChange={(e) => setChartKey(e.target.value)} aria-label="Campaña del gráfico">
               <option value="">Todas las campañas</option>
-              {ctOptions.map((c) => (
-                <option key={c.ct} value={c.ct}>{c.ct}</option>
+              {chartOptions.map((c) => (
+                <option key={c.key} value={c.key}>{c.campaign}{c.paused ? " (apagada)" : ""}</option>
               ))}
             </select>
           </label>

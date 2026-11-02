@@ -26,14 +26,14 @@ export function createTools(ctx) {
           glosario: Object.fromEntries(GLOSSARY),
           reglas_sql: SQL_RULES,
           resumen_glosario: glossaryText(),
-          ejemplo: "SELECT ct, SUM(spend) AS gasto, SUM(sales) AS ventas, ROUND(SUM(revenue_cop) / NULLIF(SUM(spend), 0), 2) AS roas FROM v_ct_daily WHERE date BETWEEN '2026-10-01' AND '2026-10-07' GROUP BY ct ORDER BY gasto DESC",
+          ejemplo: "SELECT campaign, SUM(spend) AS gasto, SUM(sales) AS ventas, ROUND(SUM(revenue_cop) / NULLIF(SUM(spend), 0), 2) AS roas FROM v_campaign_daily WHERE date BETWEEN '2026-10-01' AND '2026-10-07' GROUP BY campaign_id ORDER BY gasto DESC",
         };
       },
     },
     {
       name: 'query_sql',
       description:
-        'Ejecuta UNA consulta SELECT de solo lectura sobre las vistas v_* (máx. 200 filas, 5 s). Úsala para preguntas que metrics no cubre. Siempre indica `purpose`, una frase corta que se le muestra al usuario («ventas de CT 07 por día»).',
+        'Ejecuta UNA consulta SELECT de solo lectura sobre las vistas v_* (máx. 200 filas, 5 s). Úsala para preguntas que metrics no cubre. Siempre indica `purpose`, una frase corta que se le muestra al usuario («ventas de la campaña X por día»).',
       inputSchema: {
         type: 'object',
         properties: {
@@ -62,17 +62,18 @@ export function createTools(ctx) {
     {
       name: 'metrics',
       description:
-        'Cálculos deterministas del negocio (usan el mismo código que la pantalla Anuncios). kind: kpis (totales de un periodo), table (una fila por CT/campaña/anuncio con acción sugerida), daily (serie diaria), countries (comparar países), lifecycle (día N de cada anuncio y acumulado), budget_compare (antes vs después de cada subida de presupuesto, con el veredicto de la app). Prefiérela a calcular a mano.',
+        'Cálculos deterministas del negocio (usan el mismo código que la pantalla Anuncios). kind: kpis (totales de un periodo), table (una fila por campaña de Meta o por anuncio, con acción sugerida), daily (serie diaria), countries (comparar países), lifecycle (día N de cada anuncio y acumulado), budget_compare (antes vs después de cada subida de presupuesto, con el veredicto de la app). Prefiérela a calcular a mano.',
       inputSchema: {
         type: 'object',
         properties: {
           kind: { type: 'string', enum: METRIC_KINDS },
           from: { ...ISO, description: 'Inicio del periodo (por defecto, hace 6 días).' },
           to: { ...ISO, description: 'Fin del periodo (por defecto, hoy).' },
-          ct: { type: 'string', description: 'Código CT, por ejemplo «CT 07».' },
+          campaign_id: { type: 'string', description: 'ID de una campaña de Meta (columna campaign_id / campaign_id de table). Es la forma correcta de acotar a una campaña.' },
+          ct: { type: 'string', description: 'Etiqueta CT del nombre, por ejemplo «CT 07». Puede juntar varias campañas que la comparten: prefiere campaign_id.' },
           ad_id: { type: 'string', description: 'ID de un anuncio.' },
           country: { type: 'string', description: 'CO, MX, VE o «all».' },
-          group: { type: 'string', enum: ['ct', 'campaign', 'ad'], description: 'Solo para table.' },
+          group: { type: 'string', enum: ['campaign', 'ad'], description: 'Solo para table (por defecto campaign).' },
           split: { type: 'boolean', description: 'Solo para table: separar cada fila por país.' },
           since: { ...ISO, description: 'Solo para budget_compare: desde cuándo mirar las subidas (por defecto, 60 días).' },
           after_days: { type: 'number', description: 'Solo para budget_compare: días posteriores al cambio a evaluar.' },

@@ -25,14 +25,14 @@ test('kpis match the hand-computed totals for a CT', () => {
   });
 });
 
-test('the table returns one row per CT with the suggested action', () => {
+test('the table returns one row per campaign with the suggested action', () => {
   withData((ds) => {
     const res = runMetric(ds, { kind: 'table', group: 'ct', from: '2026-10-01', to: '2026-10-10' });
     const byLabel = Object.fromEntries(res.filas.map((r) => [r.etiqueta, r]));
-    assert.equal(byLabel['CT 07'].roas, 3);
-    assert.equal(byLabel['CT 07'].accion_sugerida, 'Escalar y duplicar');
-    assert.equal(byLabel['CT 08'].roas, 0.6);
-    assert.equal(byLabel['CT 08'].accion_sugerida, 'Apagar');
+    assert.equal(byLabel['CT07 Colombia'].roas, 3);
+    assert.equal(byLabel['CT07 Colombia'].accion_sugerida, 'Escalar y duplicar');
+    assert.equal(byLabel['CT08 Colombia'].roas, 0.6);
+    assert.equal(byLabel['CT08 Colombia'].accion_sugerida, 'Apagar');
     assert.equal(res.totales.gasto, 150000);
   });
 });
@@ -102,4 +102,16 @@ test('the agent metrics use the spend WITH IVA (ROAS and cost per sale included)
   } finally {
     fx.cleanup();
   }
+});
+
+test('a campaign id scopes kpis, and campaigns sharing a CT tag stay separate rows in the table', () => {
+  withData((ds) => {
+    const only = runMetric(ds, { kind: 'kpis', campaign_id: 'c1', from: '2026-10-01', to: '2026-10-10' });
+    assert.equal(only.alcance, 'CT07 Colombia');
+    assert.equal(only.totales.gasto, 100000);
+    assert.throws(() => runMetric(ds, { kind: 'kpis', campaign_id: 'nope' }), MetricsError);
+    const rows = runMetric(ds, { kind: 'table', group: 'ct', from: '2026-10-01', to: '2026-10-10' }).filas;
+    assert.deepEqual(rows.map((r) => r.campaign_id).sort(), ['c1', 'c2']);
+    assert.equal(runMetric(ds, { kind: 'table', from: '2026-10-01', to: '2026-10-10' }).agrupacion, 'campaign');
+  });
 });

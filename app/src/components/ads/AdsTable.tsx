@@ -16,9 +16,11 @@ const COLUMNS: { key: SortKey; label: string; numeric: boolean }[] = [
   { key: "margen", label: "Margen", numeric: true },
 ];
 
-const FIRST_COLUMN: Record<Group, string> = { ct: "CT", campaign: "Campaña", ad: "Anuncio" };
+const FIRST_COLUMN: Record<Group, string> = { campaign: "Campaña", ad: "Anuncio" };
 
-export default function AdsTable({ rows, group }: { rows: AdRow[]; group: Group }) {
+const NO_DATA = "No hay datos en este rango. Pulsa «Actualizar» para traerlos de Meta y de la hoja de pagos.";
+
+export default function AdsTable({ rows, group, emptyText = NO_DATA }: { rows: AdRow[]; group: Group; emptyText?: string }) {
   const [sortKey, setSortKey] = useState<SortKey>("roas");
   const [dir, setDir] = useState<"asc" | "desc">("desc");
 
@@ -47,7 +49,7 @@ export default function AdsTable({ rows, group }: { rows: AdRow[]; group: Group 
     </th>
   );
 
-  if (rows.length === 0) return <p className="muted">No hay datos en este rango. Pulsa «Actualizar» para traerlos de Meta y de la hoja de pagos.</p>;
+  if (rows.length === 0) return <p className="muted">{emptyText}</p>;
 
   return (
     <div className="table-wrap">
@@ -64,9 +66,8 @@ export default function AdsTable({ rows, group }: { rows: AdRow[]; group: Group 
             <tr key={r.key}>
               <td>
                 <strong>{r.label}</strong>
-                {r.ctIssue && <Pill tone="amber">nombre sin CT reconocible</Pill>}
                 <div className="muted ads-sub">
-                  {group === "ad" && <>{r.ct} · {r.campaignName || "—"} · </>}
+                  {group === "ad" && <>{r.campaignName || "—"} · </>}
                   {r.action ? dayLabel(r) : "sin gasto de Meta"}
                   {r.paused ? " · apagada" : ""}
                   {r.raise ? ` · día ${r.raise.dayN} desde la subida (${dmy(r.raise.date).slice(0, 5)}, +${Math.round(r.raise.pct)} %)` : ""}

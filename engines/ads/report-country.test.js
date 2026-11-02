@@ -14,7 +14,7 @@ const insights = [ins('A', 'CT01 Col', 'CO', 30000), ins('A', 'CT01 Col', 'MX', 
 const comprobantes = [pay('A', '573001234567', 60000), pay('A', '525512345678', 500), pay('B', '', 300)];
 const identities = { A: { adName: 'Ad A', campaignId: 'cA', campaignName: 'CT01 Col' }, B: { adName: 'Ad B', campaignId: 'cB', campaignName: 'CT02 MX' } };
 const config = mergeConfig({ spendVatPct: 0, enabledCountries: ['CO', 'MX', 'VE', 'EC'], countries: { MX: { rateToCop: 200, feePct: 5, costPerSale: 1000, taxPct: 16 } } });
-const run = (over = {}) => buildReport({ insights, comprobantes, identities, config, from: '2026-10-28', to: '2026-10-28', group: 'ct', today: '2026-10-29', ...over });
+const run = (over = {}) => buildReport({ insights, comprobantes, identities, config, from: '2026-10-28', to: '2026-10-28', group: 'campaign', today: '2026-10-29', ...over });
 
 test('unfiltered totals add every country and convert values to COP', () => {
   const { kpis } = run();
@@ -48,10 +48,10 @@ test('a country filter keeps only that country in KPIs, rows, daily series and v
   assert.equal(run({ country: 'all' }).kpis.ventas, 3);
 });
 
-test('splitCountry separates CT rows by country', () => {
+test('splitCountry separates campaign rows by country', () => {
   const labels = run({ splitCountry: true }).rows.map((r) => r.label).sort();
-  assert.deepEqual(labels, ['CT 01 · CO', 'CT 01 · MX', 'CT 02 · MX']);
-  assert.deepEqual(run().rows.map((r) => r.label).sort(), ['CT 01', 'CT 02']);
+  assert.deepEqual(labels, ['CT01 Col · CO', 'CT01 Col · MX', 'CT02 MX · MX']);
+  assert.deepEqual(run().rows.map((r) => r.label).sort(), ['CT01 Col', 'CT02 MX']);
 });
 
 test('the sale country comes from the phone, then the campaign, and says how', () => {

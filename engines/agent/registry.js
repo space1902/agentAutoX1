@@ -55,7 +55,7 @@ export const AGENTS = Object.freeze({
     grounding: true,
     makeHooks,
     tabs: ['chat', 'lecciones', 'recomendaciones', 'calidad', 'ajustes'],
-    starters: ['¿Qué CT debería escalar esta semana?', '¿Cómo le fue a CT 07 desde la subida de presupuesto?', 'Compara Colombia vs Venezuela este mes', '¿Qué anuncios debería apagar hoy?'],
+    starters: ['¿Qué campaña debería escalar esta semana?', '¿Cómo le fue a mi campaña principal desde la subida de presupuesto?', 'Compara Colombia vs Venezuela este mes', '¿Qué anuncios debería apagar hoy?'],
     welcome: { title: 'Pregúntame por tus anuncios y ventas', text: 'Consulto tus datos reales de solo lectura, hago las cuentas con código y te explico. No cambio nada en Meta.' },
     usesAdsData: true,
   }),

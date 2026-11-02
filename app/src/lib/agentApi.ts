@@ -430,8 +430,8 @@ export const onAnyAgentActivity = async (cb: (agentId: string, working: boolean)
 };
 
 export const STARTERS = [
-  "¿Qué CT debería escalar esta semana?",
-  "¿Cómo le fue a CT 07 desde la subida de presupuesto?",
+  "¿Qué campaña debería escalar esta semana?",
+  "¿Cómo le fue a mi campaña principal desde la subida de presupuesto?",
   "Compara Colombia vs Venezuela este mes",
   "¿Qué anuncios debería apagar hoy?",
 ];

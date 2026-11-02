@@ -57,9 +57,9 @@ export const BANK = [
     id: 'q05-ct-mas-gasto', category: 'numeric',
     build(ds) {
       const p = periods(ds).month;
-      const top = runMetric(ds, { kind: 'table', group: 'ct', ...p }).filas.filter((r) => r.ct && r.ct !== 'Sin CT')[0];
-      if (!top) return skip('Ningún CT con gasto.');
-      return { question: `¿Qué CT gastó más ${between(p)} y cuánto gastó?`, numbers: [money('gasto del CT', top.gasto)], mention: [top.ct] };
+      const top = runMetric(ds, { kind: 'table', group: 'campaign', ...p }).filas.filter((r) => r.campaign_id)[0];
+      if (!top) return skip('Ninguna campaña con gasto.');
+      return { question: `¿Qué campaña gastó más ${between(p)} y cuánto gastó?`, numbers: [money('gasto de la campaña', top.gasto)], mention: [top.etiqueta] };
     },
   },
   {
@@ -67,9 +67,9 @@ export const BANK = [
     build(ds) {
       const p = periods(ds).month;
       const min = ds.config.thresholds.minSpend;
-      const rows = runMetric(ds, { kind: 'table', group: 'ct', ...p }).filas.filter((r) => r.ct !== 'Sin CT' && r.gasto >= min).sort((a, b) => b.roas - a.roas);
-      if (!rows.length) return skip('Ningún CT supera el gasto mínimo.');
-      return { question: `Entre los CT con al menos $${min.toLocaleString('es-CO')} de gasto ${between(p)}, ¿cuál tiene el mejor ROAS y de cuánto es?`, numbers: [ratio('ROAS', rows[0].roas)], mention: [rows[0].ct] };
+      const rows = runMetric(ds, { kind: 'table', group: 'campaign', ...p }).filas.filter((r) => r.campaign_id && r.gasto >= min).sort((a, b) => b.roas - a.roas);
+      if (!rows.length) return skip('Ninguna campaña supera el gasto mínimo.');
+      return { question: `Entre las campañas con al menos $${min.toLocaleString('es-CO')} de gasto ${between(p)}, ¿cuál tiene el mejor ROAS y de cuánto es?`, numbers: [ratio('ROAS', rows[0].roas)], mention: [rows[0].etiqueta] };
     },
   },
   {
@@ -132,12 +132,12 @@ export const BANK = [
     id: 'q14-que-apagar', category: 'judged',
     build(ds) {
       const p = periods(ds).week;
-      const off = runMetric(ds, { kind: 'table', group: 'ct', ...p }).filas.filter((r) => r.accion_sugerida === 'Apagar' && r.ct !== 'Sin CT').map((r) => r.ct);
+      const off = runMetric(ds, { kind: 'table', group: 'campaign', ...p }).filas.filter((r) => r.accion_sugerida === 'Apagar' && r.campaign_id).map((r) => r.etiqueta);
       return {
-        question: `Según los umbrales de la app, ¿qué CT debería apagar ${between(p)}?`,
+        question: `Según los umbrales de la app, ¿qué campaña debería apagar ${between(p)}?`,
         rubric: off.length
-          ? `Los CT con acción sugerida «Apagar» según los datos son EXACTAMENTE: ${off.join(', ')}. La respuesta debe nombrar esos CT como candidatos a apagar y no recomendar apagar otros CT con datos distintos.`
-          : 'Según los datos NINGÚN CT tiene la acción sugerida «Apagar» en ese periodo. La respuesta debe decir que ninguno cumple (o que no hay candidatos claros) y no inventar uno.',
+          ? `Las campañas con acción sugerida «Apagar» según los datos son EXACTAMENTE: ${off.join(', ')}. La respuesta debe nombrar esas campañas como candidatas a apagar y no recomendar apagar otras campañas con datos distintos.`
+          : 'Según los datos NINGUNA campaña tiene la acción sugerida «Apagar» en ese periodo. La respuesta debe decir que ninguno cumple (o que no hay candidatos claros) y no inventar uno.',
       };
     },
   },

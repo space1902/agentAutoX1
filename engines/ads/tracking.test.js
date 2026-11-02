@@ -15,7 +15,7 @@ const insights = [
 const ads = { A: { firstSpendDate: '2026-10-26' }, B: { firstSpendDate: '2026-10-28' }, OLD: { firstSpendDate: '2026-10-01' }, X: { firstSpendDate: '2026-10-27' } };
 const hist = (date, daily) => ({ date, dailyBudget: daily, lifetimeBudget: null, firstSeen: 0 });
 const changes = computeChanges({ histories: { 'adset|s1': [hist('2026-10-20', 10000), hist('2026-10-27', 13000)] }, events: [] });
-const base = { insights, ads, changes, config: DEFAULT_CONFIG, today: '2026-10-29' };
+const base = { insights, ads, changes, config: { ...DEFAULT_CONFIG, campaignPrefix: 'CT' }, today: '2026-10-29' };
 
 test('every ad that is still spending gets "day N since it started to spend"', () => {
   const t = buildTracking(base);
@@ -42,10 +42,22 @@ test('stopped ads and ads outside the prefix are not listed', () => {
   assert.equal(ids.includes('ad:X'), false);
 });
 
-test('a CT counts from the first day any of its ads spent', () => {
-  const ct = buildTracking(base).items.find((i) => i.kind === 'ct' && i.id === 'CT 01');
-  assert.equal(ct.dayN, 4);
-  assert.equal(ct.firstSpendDate, '2026-10-26');
+test('a campaign counts from the first day any of its ads spent and is never merged with another by CT code', () => {
+  const two = [...insights, { ...ins('2026-10-24', 'A2', 'CT01 Col', 's1'), campaignId: 'c-A' }, { ...ins('2026-10-29', 'A2', 'CT01 Col', 's1'), campaignId: 'c-A' }];
+  const items = buildTracking({ ...base, insights: two, ads: { ...ads, A2: { firstSpendDate: '2026-10-24' } } }).items;
+  const camp = items.find((i) => i.kind === 'campaign' && i.id === 'c-A');
+  assert.equal(camp.dayN, 6);
+  assert.equal(camp.firstSpendDate, '2026-10-24');
+  assert.equal(camp.label, 'CT01 Col');
+  const other = items.find((i) => i.kind === 'campaign' && i.id === 'c-B');
+  assert.equal(other.dayN, 2, 'same name and CT code, different campaign: its own item');
+  assert.equal(items.some((i) => i.kind === 'ct'), false);
+});
+
+test('campaigns without CT in the name are tracked too when the scope is every campaign', () => {
+  const ids = buildTracking({ ...base, config: DEFAULT_CONFIG }).items.map((i) => `${i.kind}:${i.id}`);
+  assert.ok(ids.includes('campaign:c-X'));
+  assert.ok(ids.includes('ad:X'));
 });
 
 test('budget raises add "day N since the raise (date, +%)" to the ads and to their own item', () => {

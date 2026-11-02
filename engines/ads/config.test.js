@@ -11,7 +11,7 @@ const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'ads-config-'));
 test('defaults describe the X1 Pro Max account and the Looker thresholds', () => {
   assert.equal(DEFAULT_CONFIG.adAccountId, 'act_1962423981398837');
   assert.equal(DEFAULT_CONFIG.graphVersion, 'v26.0');
-  assert.equal(DEFAULT_CONFIG.campaignPrefix, 'CT');
+  assert.equal(DEFAULT_CONFIG.campaignPrefix, 'all');
   assert.equal(DEFAULT_CONFIG.sheetTab, 'Comprobantes');
   assert.equal(DEFAULT_CONFIG.validResult, 'Pago válido');
   assert.equal(DEFAULT_CONFIG.flowPrefix, 'Bebidas');
@@ -121,4 +121,16 @@ test('country words are configurable per country', () => {
   assert.deepEqual(c.countryWords.PE, ['peru', 'pe']);
   assert.ok(c.countryWords.CO.includes('col'));
   assert.throws(() => mergeConfig({ countryWords: { PERU: ['x'] } }), /2 letras/);
+});
+
+test('a config saved before campaigns stopped being CT-only keeps working: the old default "CT" becomes "all"', () => {
+  const dir = tmp();
+  fs.mkdirSync(path.join(dir, 'ads'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'ads', 'config.json'), JSON.stringify({ campaignPrefix: 'CT', flowPrefix: 'Barf' }));
+  const legacy = loadConfig(dir);
+  assert.equal(legacy.campaignPrefix, 'all');
+  assert.equal(legacy.flowPrefix, 'Barf');
+  // A prefix chosen after the change is respected.
+  saveConfig(dir, { campaignPrefix: 'CT' });
+  assert.equal(loadConfig(dir).campaignPrefix, 'CT');
 });

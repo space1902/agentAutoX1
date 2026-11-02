@@ -51,7 +51,7 @@ test('sync then report returns KPIs, rows with actions, daily series and masked 
   assert.equal(report.kpis.vat, 3800);
   assert.equal(report.kpis.valor, 60000);
   assert.equal(report.kpis.roas, 60000 / 23800);
-  assert.equal(report.rows[0].label, 'CT 01');
+  assert.equal(report.rows[0].label, 'CT01 - ventas');
   assert.equal(report.rows[0].action.label, 'Escalar');
   assert.equal(report.rows[0].ageDays, 2); // first spend 2026-10-28 = day 1
   assert.equal(report.rows[0].firstSpendDate, '2026-10-28');

@@ -48,7 +48,7 @@ test('an accepted payment survives re-syncs, even when the sheet drops the row',
   assert.equal(store.setAccepted(NO_KEY, true, 5), false, 'unknown payments cannot be accepted');
 });
 
-test('accepted payments count like valid ones in KPIs, ROAS, rows, daily series and the CT chart', () => {
+test('accepted payments count like valid ones in KPIs, ROAS, rows, daily series and the campaign chart', () => {
   const store = seeded();
   const before = report(store);
   assert.equal(before.kpis.ventas, 1);
@@ -61,7 +61,7 @@ test('accepted payments count like valid ones in KPIs, ROAS, rows, daily series 
   assert.equal(after.kpis.roas, 4);
   assert.equal(after.rows[0].ventas, 2);
   assert.equal(after.daily.find((d) => d.date === '2026-10-28').ventas, 2);
-  assert.equal(after.ctDaily[0].daily.find((d) => d.date === '2026-10-28').valor, 120000);
+  assert.equal(after.campaignDaily[0].daily.find((d) => d.date === '2026-10-28').valor, 120000);
 });
 
 test('the pending counter excludes valid and accepted payments: drops on accept, rises on undo', () => {

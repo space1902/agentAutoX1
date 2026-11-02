@@ -7,7 +7,7 @@ import { allAdsOff, evaluateDue, isDue, postBudgetVerdict, testVerdict } from '.
 import { addDays } from './time.js';
 
 // Legacy expectations are written without IVA; the IVA behavior has its own tests.
-const NO_VAT = { ...DEFAULT_CONFIG, spendVatPct: 0 };
+const NO_VAT = { ...DEFAULT_CONFIG, spendVatPct: 0, campaignPrefix: 'CT' };
 
 const T = DEFAULT_CONFIG.thresholds;
 const L = DEFAULT_CONFIG.lifecycle;
@@ -78,7 +78,7 @@ function testScenario() {
 const base = (over) => ({ config: NO_VAT, existing: new Set(), ...testScenario(), ...over });
 const clock = (date, h) => ({ date, minutes: h * 60 });
 
-test('day 4 at 20:00 creates the ad and CT verdicts over days 1..4', () => {
+test('day 4 at 20:00 creates the ad and campaign verdicts over days 1..4', () => {
   const out = evaluateDue(base({ now: clock('2026-10-28', 20) }));
   const ad = out.find((d) => d.kind === 'test');
   assert.equal(ad.entityId, 'A');
@@ -90,9 +90,12 @@ test('day 4 at 20:00 creates the ad and CT verdicts over days 1..4', () => {
   assert.equal(ad.metrics.valor, 180000);
   assert.match(ad.reason, /ROAS 4,5 con 3 ventas en 4 días/);
   assert.deepEqual(ad.range, { from: '2026-10-25', to: '2026-10-28' });
-  const ct = out.find((d) => d.kind === 'ct_test');
-  assert.equal(ct.label, 'CT 01');
-  assert.equal(ct.metrics.valor, 180000);
+  const campaign = out.find((d) => d.kind === 'campaign_test');
+  assert.equal(campaign.label, 'CT01 - ventas');
+  assert.equal(campaign.entityType, 'campaign');
+  assert.equal(campaign.entityId, 'c1');
+  assert.equal(campaign.metrics.valor, 180000);
+  assert.equal(out.some((d) => d.kind === 'ct_test'), false);
 });
 
 test('nothing is created before 20:00 or when the kind is off', () => {
@@ -189,7 +192,7 @@ test('no test verdict for an ad or CT whose ads are all paused at verdict time; 
   assert.equal(evaluateDue(base({ ads: active, now: clock('2026-10-28', 20) })).length, 2);
 });
 
-test('a CT with one active ad keeps its CT verdict while the paused ad gets none', () => {
+test('a campaign with one active ad keeps its campaign verdict while the paused ad gets none', () => {
   const s = testScenario();
   const two = {
     ...s,
@@ -199,7 +202,7 @@ test('a CT with one active ad keeps its CT verdict while the paused ad gets none
   };
   const out = evaluateDue({ ...two, config: NO_VAT, existing: new Set(), now: clock('2026-10-28', 20) });
   assert.deepEqual(out.filter((d) => d.kind === 'test').map((d) => d.entityId), ['B']);
-  assert.equal(out.filter((d) => d.kind === 'ct_test').length, 1);
+  assert.equal(out.filter((d) => d.kind === 'campaign_test').length, 1);
 });
 
 test('no post-budget verdict (Subir/Bajar) for an ad set whose ads are all paused', () => {
@@ -219,4 +222,25 @@ test('decisions use the spend WITH IVA, so the same data gives a stricter verdic
   assert.equal(withVat.metrics.gasto, 40000 * 1.19);
   assert.equal(withVat.metrics.spendNet, 40000);
   assert.match(withVat.reason, /ROAS 2,5 /);
+});
+
+test('two campaigns that share a CT code get their own verdict each, keyed by campaign id', () => {
+  const s = testScenario();
+  const second = {
+    ...s,
+    insights: [...s.insights, ...days('2026-10-25', 4).map((d) => ins(d, 'B', 5000, { campaignId: 'c2', campaignName: 'CT 01 Col 2' }))],
+    identities: { ...s.identities, B: { adName: 'Ad B', campaignId: 'c2', campaignName: 'CT 01 Col 2' } },
+    ads: { A: { firstSpendDate: '2026-10-25' }, B: { firstSpendDate: '2026-10-25' } },
+  };
+  const out = evaluateDue({ ...second, config: NO_VAT, existing: new Set(), now: clock('2026-10-28', 20) }).filter((d) => d.kind === 'campaign_test');
+  assert.deepEqual(out.map((d) => [d.entityId, d.label]).sort(), [['c1', 'CT01 - ventas'], ['c2', 'CT 01 Col 2']]);
+  assert.equal(out.find((d) => d.entityId === 'c2').metrics.gasto, 20000);
+  assert.ok(out.every((d) => d.key.startsWith(`campaign_test:${d.entityId}:`)));
+});
+
+test('campaigns without CT in the name get verdicts when the scope is every campaign', () => {
+  const s = testScenario();
+  const other = { ...s, identities: { A: { adName: 'Ad A', campaignId: 'c9', campaignName: 'Branding' } }, insights: s.insights.map((r) => ({ ...r, campaignId: 'c9', campaignName: 'Branding' })) };
+  const out = evaluateDue({ ...other, config: { ...NO_VAT, campaignPrefix: 'all' }, existing: new Set(), now: clock('2026-10-28', 20) });
+  assert.deepEqual(out.map((d) => d.kind).sort(), ['campaign_test', 'test']);
 });

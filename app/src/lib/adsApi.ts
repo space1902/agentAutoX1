@@ -2,7 +2,8 @@
 // the UI can only learn whether it exists, never read it.
 import { invoke } from "@tauri-apps/api/core";
 
-export type Group = "ct" | "campaign" | "ad";
+/** Rows are real Meta campaigns (keyed by campaign id) or single ads; the CT code of a name never merges anything. */
+export type Group = "campaign" | "ad";
 export type ActionTone = "green" | "gray" | "amber" | "red";
 
 export interface AdAction {
@@ -64,17 +65,6 @@ export interface AdRow extends Totals {
   paused?: boolean;
   raise: Raise | null;
   country: string;
-  /** The row groups campaigns whose name has no recognizable CT number. */
-  ctIssue?: boolean;
-}
-
-export interface CtIssue {
-  campaignName: string;
-  adName: string;
-  /** sin_ct: no CT number in the name; ambiguo: a split number such as "CT 1 0". */
-  reason: "sin_ct" | "ambiguo";
-  gasto: number;
-  ventas: number;
 }
 
 export interface DayPoint {
@@ -99,7 +89,12 @@ export interface Voucher {
   flow: string;
   adId: string;
   adName: string;
+  /** Tag read from the campaign name (informational). */
   ct: string;
+  /** Campaign that owns the payment's ad ("" when the ad is unknown). */
+  campaignId: string;
+  /** Full campaign name, "Sin anuncio" or "Anuncio desconocido". */
+  campaign: string;
   result: string;
   status: VoucherStatus;
   phoneMasked: string;
@@ -161,7 +156,6 @@ export interface Report {
   countries: CountryRow[];
   /** Countries that have data at all (even if not enabled), for the settings. */
   detected: { country: string; gasto: number; ventas: number }[];
-  ctIssues: CtIssue[];
   history: HistoryInfo;
   currency: string;
   /** IVA (%) added to Meta's spend. */
@@ -169,8 +163,10 @@ export interface Report {
   kpis: Totals;
   rows: AdRow[];
   daily: DayPoint[];
-  /** Daily series per CT (same CT grouping as the tables), for the chart selector. */
-  ctDaily: { ct: string; daily: DayPoint[] }[];
+  /** Daily series per real campaign (whatever the table grouping), for the chart selector. */
+  campaignDaily: { campaignId: string; campaign: string; key: string; paused: boolean; daily: DayPoint[] }[];
+  /** What the off (paused) rows spent in the range. The KPIs already include it. */
+  inactive: { gasto: number; count: number };
   comprobantes: Voucher[];
   reviewCount: number;
   today: string;
@@ -225,7 +221,8 @@ export interface Lifecycle {
   snapshotMinutes: number;
 }
 
-export type DecisionKind = "test" | "ct_test" | "budget";
+/** ct_test: decisions issued before campaigns replaced CT codes (history only). */
+export type DecisionKind = "test" | "campaign_test" | "ct_test" | "budget";
 export type DecisionStatus = "pending" | "done" | "ignored";
 
 export interface Decision {
@@ -306,10 +303,12 @@ export interface AdsStatus {
 }
 
 export interface TrackingItem {
-  kind: "ad" | "ct" | "budget";
+  kind: "ad" | "campaign" | "budget";
   id: string;
   label: string;
   ct?: string | null;
+  campaignId?: string;
+  campaignName?: string;
   dayN: number;
   firstSpendDate?: string;
   inTest?: boolean;

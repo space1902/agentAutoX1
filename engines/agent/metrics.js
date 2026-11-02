@@ -92,6 +92,12 @@ const ctOfAd = (ds, adId) => {
   return extractCt(id?.campaignName, id?.adName);
 };
 
+export function adIdsOfCampaign(ds, campaignId) {
+  const out = new Set();
+  for (const adId of new Set(ds.insights.map((r) => r.adId))) if (ds.identities[adId]?.campaignId === campaignId) out.add(adId);
+  return out;
+}
+
 export function adIdsOfCt(ds, ct) {
   const out = new Set();
   for (const adId of new Set(ds.insights.map((r) => r.adId))) if (ctOfAd(ds, adId) === ct) out.add(adId);
@@ -99,7 +105,7 @@ export function adIdsOfCt(ds, ct) {
 }
 
 // Report restricted to some ads (all ads when `adIds` is null). Campaign prefix is lifted, as in decisions.js.
-export function report(ds, { from, to, group = 'ct', country: cty = '', adIds = null, split = false }) {
+export function report(ds, { from, to, group = 'campaign', country: cty = '', adIds = null, split = false }) {
   const keep = (r) => (adIds ? adIds.has(r.adId) : true);
   return buildReport({
     insights: ds.insights.filter(keep),
@@ -120,13 +126,20 @@ export function report(ds, { from, to, group = 'ct', country: cty = '', adIds = 
 export const kpis = (ds, args) => report(ds, { ...args, group: 'ad' }).kpis;
 
 const rowOut = (row) => ({
-  etiqueta: row.label, ct: row.ct, pais: row.country || undefined, gasto: r0(row.gasto), ventas: row.ventas, ingresos: r0(row.valor), roas: r2(row.roas),
+  etiqueta: row.label, campaign_id: row.campaignId || undefined, ct: row.ct, pais: row.country || undefined, gasto: r0(row.gasto), ventas: row.ventas, ingresos: r0(row.valor), roas: r2(row.roas),
   costo_por_venta: row.ventas > 0 ? r0(row.costoVenta) : null, margen: r0(row.margen), margen_pct: r2(row.margenPct * 100),
   dia_n: row.ageDays, estado: row.effectiveStatus ?? undefined, accion_sugerida: row.action?.label ?? null,
   subida_reciente: row.raise ? { fecha: row.raise.date, pct: r2(row.raise.pct), dia_n: row.raise.dayN } : null,
 });
 
 function entityAds(ds, p) {
+  if (p.campaign_id) {
+    const id = String(p.campaign_id);
+    const ids = adIdsOfCampaign(ds, id);
+    if (!ids.size) throw new MetricsError(`No hay datos de la campaña ${id}.`);
+    const name = ds.identities[[...ids][0]]?.campaignName || id;
+    return { ct: name, adIds: ids };
+  }
   const ct = normalizeCt(p.ct);
   if (ct) {
     const ids = adIdsOfCt(ds, ct);
@@ -142,20 +155,20 @@ function entityAds(ds, p) {
 }
 
 const KINDS = {
-  // Totals for a period, optionally for one CT / ad and country.
+  // Totals for a period, optionally for one campaign / CT tag / ad and country.
   kpis(ds, p) {
     const { from, to } = range(ds, p);
     const { ct, adIds } = entityAds(ds, p);
-    const rep = report(ds, { from, to, group: 'ct', country: country(p), adIds });
+    const rep = report(ds, { from, to, group: 'campaign', country: country(p), adIds });
     return {
       periodo: { desde: from, hasta: to }, alcance: ct ?? (adIds ? `anuncio ${[...adIds][0]}` : 'todos los anuncios monitoreados'), pais: country(p) || 'todos',
       totales: brief(rep.kpis),
     };
   },
-  // One row per CT / campaign / ad, with the suggested action (same thresholds as the Anuncios screen).
+  // One row per campaign / ad, with the suggested action (same thresholds as the Anuncios screen).
   table(ds, p) {
     const { from, to } = range(ds, p);
-    const group = ['ct', 'campaign', 'ad'].includes(p.group) ? p.group : 'ct';
+    const group = p.group === 'ad' ? 'ad' : 'campaign';
     const { adIds } = entityAds(ds, p);
     const rep = report(ds, { from, to, group, country: country(p), adIds, split: p.split === true });
     const rows = rep.rows.filter((r) => r.gasto > 0 || r.ventas > 0);
@@ -178,7 +191,7 @@ const KINDS = {
   // Country table (spend, sales, ROAS, margin per country).
   countries(ds, p) {
     const { from, to } = range(ds, p);
-    const rep = report(ds, { from, to, group: 'ct' });
+    const rep = report(ds, { from, to, group: 'campaign' });
     return {
       periodo: { desde: from, hasta: to },
       paises: rep.countries.map((c) => ({
@@ -260,6 +273,7 @@ export function entityAdIds(ds, entityType, entityId) {
     const ct = extractCt(entityId);
     return ct ? adIdsOfCt(ds, ct) : null;
   }
+  // Entities recommended before campaigns replaced CT codes keep their CT type; a campaign id also resolves here.
   if (entityType === 'ad') return ds.insights.some((r) => r.adId === String(entityId)) ? new Set([String(entityId)]) : null;
   if (entityType === 'adset' || entityType === 'campaign') {
     const field = entityType === 'campaign' ? 'campaignId' : 'adsetId';

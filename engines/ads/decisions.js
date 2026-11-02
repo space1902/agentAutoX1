@@ -1,11 +1,10 @@
 // Daily decisions (phase B). Pure: given the stored data and the account clock, returns the decisions that are due
 // and have not been issued yet. The app never changes budgets or pauses ads: it only recommends.
 //  - Test verdict: on day `testNotifyDay` (day 1 = first day with spend) at `testNotifyAt`, metrics of days 1..N
-//    for every ad and every CT, turned into an action with the configured thresholds.
+//    for every ad and every campaign, turned into an action with the configured thresholds.
 //  - Post-budget check: on day `postBudgetNotifyDay` (the day of the raise is day 1) at `postBudgetNotifyAt`,
 //    compare the days since the raise with the `windowDays` before it.
 import { isInactiveStatus, suggestAction } from './metrics.js';
-import { extractCt } from './parse.js';
 import { buildReport, isMonitored } from './report.js';
 import { addDays, daysBetween } from './time.js';
 
@@ -105,16 +104,17 @@ function testDecisions({ insights, comprobantes, identities, ads, config, now, e
   for (const { adId, first } of monitoredAds) {
     issue('test', 'ad', adId, identities[adId]?.adName || `Anuncio ${adId}`, first, new Set([adId]));
   }
-  const byCt = new Map();
+  // One verdict per real Meta campaign (never merged by CT code); its day 1 is the first spend of any of its ads.
+  const byCampaign = new Map();
   for (const { adId, first } of monitoredAds) {
-    const ct = extractCt(identities[adId]?.campaignName, identities[adId]?.adName);
-    if (!ct) continue;
-    const entry = byCt.get(ct) ?? { first, adIds: new Set() };
+    const id = identities[adId]?.campaignId || identities[adId]?.campaignName;
+    if (!id) continue;
+    const entry = byCampaign.get(id) ?? { first, adIds: new Set(), label: identities[adId]?.campaignName || id };
     entry.adIds.add(adId);
     if (first < entry.first) entry.first = first;
-    byCt.set(ct, entry);
+    byCampaign.set(id, entry);
   }
-  for (const [ct, { first, adIds }] of byCt) issue('ct_test', 'ct', ct, ct, first, adIds);
+  for (const [id, { first, adIds, label }] of byCampaign) issue('campaign_test', 'campaign', id, label, first, adIds);
   return out;
 }
 
@@ -173,7 +173,8 @@ export function evaluateDue(data) {
   return [...(life.testEnabled ? testDecisions(data) : []), ...(life.budgetEnabled ? budgetDecisions(data) : [])];
 }
 
-const KIND_LABEL = { test: 'Prueba de anuncio', ct_test: 'Prueba de CT', budget: 'Presupuesto' };
+// ct_test: decisions issued before campaigns replaced CT codes (kept so their history still reads well).
+const KIND_LABEL = { test: 'Prueba de anuncio', campaign_test: 'Prueba de campaña', ct_test: 'Prueba de CT', budget: 'Presupuesto' };
 
 // Text for the desktop notification and the WhatsApp message.
 export function decisionMessage(d) {
