@@ -98,13 +98,13 @@ pub struct RealHost {
 
 impl RealHost {
     fn current(&self) -> Settings {
-        self.settings.lock().unwrap().clone()
+        crate::util::lock(&self.settings).clone()
     }
 }
 
 impl KeepOps for RealHost {
     fn enabled(&self) -> bool {
-        self.settings.lock().unwrap().keep_alive
+        crate::util::lock(&self.settings).keep_alive
     }
     fn should_stop(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
@@ -141,7 +141,14 @@ pub fn spawn_loop(scheduler: Arc<Scheduler>, host: Arc<RealHost>) {
         while !host.should_stop() {
             if host.enabled() {
                 if clock.now() >= next_scan {
-                    scheduler.scan(host.as_ref(), &clock);
+                    // A panic must not kill this thread (the card would stay "en curso" for good and no scan would
+                    // ever run again): it is reported on the card and the loop goes on.
+                    let scan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scheduler.scan(host.as_ref(), &clock)));
+                    if scan.is_err() {
+                        crate::applog::log("keepalive", "La revisión de pods terminó con un error interno; se reintentará en la próxima.");
+                        scheduler.recover_from_panic();
+                    }
+                    scheduler.finish_if_stuck();
                     let busy = scheduler.status().last_run.is_some_and(|r| r.outcome == "skipped" && r.note.starts_with("Hay otra operación"));
                     next_scan = clock.now() + if busy { 120 } else { SCAN_SECS };
                 }

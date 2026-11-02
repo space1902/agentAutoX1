@@ -1,5 +1,6 @@
+import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence } from "framer-motion";
-import { Check, Eye, Loader2, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, Smartphone, Trash2 } from "lucide-react";
+import { Check, Eye, Loader2, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, RotateCcw, Smartphone, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import EmbeddedView from "../components/EmbeddedView";
 import { KeepAliveCard, KeepAliveSwitch, useKeepAlive } from "../components/KeepAlive";
@@ -22,7 +23,7 @@ interface Props {
   };
 }
 
-type Dialog = { kind: "create" } | { kind: "edit"; pod: Pod } | { kind: "delete"; pod: Pod } | null;
+type Dialog = { kind: "create" } | { kind: "reset" } | { kind: "edit"; pod: Pod } | { kind: "delete"; pod: Pod } | null;
 
 export default function MultiWhatsApp({ creation }: Props) {
   const [pods, setPods] = useState<Pod[] | null>(null);
@@ -53,7 +54,34 @@ export default function MultiWhatsApp({ creation }: Props) {
 
   const keepAlive = useKeepAlive();
   const creating = creation.state.running;
-  const locked = busy !== null || creating;
+  const [resetting, setResetting] = useState<string | null>(null); // current step of "Reiniciar pods"
+  const [embedKey, setEmbedKey] = useState(0); // bumped to rebuild the embedded view from scratch
+  const locked = busy !== null || creating || resetting !== null;
+
+  /**
+   * "Reiniciar pods": cancels what the app started for pods, frees the lock, stops the auto-review run, releases the
+   * embedded windows and restarts the pods that were on. Then ONLY this section is read again (no app reload).
+   */
+  const resetPods = async () => {
+    setDialog(null);
+    setResetting("Reiniciando pods…");
+    setError(null);
+    setInfo(null);
+    const unlisten = listen<string>("pods-reset-progress", (e) => setResetting(e.payload));
+    try {
+      const report = await api.resetPods();
+      if (report.failed.length > 0) setError(report.message);
+      else setInfo(report.message);
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      void unlisten.then((fn) => fn());
+      setResetting("Recargando la sección…");
+      setEmbedKey((n) => n + 1);
+      await Promise.all([load(), keepAlive.refresh()]);
+      setResetting(null);
+    }
+  };
 
   const run = async (action: Action, name: string) => {
     setBusy(`${name}:${action}`);
@@ -82,6 +110,15 @@ export default function MultiWhatsApp({ creation }: Props) {
         <button className="btn secondary" onClick={() => void load()} disabled={loading || locked}>
           <RefreshCw size={15} aria-hidden /> Actualizar lista
         </button>
+        <button
+          className="btn secondary"
+          onClick={() => setDialog({ kind: "reset" })}
+          disabled={resetting !== null}
+          title="Úsalo si la sección se quedó trabada: cancela lo que esté en curso y reinicia los pods encendidos"
+        >
+          {resetting !== null ? <Loader2 size={15} className="spin" aria-hidden /> : <RotateCcw size={15} aria-hidden />}
+          {resetting !== null ? "Reiniciando…" : "Reiniciar pods"}
+        </button>
         <button className="btn" onClick={() => setDialog({ kind: "create" })} disabled={busy !== null}>
           {creating ? <Loader2 size={15} className="spin" aria-hidden /> : <Plus size={15} aria-hidden />}
           {creating ? "Creando pod…" : "Nuevo pod"}
@@ -94,6 +131,7 @@ export default function MultiWhatsApp({ creation }: Props) {
         <StatCard icon={Phone} label="Números asignados" value={pods ? withPhone : "–"} caption="con #wsp en pods-wsp.json" />
       </section>
 
+      {resetting !== null && <Notice kind="ok">{resetting}</Notice>}
       {error && <Notice>{error}</Notice>}
       {info && <Notice kind="ok">{info}</Notice>}
       {busy && <Notice kind="ok">Ejecutando «{busy.replace(":", " ")}». Prender puede tardar hasta unos 4 minutos mientras arranca Android.</Notice>}
@@ -153,7 +191,7 @@ export default function MultiWhatsApp({ creation }: Props) {
         </div>
       )}
 
-      <EmbeddedView pods={pods ?? []} suspended={dialog !== null} />
+      <EmbeddedView key={embedKey} pods={pods ?? []} suspended={dialog !== null} />
 
       <AnimatePresence>
         {dialog?.kind === "create" && (
@@ -169,6 +207,7 @@ export default function MultiWhatsApp({ creation }: Props) {
             onDone={() => void load()}
           />
         )}
+        {dialog?.kind === "reset" && <ResetPodsModal key="reset" running={pods?.filter((p) => p.state === "running").map((p) => p.name) ?? []} onClose={() => setDialog(null)} onConfirm={() => void resetPods()} />}
         {dialog?.kind === "edit" && (
           <EditPodModal
             key="edit"
@@ -197,6 +236,34 @@ export default function MultiWhatsApp({ creation }: Props) {
         )}
       </AnimatePresence>
     </div>
+  );
+}
+
+function ResetPodsModal({ running, onClose, onConfirm }: { running: string[]; onClose: () => void; onConfirm: () => void }) {
+  return (
+    <Modal
+      title="Reiniciar pods"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn ghost" onClick={onClose}>
+            Cancelar
+          </button>
+          <button className="btn danger" onClick={onConfirm}>
+            <RotateCcw size={15} aria-hidden /> Reiniciar pods
+          </button>
+        </>
+      }
+    >
+      <p>Esto cancela cualquier operación de pods que esté en curso (incluida la revisión automática), suelta las ventanas de los pods y vuelve a cargar solo esta sección.</p>
+      {running.length > 0 ? (
+        <Warning>
+          Los pods encendidos ({running.join(", ")}) se apagarán y se volverán a encender uno por uno; puede tardar varios minutos. Los pods apagados se quedan apagados.
+        </Warning>
+      ) : (
+        <p>Ahora no hay pods encendidos, así que no se encenderá ninguno.</p>
+      )}
+    </Modal>
   );
 }
 

@@ -19,6 +19,15 @@ export function useKeepAlive() {
     return () => void un.then((fn) => fn());
   }, []);
 
+  /** Reads the status again (used after "Reiniciar pods", which resets the run on the native side). */
+  const refresh = async () => {
+    try {
+      setStatus(await api.keepAliveStatus());
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
   const toggle = async (enabled: boolean) => {
     setError(null);
     try {
@@ -28,7 +37,7 @@ export function useKeepAlive() {
     }
   };
 
-  return { status, error, toggle };
+  return { status, error, toggle, refresh };
 }
 
 /** Sí/No switch with an info icon; the explanation shows on hover or keyboard focus. */

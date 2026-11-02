@@ -237,6 +237,15 @@ export interface LineHealthData {
   lines: Record<string, LineHealth>;
 }
 
+/** Result of "Reiniciar pods". */
+export interface PodsResetReport {
+  restarted: string[];
+  /** Stopped and left off on purpose (the auto-review had turned it on). */
+  leftOff: string[];
+  failed: { pod: string; step: "apagar" | "prender"; error: string }[];
+  message: string;
+}
+
 /** Tauri rejects with a plain string; normalize anything else. */
 export function errorText(error: unknown): string {
   if (typeof error === "string") return error;
@@ -251,6 +260,7 @@ export const api = {
   listPods: () => invoke<Pod[]>("list_pods"),
   podAction: (action: "prender" | "apagar" | "ver", name: string) =>
     invoke<string>("pod_action", { action, name }),
+  resetPods: () => invoke<PodsResetReport>("reset_pods"),
   createPod: (name: string, phone: string) => invoke<string>("create_pod", { name, phone }),
   renamePod: (name: string, newName: string) => invoke<string>("rename_pod", { name, newName }),
   setPodPhone: (name: string, phone: string) => invoke<string>("set_pod_phone", { name, phone }),

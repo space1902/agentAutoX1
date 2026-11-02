@@ -3,10 +3,14 @@
 use crate::settings::Settings;
 use crate::util::{hidden_command, is_valid_pod_name, pods_phone};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +39,7 @@ fn preview(text: &str) -> String {
     if t.is_empty() { "(vacía)".into() } else { t }
 }
 
+#[derive(Debug)]
 struct PsOutput {
     ok: bool,
     stdout: String,
@@ -66,14 +71,172 @@ fn pods_command(settings: &Settings, args: &[&str]) -> Result<Command, String> {
 }
 
 fn run_pods(settings: &Settings, args: &[&str]) -> Result<PsOutput, String> {
-    let out = pods_command(settings, args)?
-        .output()
+    let timeout = timeout_for(args.first().copied().unwrap_or_default());
+    run_bounded(&PODS_PROCS, pods_command(settings, args)?, timeout)
+}
+
+/// How long `pods.ps1 <action>` may take before the app gives up on it. Every wait is finite: a hung script (adb or
+/// the Android boot never answering, a PowerShell that crashed and left something holding its pipes) must never keep
+/// the pod-job lock, and with it the whole Pods section, busy forever.
+pub fn timeout_for(action: &str) -> Duration {
+    let minutes = |m: u64| Duration::from_secs(m * 60);
+    match action {
+        "listar-json" | "info-json" | "wsp" | "ver" => Duration::from_secs(90),
+        "apagar" => minutes(3),
+        "prender" => minutes(8),
+        "renombrar" | "borrar" => minutes(10),
+        "nuevo" => minutes(30),
+        _ => minutes(5),
+    }
+}
+
+/// PIDs of the child processes this app spawned for pod jobs, so a recovery can stop exactly those and nothing else
+/// (never BlueStacks/HD-Player or any process found by name).
+#[derive(Default)]
+pub struct Tracker {
+    pids: Mutex<BTreeSet<u32>>,
+    /// Bumped by every `kill_all`: a call that sees it change knows it was cancelled on purpose.
+    epoch: AtomicU64,
+}
+
+/// The children of every pod job of the running app.
+pub static PODS_PROCS: Tracker = Tracker::new();
+
+pub struct Tracked<'a> {
+    tracker: &'a Tracker,
+    pid: u32,
+}
+
+impl Drop for Tracked<'_> {
+    fn drop(&mut self) {
+        crate::util::lock(&self.tracker.pids).remove(&self.pid);
+    }
+}
+
+impl Tracker {
+    pub const fn new() -> Tracker {
+        Tracker { pids: Mutex::new(BTreeSet::new()), epoch: AtomicU64::new(0) }
+    }
+
+    fn track(&self, pid: u32) -> Tracked<'_> {
+        crate::util::lock(&self.pids).insert(pid);
+        Tracked { tracker: self, pid }
+    }
+
+    pub fn active(&self) -> Vec<u32> {
+        crate::util::lock(&self.pids).iter().copied().collect()
+    }
+
+    /// `taskkill /T` on every tracked child (its own process tree only). Returns how many were targeted.
+    pub fn kill_all(&self) -> usize {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        let pids = self.active();
+        for pid in &pids {
+            kill_tree(*pid);
+        }
+        pids.len()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+}
+
+/// Kills one process and the children it started, by PID.
+fn kill_tree(pid: u32) {
+    let _ = hidden_command("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Collects a pipe on its own thread. What was read so far survives even when the pipe never reaches EOF.
+struct PipeReader {
+    buf: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+}
+
+impl PipeReader {
+    fn spawn(pipe: Option<impl Read + Send + 'static>) -> PipeReader {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let (tx, done) = mpsc::channel();
+        let sink = buf.clone();
+        std::thread::spawn(move || {
+            if let Some(mut pipe) = pipe {
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = pipe.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    crate::util::lock(&sink).extend_from_slice(&chunk[..n]);
+                }
+            }
+            let _ = tx.send(());
+        });
+        PipeReader { buf, done }
+    }
+
+    /// Waits up to `grace` for EOF, then returns whatever arrived.
+    fn collect(self, grace: Duration) -> String {
+        let _ = self.done.recv_timeout(grace);
+        String::from_utf8_lossy(&crate::util::lock(&self.buf)).into_owned()
+    }
+}
+
+/// After the child exited, a grandchild (adb daemon, HD-Player...) can keep its pipes open forever: only wait this long.
+const PIPE_GRACE: Duration = Duration::from_secs(2);
+
+fn timed_out_message(timeout: Duration) -> String {
+    format!("PowerShell no respondió en {} s y se canceló.", timeout.as_secs())
+}
+
+fn cancelled_message() -> String {
+    "La operación se canceló.".to_string()
+}
+
+/// Waits for the child, killing its tree at `timeout`. Returns the exit status and whether it timed out.
+fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<(Option<std::process::ExitStatus>, bool), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok((Some(status), false)),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                kill_tree(child.id());
+                let _ = child.kill();
+                return Ok((child.wait().ok(), true));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+/// Runs `cmd` to completion with a hard time limit. Never waits on the pipes alone: a crashed script whose pipes are
+/// still held by a grandchild returns as soon as the script itself is gone.
+fn run_bounded(tracker: &Tracker, mut cmd: Command, timeout: Duration) -> Result<PsOutput, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("No se pudo ejecutar PowerShell: {e}"))?;
-    Ok(PsOutput {
-        ok: out.status.success(),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-    })
+    let _tracked = tracker.track(child.id());
+    let epoch = tracker.epoch();
+    let stdout = PipeReader::spawn(child.stdout.take());
+    let stderr = PipeReader::spawn(child.stderr.take());
+
+    let (status, timed_out) = wait_bounded(&mut child, timeout)?;
+    let stdout = stdout.collect(PIPE_GRACE);
+    let stderr = stderr.collect(PIPE_GRACE);
+    if tracker.epoch() != epoch {
+        return Err(cancelled_message());
+    }
+    if timed_out {
+        return Err(timed_out_message(timeout));
+    }
+    Ok(PsOutput { ok: status.is_some_and(|s| s.success()), stdout, stderr })
 }
 
 fn last_lines(text: &str, n: usize) -> String {
@@ -208,37 +371,74 @@ pub fn parse_step(line: &str) -> Option<(u32, u32, String)> {
     Some((n, total, text.trim().to_string()))
 }
 
+#[derive(Debug)]
 struct Streamed {
     ok: bool,
     stderr: String,
 }
 
-/// Runs the command and hands every stdout line to `on_line` as soon as it is printed.
-fn stream_lines(mut cmd: Command, mut on_line: impl FnMut(&str)) -> Result<Streamed, String> {
+/// Runs the command and hands every stdout line to `on_line` as soon as it is printed. Bounded by `timeout` and
+/// tracked like `run_bounded`.
+fn stream_lines(tracker: &Tracker, mut cmd: Command, timeout: Duration, mut on_line: impl FnMut(&str)) -> Result<Streamed, String> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("No se pudo ejecutar el proceso: {e}"))?;
-    let mut stderr = child.stderr.take().expect("stderr is piped");
-    let stderr_reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stderr.read_to_end(&mut bytes);
-        String::from_utf8_lossy(&bytes).into_owned()
-    });
-    let mut reader = BufReader::new(child.stdout.take().expect("stdout is piped"));
-    let mut buf = Vec::new();
-    while let Ok(n) = reader.read_until(b'\n', &mut buf) {
-        if n == 0 {
-            break;
+    let _tracked = tracker.track(child.id());
+    let epoch = tracker.epoch();
+    let stderr = PipeReader::spawn(child.stderr.take());
+
+    let (tx, lines) = mpsc::channel::<String>();
+    let stdout = child.stdout.take().expect("stdout is piped");
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut buf = Vec::new();
+        while let Ok(n) = reader.read_until(b'\n', &mut buf) {
+            if n == 0 {
+                break;
+            }
+            let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
+            buf.clear();
+            if tx.send(line).is_err() {
+                break;
+            }
         }
-        let line = String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_string();
-        buf.clear();
-        on_line(&line);
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let mut exited_at: Option<Instant> = None;
+    loop {
+        match lines.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => on_line(&line),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                if exited_at.is_none() && child.try_wait().map_err(|e| e.to_string())?.is_some() {
+                    exited_at = Some(Instant::now());
+                }
+                if exited_at.is_some_and(|at| at.elapsed() >= PIPE_GRACE) {
+                    break; // the script is gone; something else still holds its pipe
+                }
+                if exited_at.is_none() && Instant::now() >= deadline {
+                    timed_out = true;
+                    kill_tree(child.id());
+                    let _ = child.kill();
+                    break;
+                }
+            }
+        }
     }
     let status = child.wait().map_err(|e| e.to_string())?;
-    Ok(Streamed { ok: status.success(), stderr: stderr_reader.join().unwrap_or_default() })
+    let stderr = stderr.collect(PIPE_GRACE);
+    if tracker.epoch() != epoch {
+        return Err(cancelled_message());
+    }
+    if timed_out {
+        return Err(timed_out_message(timeout));
+    }
+    Ok(Streamed { ok: status.success(), stderr })
 }
 
 /// One line of `nuevo` output for the UI.
@@ -251,31 +451,53 @@ pub struct PodProgress {
     pub line: String,
 }
 
-/// Only one pod mutation (create, rename, delete, phone) may run at a time: they restart BlueStacks.
+/// Only one pod mutation (create, rename, delete, phone, keep-alive check...) may run at a time: they restart BlueStacks.
+///
+/// The slot is released by the guard's `Drop` on every exit path (return, `?`, panic unwinding). If a holder is stuck
+/// anyway, `force_release` frees it: the tokens make sure the stuck holder's guard cannot release a newer job later.
 #[derive(Clone, Default, Debug)]
-pub struct PodJob(Arc<Mutex<Option<String>>>);
+pub struct PodJob(Arc<Mutex<JobSlot>>);
+
+#[derive(Default, Debug)]
+struct JobSlot {
+    next_token: u64,
+    current: Option<(u64, String)>,
+}
 
 #[derive(Debug)]
-pub struct PodJobGuard(PodJob);
+pub struct PodJobGuard {
+    job: PodJob,
+    token: u64,
+}
 
 impl PodJob {
     pub fn begin(&self, what: &str) -> Result<PodJobGuard, String> {
-        let mut slot = self.0.lock().unwrap();
-        if let Some(current) = slot.as_ref() {
+        let mut slot = crate::util::lock(&self.0);
+        if let Some((_, current)) = slot.current.as_ref() {
             return Err(format!("Ya hay una operación de pods en curso ({current}). Espera a que termine."));
         }
-        *slot = Some(what.to_string());
-        Ok(PodJobGuard(self.clone()))
+        slot.next_token += 1;
+        let token = slot.next_token;
+        slot.current = Some((token, what.to_string()));
+        Ok(PodJobGuard { job: self.clone(), token })
     }
 
     pub fn current(&self) -> Option<String> {
-        self.0.lock().unwrap().clone()
+        crate::util::lock(&self.0).current.as_ref().map(|(_, what)| what.clone())
+    }
+
+    /// Frees the slot no matter who holds it. Returns what was running, if anything.
+    pub fn force_release(&self) -> Option<String> {
+        crate::util::lock(&self.0).current.take().map(|(_, what)| what)
     }
 }
 
 impl Drop for PodJobGuard {
     fn drop(&mut self) {
-        *(self.0).0.lock().unwrap() = None;
+        let mut slot = crate::util::lock(&self.job.0);
+        if slot.current.as_ref().is_some_and(|(token, _)| *token == self.token) {
+            slot.current = None;
+        }
     }
 }
 
@@ -301,7 +523,7 @@ pub fn create(settings: &Settings, name: &str, phone: &str, on_progress: &mut dy
     }
 
     let mut tail: Vec<String> = Vec::new();
-    let streamed = stream_lines(pods_command(settings, &["nuevo", name])?, |line| {
+    let streamed = stream_lines(&PODS_PROCS, pods_command(settings, &["nuevo", name])?, timeout_for("nuevo"), |line| {
         let step = parse_step(line);
         if !line.trim().is_empty() {
             tail.push(line.to_string());
@@ -430,7 +652,7 @@ mod tests {
         let mut cmd = hidden_command("node");
         cmd.args(["-e", "console.log('uno');console.log('[2/9] dos');console.error('boom');process.exit(3)"]);
         let mut seen = Vec::new();
-        let out = stream_lines(cmd, |l| seen.push(l.to_string())).unwrap();
+        let out = stream_lines(&Tracker::new(), cmd, secs(30), |l| seen.push(l.to_string())).unwrap();
         assert!(!out.ok);
         assert_eq!(seen, vec!["uno", "[2/9] dos"]);
         assert!(out.stderr.contains("boom"));
@@ -457,5 +679,128 @@ mod tests {
         assert!(delete(&s, "pod1", "otro").unwrap_err().contains("confirm"));
         assert!(create(&s, "bad name", "3001234567", &mut |_| {}).is_err());
         assert!(create(&s, "pod9", "", &mut |_| {}).is_err());
+    }
+    // ----- job lock and bounded child processes -----
+
+    #[test]
+    fn the_job_guard_is_released_when_its_holder_panics() {
+        let job = PodJob::default();
+        let held = job.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = held.begin("revisión de pod2MX").unwrap();
+            panic!("the worker died");
+        })
+        .join();
+        assert!(job.current().is_none(), "unwinding drops the guard");
+        assert!(job.begin("otra").is_ok());
+    }
+
+    #[test]
+    fn a_poisoned_job_lock_does_not_wedge_the_pods_section() {
+        let job = PodJob::default();
+        let inner = job.0.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = inner.lock().unwrap();
+            panic!("poison it");
+        })
+        .join();
+        let guard = job.begin("a").expect("begin tolerates a poisoned lock");
+        drop(guard); // would panic inside Drop (abort during unwinding) if it used lock().unwrap()
+        assert!(job.current().is_none());
+    }
+
+    #[test]
+    fn force_release_frees_a_stuck_job_and_a_stale_guard_cannot_free_the_next_one() {
+        let job = PodJob::default();
+        let stale = job.begin("revisión de pod2MX").unwrap();
+        assert_eq!(job.force_release().as_deref(), Some("revisión de pod2MX"));
+        assert!(job.current().is_none());
+
+        let fresh = job.begin("reiniciar pods").unwrap();
+        drop(stale);
+        assert_eq!(job.current().as_deref(), Some("reiniciar pods"), "the old holder must not release the new job");
+        drop(fresh);
+        assert!(job.current().is_none());
+        assert!(job.force_release().is_none(), "nothing to release");
+    }
+
+    fn node(script: &str) -> Command {
+        let mut cmd = hidden_command("node");
+        cmd.args(["-e", script]);
+        cmd
+    }
+
+    fn secs(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(n)
+    }
+
+    #[test]
+    fn a_child_that_never_finishes_is_killed_at_the_timeout_and_reported() {
+        let tracker = Tracker::new();
+        let started = std::time::Instant::now();
+        let err = run_bounded(&tracker, node("setTimeout(()=>{},60000)"), std::time::Duration::from_millis(800)).unwrap_err();
+        assert!(err.contains("no respondió"), "{err}");
+        assert!(started.elapsed() < secs(20), "did not wait for the child");
+        assert!(tracker.active().is_empty(), "the pid is forgotten once the call returns");
+    }
+
+    #[test]
+    fn a_child_that_crashes_is_a_plain_failure_not_a_hang() {
+        let tracker = Tracker::new();
+        let out = run_bounded(&tracker, node("console.error('boom');process.exit(3)"), secs(30)).unwrap();
+        assert!(!out.ok);
+        assert!(out.stderr.contains("boom"));
+        assert!(tracker.active().is_empty());
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipe_open_does_not_block_after_the_child_exited() {
+        let tracker = Tracker::new();
+        // Like an adb daemon or HD-Player started by pods.ps1: it inherits stdout and outlives the script.
+        let script = "require('child_process').spawn(process.execPath,['-e','setTimeout(()=>{},15000)'],{stdio:['ignore','inherit','inherit'],detached:true}).unref();console.log('hecho')";
+        let started = std::time::Instant::now();
+        let out = run_bounded(&tracker, node(script), secs(60)).unwrap();
+        assert!(out.ok && out.stdout.contains("hecho"));
+        assert!(started.elapsed() < secs(12), "returned without waiting for the pipe to close: {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn kill_all_stops_the_tracked_children_and_the_waiting_call_reports_a_cancellation() {
+        let tracker = std::sync::Arc::new(Tracker::new());
+        let worker = {
+            let tracker = tracker.clone();
+            std::thread::spawn(move || run_bounded(&tracker, node("setTimeout(()=>{},60000)"), secs(120)))
+        };
+        let begun = std::time::Instant::now();
+        while tracker.active().is_empty() {
+            assert!(begun.elapsed() < secs(20), "the child was never tracked");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(tracker.kill_all(), 1);
+        let err = worker.join().unwrap().unwrap_err();
+        assert!(err.contains("cancel"), "{err}");
+        assert!(begun.elapsed() < secs(20));
+        assert!(tracker.active().is_empty());
+    }
+
+    #[test]
+    fn a_streamed_child_that_goes_silent_is_killed_at_the_timeout() {
+        let tracker = Tracker::new();
+        let mut seen = Vec::new();
+        let started = std::time::Instant::now();
+        let err = stream_lines(&tracker, node("console.log('uno');setTimeout(()=>{},60000)"), std::time::Duration::from_millis(1500), |l| seen.push(l.to_string())).unwrap_err();
+        assert!(err.contains("no respondió"), "{err}");
+        assert_eq!(seen, vec!["uno"]);
+        assert!(started.elapsed() < secs(20));
+    }
+
+    #[test]
+    fn every_pods_action_has_a_finite_timeout_and_starts_get_the_longest_short_one() {
+        for action in ["listar-json", "info-json", "prender", "apagar", "ver", "wsp", "renombrar", "borrar", "nuevo", "algo-nuevo"] {
+            let t = timeout_for(action);
+            assert!(t >= secs(30) && t <= secs(60 * 60), "{action}: {t:?}");
+        }
+        assert!(timeout_for("prender") > timeout_for("apagar"));
+        assert!(timeout_for("nuevo") > timeout_for("prender"));
     }
 }

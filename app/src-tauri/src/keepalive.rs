@@ -11,6 +11,7 @@ use crate::pods::Pod;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const HOLD_SECS: i64 = 15 * 60;
@@ -130,20 +131,58 @@ pub struct Scheduler {
     status: Arc<Mutex<KeepAliveStatus>>,
     config: Config,
     notify: Notify,
+    /// Bumped by `reset`: a scan or check that started before the bump stops at its next step.
+    epoch: AtomicU64,
 }
 
 impl Scheduler {
     pub fn new(config: Config, notify: Notify) -> Scheduler {
-        Scheduler { status: Arc::new(Mutex::new(KeepAliveStatus::default())), config, notify }
+        Scheduler { status: Arc::new(Mutex::new(KeepAliveStatus::default())), config, notify, epoch: AtomicU64::new(0) }
     }
 
     pub fn status(&self) -> KeepAliveStatus {
-        self.status.lock().unwrap().clone()
+        crate::util::lock(&self.status).clone()
+    }
+
+    /// "Reiniciar pods": whatever scan or check is running stops at its next step WITHOUT touching any pod (the reset
+    /// itself stops them), the queue is dropped and the card goes back to idle. The next scan runs on its normal
+    /// schedule.
+    pub fn reset(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.update(|s| {
+            s.phase = Phase::Idle;
+            s.current = None;
+            s.hold_until = None;
+            s.queue.clear();
+            s.message = "Se reinició a mano; la revisión sigue en su horario normal.".into();
+        });
+    }
+
+    /// The scan thread crashed: never leave the card "en curso" for a job that no longer exists.
+    pub fn recover_from_panic(&self) {
+        self.update(|s| {
+            s.phase = Phase::Idle;
+            s.current = None;
+            s.hold_until = None;
+            s.queue.clear();
+            s.message = "La revisión se interrumpió por un error interno; se intentará en la próxima.".into();
+        });
+    }
+
+    /// Safety net after every scan: a finished scan is always idle. Anything else is a stale "en curso".
+    pub fn finish_if_stuck(&self) {
+        if self.status().phase != Phase::Idle {
+            self.recover_from_panic();
+        }
+    }
+
+    fn aborted(&self, started: u64) -> bool {
+        self.epoch.load(Ordering::SeqCst) != started
     }
 
     fn update(&self, change: impl FnOnce(&mut KeepAliveStatus)) {
         let snapshot = {
-            let mut s = self.status.lock().unwrap();
+            let mut s = crate::util::lock(&self.status);
             change(&mut s);
             s.clone()
         };
@@ -162,6 +201,7 @@ impl Scheduler {
 
     /// One pass: record the running pods, build the queue of due pods and process it, one pod at a time.
     pub fn scan(&self, ops: &dyn KeepOps, clock: &dyn Clock) {
+        let started = self.epoch.load(Ordering::SeqCst);
         self.update(|s| {
             s.phase = Phase::Scanning;
             s.message = "Revisando qué pods llevan más de 24 horas apagados…".into();
@@ -177,6 +217,9 @@ impl Scheduler {
             }
         };
 
+        if self.aborted(started) {
+            return;
+        }
         let now = clock.now();
         let mut state = ops.load_state();
         if observe_running(&mut state, &pods, now) {
@@ -184,6 +227,9 @@ impl Scheduler {
         }
         let due = due_pods(&state, &pods, now, self.config.threshold_secs);
         let names: Vec<String> = due.iter().map(|p| p.name.clone()).collect();
+        if self.aborted(started) {
+            return;
+        }
         self.update(|s| {
             s.queue = names.clone();
             s.last_scan_at = Some(now);
@@ -192,14 +238,20 @@ impl Scheduler {
         });
 
         for pod in due {
-            if !ops.enabled() || ops.should_stop() {
+            if !ops.enabled() || ops.should_stop() || self.aborted(started) {
                 break;
             }
             let run = self.check_pod(ops, clock, &pod);
+            if self.aborted(started) {
+                return; // reset: the card already shows idle
+            }
             self.update(|s| {
                 s.queue.retain(|n| n != &pod.name);
                 s.last_run = Some(run);
             });
+        }
+        if self.aborted(started) {
+            return;
         }
         self.update(|s| {
             s.phase = Phase::Idle;
@@ -219,6 +271,7 @@ impl Scheduler {
     /// Power on, keep on for `hold_secs`, power off, wait until the process is gone and memory is free.
     pub fn check_pod(&self, ops: &dyn KeepOps, clock: &dyn Clock, pod: &Pod) -> LastRun {
         let name = pod.name.as_str();
+        let started = self.epoch.load(Ordering::SeqCst);
 
         // Somebody may have turned it on (or it may be gone) since the queue was built.
         let fresh = match ops.list() {
@@ -246,6 +299,9 @@ impl Scheduler {
         });
 
         let powered = ops.power_on(name);
+        if self.aborted(started) {
+            return self.run_record(clock, pod, "interrupted", "Se reinició a mano durante el encendido.");
+        }
         let mut state = ops.load_state();
         if powered.is_ok() {
             state.last_on.insert(pod.instance_id.clone(), clock.now());
@@ -265,6 +321,9 @@ impl Scheduler {
                 if !ops.enabled() || ops.should_stop() {
                     interrupted = true;
                     break;
+                }
+                if self.aborted(started) {
+                    return self.run_record(clock, pod, "interrupted", "Se reinició a mano durante la revisión.");
                 }
                 clock.sleep(1);
             }
@@ -286,7 +345,7 @@ impl Scheduler {
             failure.get_or_insert(format!("No se pudo apagar: {e}"));
         }
 
-        let waited = self.wait_until_released(ops, clock, pod, baseline);
+        let waited = self.wait_until_released(ops, clock, pod, baseline, started);
 
         let (outcome, note) = match (failure, interrupted) {
             (Some(note), _) => ("failed", note),
@@ -297,7 +356,7 @@ impl Scheduler {
     }
 
     /// Waits until the pod reads as stopped and the free memory is back near its level before the pod started.
-    fn wait_until_released(&self, ops: &dyn KeepOps, clock: &dyn Clock, pod: &Pod, baseline: Option<u64>) -> String {
+    fn wait_until_released(&self, ops: &dyn KeepOps, clock: &dyn Clock, pod: &Pod, baseline: Option<u64>, started: u64) -> String {
         self.update(|s| {
             s.phase = Phase::WaitingExit;
             s.message = format!("Esperando a que {} libere la memoria…", pod.name);
@@ -309,6 +368,9 @@ impl Scheduler {
                 (Some(before), Some(now)) => now + self.config.memory_tolerance_mb >= before,
                 _ => true,
             };
+            if self.aborted(started) {
+                return "Se reinició a mano.".into();
+            }
             if stopped && memory_ok {
                 return "Proceso cerrado y memoria liberada.".into();
             }
@@ -328,6 +390,7 @@ impl Scheduler {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
     fn pod(name: &str, running: bool, phone: Option<&str>) -> Pod {
         Pod {
@@ -414,9 +477,24 @@ mod tests {
         /// (pod name, unix second until which it still reads as running)
         lingering: RefCell<Option<(String, i64)>>,
         disable_after: Cell<Option<i64>>,
+        /// The scheduler under test and the second at which "Reiniciar pods" is pressed.
+        sched: RefCell<Option<Rc<Scheduler>>>,
+        reset_after: Cell<Option<i64>>,
+        reset_on_power_on: Cell<bool>,
     }
 
     impl<'a> FakeHost<'a> {
+        fn maybe_reset(&self) {
+            if self.reset_after.get().is_some_and(|at| self.clock.now() >= at) {
+                self.reset_after.set(None);
+                self.press_reset();
+            }
+        }
+        fn press_reset(&self) {
+            if let Some(s) = self.sched.borrow().as_ref() {
+                s.reset();
+            }
+        }
         fn new(clock: &'a FakeClock, pods: Vec<Pod>) -> FakeHost<'a> {
             FakeHost {
                 clock,
@@ -431,6 +509,9 @@ mod tests {
                 exit_delay: Cell::new(0),
                 lingering: RefCell::new(None),
                 disable_after: Cell::new(None),
+                sched: RefCell::new(None),
+                reset_after: Cell::new(None),
+                reset_on_power_on: Cell::new(false),
             }
         }
         fn log(&self) -> Vec<String> {
@@ -445,6 +526,7 @@ mod tests {
 
     impl KeepOps for FakeHost<'_> {
         fn enabled(&self) -> bool {
+            self.maybe_reset();
             if let Some(limit) = self.disable_after.get() {
                 if self.clock.now() >= limit {
                     return false;
@@ -456,6 +538,7 @@ mod tests {
             self.stop.get()
         }
         fn list(&self) -> Result<Vec<Pod>, String> {
+            self.maybe_reset();
             let mut pods = self.pods.borrow().clone();
             // A pod that was powered off keeps reading "running" until its process is gone.
             if let Some((name, until)) = self.lingering.borrow().clone() {
@@ -467,6 +550,10 @@ mod tests {
         }
         fn power_on(&self, name: &str) -> Result<(), String> {
             self.log.borrow_mut().push(format!("on:{name}@{}", self.clock.now()));
+            if self.reset_on_power_on.get() {
+                self.press_reset();
+                return Err("PowerShell se canceló".into());
+            }
             if let Some(e) = self.power_on_error.borrow().clone() {
                 return Err(e);
             }
@@ -702,5 +789,90 @@ mod tests {
         host.disable_after.set(Some(100 * H + 60)); // off during the first pod's hold
         scheduler().scan(&host, &clock);
         assert!(!host.log().iter().any(|l| l.starts_with("on:b")), "second pod never started: {:?}", host.log());
+    }
+
+    // ----- reset ("Reiniciar pods") and recovery -----
+
+    fn due_host<'a>(clock: &'a FakeClock, names: &[&str]) -> FakeHost<'a> {
+        let host = FakeHost::new(clock, names.iter().map(|n| pod(n, false, Some("1"))).collect());
+        for (i, n) in names.iter().enumerate() {
+            host.state.borrow_mut().last_on.insert(format!("Rvc64_{n}"), i as i64);
+        }
+        host
+    }
+
+    #[test]
+    fn a_reset_during_the_hold_stops_the_run_clears_the_queue_and_leaves_the_pod_to_the_reset() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = due_host(&clock, &["a", "b"]);
+        let s = Rc::new(scheduler());
+        *host.sched.borrow_mut() = Some(s.clone());
+        host.reset_after.set(Some(100 * H + 30 + 120)); // two minutes into the hold of "a"
+        s.scan(&host, &clock);
+
+        let log = host.log();
+        assert!(!log.iter().any(|l| l.starts_with("off:")), "the reset owns the shutdown, the scan must not race it: {log:?}");
+        assert!(!log.iter().any(|l| l.starts_with("on:b")), "the rest of the queue is dropped: {log:?}");
+        assert!(clock.now() < 100 * H + 30 + 15 * 60, "did not wait out the hold");
+        let status = s.status();
+        assert_eq!(status.phase, Phase::Idle);
+        assert!(status.current.is_none() && status.hold_until.is_none() && status.queue.is_empty(), "{status:?}");
+        assert!(status.message.contains("reinici"), "{}", status.message);
+    }
+
+    #[test]
+    fn a_reset_during_power_on_does_not_continue_with_the_rest_of_the_check() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = due_host(&clock, &["a"]);
+        let s = Rc::new(scheduler());
+        *host.sched.borrow_mut() = Some(s.clone());
+        host.reset_on_power_on.set(true);
+        let candidate = host.pods.borrow()[0].clone();
+        let run = s.check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "interrupted");
+        assert_eq!(host.log().len(), 2, "job + power on only: {:?}", host.log());
+        assert_eq!(s.status().phase, Phase::Idle);
+    }
+
+    #[test]
+    fn a_reset_while_waiting_for_the_process_to_exit_stops_waiting() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = due_host(&clock, &["a"]);
+        host.exit_delay.set(10_000);
+        let s = Rc::new(scheduler());
+        *host.sched.borrow_mut() = Some(s.clone());
+        host.reset_after.set(Some(100 * H + 30 + 15 * 60 + 6));
+        let candidate = host.pods.borrow()[0].clone();
+        s.check_pod(&host, &clock, &candidate);
+        assert!(clock.now() < 100 * H + 30 + 15 * 60 + 30, "gave up right after the reset, not at the timeout");
+        assert_eq!(s.status().phase, Phase::Idle);
+    }
+
+    #[test]
+    fn a_scan_started_after_a_reset_runs_normally() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = due_host(&clock, &["a"]);
+        let s = scheduler();
+        s.reset();
+        s.scan(&host, &clock);
+        assert!(host.log().iter().any(|l| l.starts_with("off:a")), "{:?}", host.log());
+        assert_eq!(s.status().phase, Phase::Idle);
+        assert_eq!(s.status().last_run.unwrap().outcome, "ok");
+    }
+
+    #[test]
+    fn a_crashed_scan_cannot_leave_the_card_in_progress() {
+        let s = scheduler();
+        s.update(|st| {
+            st.phase = Phase::Holding;
+            st.current = Some("pod2MX".into());
+            st.queue = vec!["pod2MX".into(), "pilotoMX".into()];
+            st.hold_until = Some(5);
+        });
+        s.recover_from_panic();
+        let st = s.status();
+        assert_eq!(st.phase, Phase::Idle);
+        assert!(st.current.is_none() && st.queue.is_empty() && st.hold_until.is_none());
+        assert!(st.message.contains("error"), "{}", st.message);
     }
 }

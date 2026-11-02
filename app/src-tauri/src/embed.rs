@@ -445,6 +445,24 @@ impl<A: WinApi> Embedder<A> {
         names.iter().filter_map(|n| self.detach(n).err()).collect()
     }
 
+    /// "Reiniciar pods": gives every window back (attached, hung or booting) and forgets all embedding state, so the
+    /// UI starts again from a clean slate. BlueStacks itself is never touched. Errors are collected.
+    pub fn release_all(&self) -> Vec<String> {
+        let errors = self.detach_all();
+        crate::util::lock(&self.watch).clear();
+        crate::util::lock(&self.hung).clear();
+        crate::util::lock(&self.hang_since).clear();
+        crate::util::lock(&self.booting).clear();
+        *crate::util::lock(&self.active) = None;
+        // A worker stuck in a Win32 call may hold this lock: never wait for it here (the watchdog frees that window).
+        match self.attached.try_lock() {
+            Ok(mut attached) => attached.clear(),
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().clear(),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        errors
+    }
+
     /// Forgets that `pod` was released as hung so it can be embedded again ("Reintentar"). The window itself stays
     /// hidden and ownerless until `attach` embeds it again.
     pub fn retry(&self, pod: &str) {
@@ -1214,6 +1232,26 @@ mod tests {
         win.closed.borrow_mut().push(22);
         embedder.attach("pod2", WIDE).unwrap();
         assert!(win.calls().iter().any(|c| c.starts_with("embed:44")));
+    }
+
+    #[test]
+    fn release_all_gives_every_window_back_and_clears_booting_and_hung_state() {
+        let win = FakeWin::with(&[("wa-pod1", 11), ("wa-pod2", 22), ("wa-pod3", 33)]);
+        let embedder = Embedder::new(&win, 999);
+        embedder.attach("pod1", WIDE).unwrap();
+        embedder.attach("pod2", WIDE).unwrap();
+        embedder.activate(Some("pod1"));
+        assert!(matches!(embedder.prepare("pod3", None, || true), Readiness::Booting(_)));
+        crate::util::lock(&embedder.hung).insert("pod2".into(), crate::util::lock(&embedder.watch)["pod2"].clone());
+        crate::util::lock(&embedder.watch).remove("pod2");
+
+        assert!(embedder.release_all().is_empty());
+        let state = embedder.state();
+        assert!(state.attached.is_empty() && state.booting.is_empty() && state.hung.is_empty() && state.active.is_none(), "{state:?}");
+        assert!(win.calls().iter().any(|c| c.starts_with("restore:11")), "{:?}", win.calls());
+        // And a later attach starts from scratch.
+        embedder.attach("pod1", WIDE).unwrap();
+        assert_eq!(embedder.state().attached, vec!["pod1"]);
     }
 
     #[test]

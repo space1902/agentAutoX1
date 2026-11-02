@@ -11,6 +11,7 @@ mod keepalive;
 mod keepalive_real;
 mod linker_real;
 mod pods;
+mod pods_reset;
 mod profiles;
 mod settings;
 mod util;
@@ -34,6 +35,7 @@ struct AppState {
     runner: warmup::Runner,
     pull: ai::PullJob,
     pod_job: pods::PodJob,
+    pods_reset: pods_reset::ResetGate,
     link_cancel: Arc<AtomicBool>,
     keepalive: Arc<keepalive::Scheduler>,
     keep_stop: Arc<AtomicBool>,
@@ -172,6 +174,33 @@ async fn delete_pod(state: State<'_, AppState>, name: String, confirm: String) -
         pods::delete(&settings, &name, &confirm)
     })
     .await
+}
+
+/// "Reiniciar pods": cancels what the app started for pod jobs, frees the pod-job lock, stops the auto-review run,
+/// gives the embedded windows back, and restarts the pods that were running (the ones that were off stay off).
+/// Streams `pods-reset-progress` events with the current step.
+#[tauri::command]
+async fn reset_pods(app: AppHandle, state: State<'_, AppState>) -> Result<pods_reset::ResetReport, String> {
+    let Some(_gate) = state.pods_reset.try_enter() else {
+        return Err("Ya se están reiniciando los pods; espera a que termine.".into());
+    };
+    // The link wizard and the warm-up engine drive pods through the same scripts; a reset under them would pull the rug.
+    if let Some(running) = running_profile(&state) {
+        return Err(format!("El perfil «{running}» está en curso; detenlo antes de reiniciar los pods."));
+    }
+    let ops = pods_reset::RealOps {
+        settings: state.current(),
+        pod_job: state.pod_job.clone(),
+        keepalive: state.keepalive.clone(),
+        embedder: crate::util::lock(&state.embedder).clone(),
+        on_progress: Box::new(move |text| {
+            let _ = app.emit("pods-reset-progress", text);
+        }),
+    };
+    state.link_cancel.store(true, Ordering::SeqCst); // a running link wizard stops at its next step
+    let report = blocking(move || pods_reset::reset_pods(&ops)).await;
+    drop(_gate);
+    report
 }
 
 #[tauri::command]
@@ -834,6 +863,7 @@ pub fn run() {
                 runner: warmup::Runner::default(),
                 pull: ai::PullJob::default(),
                 pod_job,
+                pods_reset: pods_reset::ResetGate::default(),
                 link_cancel: Arc::new(AtomicBool::new(false)),
                 keepalive,
                 keep_stop,
@@ -896,6 +926,7 @@ pub fn run() {
             save_settings,
             list_pods,
             pod_action,
+            reset_pods,
             create_pod,
             rename_pod,
             set_pod_phone,
