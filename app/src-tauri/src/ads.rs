@@ -19,7 +19,7 @@ const TOKEN_ENTRY: &str = "meta-token";
 /// Env var the engine reads the token from.
 pub const TOKEN_ENV: &str = "AGENTAUTO_META_TOKEN";
 
-const ALLOWED: &[&str] = &["sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "comprobante-accept", "activities-probe"];
+const ALLOWED: &[&str] = &["sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "comprobante-accept", "activities-probe", "fx-refresh"];
 const DECISION_STATUSES: &[&str] = &["pending", "done", "ignored"];
 // "ct" is the legacy name of the campaign grouping; the engine treats it as "campaign".
 const GROUPS: &[&str] = &["campaign", "ct", "ad"];
@@ -321,6 +321,11 @@ pub fn report(settings: &Settings, from: &str, to: &str, group: &str, country: O
     run_engine(settings, "report", &AdsArgs { from: Some(from), to: Some(to), group: Some(group), country, split, ..Default::default() }, None, None)
 }
 
+/// Live exchange rates to COP (free public sources, no key). Called on each data refresh; the engine saves one rate per day.
+pub fn fx_refresh(settings: &Settings) -> Result<Value, String> {
+    run_engine(settings, "fx-refresh", &AdsArgs::default(), None, None)
+}
+
 pub fn tracking(settings: &Settings) -> Result<Value, String> {
     run_engine(settings, "tracking", &AdsArgs::default(), None, None)
 }
@@ -486,6 +491,11 @@ mod tests {
         assert!(build_args("sync", &args(Some("ayer"), Some("2026-10-29"), None)).is_err());
         assert!(build_args("report", &args(Some("2026-10-01"), Some("2026-10-29"), Some("x"))).is_err());
         assert!(build_args("sync", &args(None, None, None)).unwrap_err().contains("fechas"));
+    }
+
+    #[test]
+    fn builds_fx_refresh_arguments() {
+        assert_eq!(&build_args("fx-refresh", &AdsArgs::default()).unwrap()[2..], ["fx-refresh"]);
     }
 
     #[test]

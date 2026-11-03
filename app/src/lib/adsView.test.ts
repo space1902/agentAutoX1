@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { formatVoucherPhone, groupTracking, hiddenInactive, rangeProblem, readShowInactive, visibleRows, writeShowInactive } from "./adsView.ts";
+import { countryChips, formatNative, formatVoucherPhone, fxLine, groupTracking, hiddenInactive, noDataNote, rangeProblem, readCountryChoice, readShowInactive, resolveCountryChoice, visibleRows, writeCountryChoice, writeShowInactive } from "./adsView.ts";
 
 test("rangeProblem accepts a valid range and explains each invalid one", () => {
   assert.equal(rangeProblem("2026-10-21", "2026-10-29", "2026-09-23", "2026-10-29"), null);
@@ -98,4 +98,70 @@ test("formatVoucherPhone groups the digits and adds the country code", () => {
   assert.equal(formatVoucherPhone("3001234567"), "300 123 4567");
   assert.equal(formatVoucherPhone(""), "");
   assert.equal(formatVoucherPhone("sin número"), "");
+});
+
+const enabled = [
+  { country: "CO", name: "Colombia", currency: "COP", hasData: true },
+  { country: "MX", name: "México", currency: "MXN", hasData: false },
+];
+
+test("countryChips lists every enabled country (with or without data) and then Combinado", () => {
+  assert.deepEqual(countryChips(enabled), [
+    { id: "CO", label: "Colombia" },
+    { id: "MX", label: "México" },
+    { id: "", label: "Combinado" },
+  ]);
+  assert.deepEqual(countryChips([]), [{ id: "", label: "Combinado" }]);
+});
+
+test("resolveCountryChoice keeps an enabled country, the data without country, or falls back to Combinado", () => {
+  assert.equal(resolveCountryChoice("MX", enabled), "MX");
+  assert.equal(resolveCountryChoice("-", enabled), "-");
+  assert.equal(resolveCountryChoice("", enabled), "");
+  assert.equal(resolveCountryChoice("VE", enabled), "");
+  assert.equal(resolveCountryChoice("MX", []), "MX", "nothing is known yet: do not drop the saved choice");
+});
+
+test("the country choice is remembered on this device and survives broken storage", () => {
+  const saved = new Map<string, string>();
+  const good = { getItem: (k: string) => saved.get(k) ?? null, setItem: (k: string, v: string) => void saved.set(k, v) };
+  assert.equal(readCountryChoice(good), "");
+  writeCountryChoice("MX", good);
+  assert.equal(readCountryChoice(good), "MX");
+  writeCountryChoice("", good);
+  assert.equal(readCountryChoice(good), "");
+  const broken = {
+    getItem: () => {
+      throw new Error("denied");
+    },
+    setItem: () => {
+      throw new Error("denied");
+    },
+  };
+  assert.equal(readCountryChoice(broken), "");
+  assert.doesNotThrow(() => writeCountryChoice("MX", broken));
+  assert.equal(readCountryChoice(null), "");
+});
+
+test("noDataNote only speaks for a single country without data in the range", () => {
+  assert.equal(noDataNote("MX", enabled), "Sin datos de México en este rango");
+  assert.equal(noDataNote("CO", enabled), null);
+  assert.equal(noDataNote("", enabled), null);
+  assert.equal(noDataNote("-", enabled), null);
+});
+
+test("formatNative shows the native currency of a non-COP country", () => {
+  assert.equal(formatNative("MXN", 1234.5), "MXN $ 1.235");
+  assert.equal(formatNative("COP", 1000), null);
+});
+
+test("fxLine describes the live rate with its time and source, or says it is manual", () => {
+  const at = new Date(2026, 10, 3, 14, 5).getTime();
+  const now = new Date(2026, 10, 3, 18, 0).getTime();
+  const live = { country: "MX", currency: "MXN", mode: "auto" as const, rate: 170.66, date: "2026-11-03", fetchedAt: at, source: "open.er-api.com" };
+  assert.equal(fxLine(live, now), "1 MXN = $ 170,66 COP · actualizada 14:05 (open.er-api.com)");
+  const old = { ...live, fetchedAt: new Date(2026, 10, 1, 9, 30).getTime() };
+  assert.equal(fxLine(old, now), "1 MXN = $ 170,66 COP · actualizada 01/11 09:30 (open.er-api.com)");
+  assert.equal(fxLine({ ...live, mode: "manual" as const, fetchedAt: null, source: null, rate: 50 }, now), "1 MXN = $ 50 COP · tasa manual");
+  assert.equal(fxLine({ ...live, mode: "none" as const, fetchedAt: null, source: null, rate: 1 }, now), "1 MXN = sin tasa (defínela en Configuración)");
 });

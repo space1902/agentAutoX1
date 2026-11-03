@@ -100,7 +100,7 @@ export default function AdsSettings({ detected, tokenPresent, config, onTokenCha
   const setCountry = (code: string, patch: Partial<CountrySettings>) =>
     setDraft((d) => ({
       ...d,
-      countries: { ...d.countries, [code]: { ...({ currency: "COP", rateToCop: 0, feePct: 0, costPerSale: 0, taxPct: 0 } as CountrySettings), ...d.countries[code], ...patch } },
+      countries: { ...d.countries, [code]: { ...({ currency: "COP", rateToCop: 0, autoRate: true, feePct: 0, costPerSale: 0, taxPct: 0 } as CountrySettings), ...d.countries[code], ...patch } },
     }));
   const toggleCountry = (code: string, on: boolean) =>
     setDraft((d) => {
@@ -218,9 +218,15 @@ export default function AdsSettings({ detected, tokenPresent, config, onTokenCha
               <input id={`cc-cur-${code}`} className="input" maxLength={3} value={c.currency} onChange={(e) => setCountry(code, { currency: e.target.value.toUpperCase() })} />
             </div>
             <div className="field">
-              <label htmlFor={`cc-rate-${code}`}>Tasa: 1 {c.currency} = ? COP</label>
+              <label htmlFor={`cc-rate-${code}`}>{c.currency !== "COP" && c.autoRate !== false ? "Tasa de respaldo" : "Tasa"}: 1 {c.currency} = ? COP</label>
               <input id={`cc-rate-${code}`} className="input" type="number" min={0} step="any" value={c.rateToCop} onChange={(e) => setCountry(code, { rateToCop: Number(e.target.value) })} />
-              {c.currency !== "COP" && !(c.rateToCop > 0) && <small className="ads-warn">Sin tasa: se muestra sin convertir.</small>}
+              {c.currency !== "COP" && (
+                <label className="ads-check">
+                  <input type="checkbox" checked={c.autoRate !== false} onChange={(e) => setCountry(code, { autoRate: e.target.checked })} /> Usar tasa automática
+                </label>
+              )}
+              {c.currency !== "COP" && c.autoRate !== false && <small className="muted">Se actualiza sola cada vez que refrescas los datos; esta tasa solo se usa si no hay una guardada.</small>}
+              {c.currency !== "COP" && c.autoRate === false && !(c.rateToCop > 0) && <small className="ads-warn">Sin tasa: se muestra sin convertir.</small>}
             </div>
             <div className="field">
               <label htmlFor={`cc-fee-${code}`}>Comisión de pago (%)</label>

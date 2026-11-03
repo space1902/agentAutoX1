@@ -185,3 +185,25 @@ test('vouchers returns the same list as the report for any range, from the cache
   await assert.rejects(runAdsCommand('vouchers', { from: 'ayer', to: 'hoy' }, offline), /fecha/i);
   await assert.rejects(runAdsCommand('vouchers', { from: '2026-10-01', to: '2026-10-02', country: 'xx' }, offline), /país/i);
 });
+
+test('fx-refresh saves the live rate (no token needed) and the report converts with it; a failed fetch keeps the saved rate', async () => {
+  const mxFetch = (cop) => async (url) => {
+    const u = new URL(url);
+    if (u.hostname === 'open.er-api.com') return json({ result: 'success', time_last_update_unix: 1793664151, rates: { COP: cop } });
+    return fetchImpl(url);
+  };
+  const c = ctx({ env: {}, fetchImpl: mxFetch(170) });
+  await runAdsCommand('config-set', { enabledCountries: ['CO', 'MX'], spendVatPct: 0 }, c);
+  const first = await runAdsCommand('fx-refresh', {}, c);
+  assert.deepEqual(first.errors, []);
+  assert.equal(first.rates[0].currency, 'MXN');
+  assert.equal(first.rates[0].date, '2026-10-29');
+  const report = await runAdsCommand('report', { from: '2026-10-28', to: '2026-10-29', group: 'campaign' }, c);
+  assert.deepEqual(report.enabledCountries.map((x) => x.country), ['CO', 'MX']);
+  assert.equal(report.fx[0].rate, 170);
+  assert.equal(report.fx[0].source, 'open.er-api.com');
+  const down = ctx({ dataDir: c.dataDir, env: {}, fetchImpl: async () => { throw new Error('offline'); } });
+  const failed = await runAdsCommand('fx-refresh', {}, down);
+  assert.equal(failed.errors.length, 1);
+  assert.equal(failed.fx[0].rate, 170, 'the last saved rate is still reported');
+});

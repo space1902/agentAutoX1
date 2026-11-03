@@ -27,12 +27,13 @@ export const DEFAULT_CONFIG = Object.freeze({
   includeOtherCountries: false,
   // Words in a campaign name that tag its country.
   countryWords: Object.freeze(Object.fromEntries(Object.entries(DEFAULT_COUNTRY_TOKENS).map(([k, v]) => [k, Object.freeze([...v])]))),
-  // Per country: currency of the sheet's Valor, exchange rate to COP (0 = not set yet), payment fee % of the value,
+  // Per country: currency of the sheet's Valor, exchange rate to COP (0 = not set yet; with autoRate on it is only the
+  // fallback/override for the live rate saved in fx_rates), payment fee % of the value,
   // product/other cost per sale (COP) and tax % of the value. Spend is already in the account currency (COP).
   countries: Object.freeze({
-    CO: Object.freeze({ currency: 'COP', rateToCop: 1, feePct: 0, costPerSale: 0, taxPct: 0 }),
-    MX: Object.freeze({ currency: 'MXN', rateToCop: 0, feePct: 0, costPerSale: 0, taxPct: 0 }),
-    VE: Object.freeze({ currency: 'USD', rateToCop: 0, feePct: 0, costPerSale: 0, taxPct: 0 }),
+    CO: Object.freeze({ currency: 'COP', rateToCop: 1, autoRate: true, feePct: 0, costPerSale: 0, taxPct: 0 }),
+    MX: Object.freeze({ currency: 'MXN', rateToCop: 0, autoRate: true, feePct: 0, costPerSale: 0, taxPct: 0 }),
+    VE: Object.freeze({ currency: 'USD', rateToCop: 0, autoRate: true, feePct: 0, costPerSale: 0, taxPct: 0 }),
   }),
   // Minutes between automatic refreshes of today while the section is open (0 = off).
   autoRefreshMinutes: 15,
@@ -132,7 +133,7 @@ export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
   }
   for (const [code, c] of Object.entries(p.countries ?? {})) {
     if (!/^[A-Z]{2}$/.test(code)) throw new ConfigError(`El país «${code}» debe tener un código de 2 letras (CO, MX...).`);
-    const prev = out.countries[code] ?? { currency: 'COP', rateToCop: 0, feePct: 0, costPerSale: 0, taxPct: 0 };
+    const prev = out.countries[code] ?? { currency: 'COP', rateToCop: 0, autoRate: true, feePct: 0, costPerSale: 0, taxPct: 0 };
     const pct = (v, label) => {
       const n = Number(v);
       if (!Number.isFinite(n) || n < 0 || n > 100) throw new ConfigError(`${label} de ${code} debe estar entre 0 y 100.`);
@@ -141,6 +142,7 @@ export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
     out.countries[code] = {
       currency: c.currency === undefined ? prev.currency : text(c.currency, `La moneda de ${code}`, { pattern: /^[A-Za-z]{3}$/ }).toUpperCase(),
       rateToCop: c.rateToCop === undefined ? prev.rateToCop : nonNegative(c.rateToCop, `tasa a COP de ${code}`),
+      autoRate: c.autoRate === undefined ? prev.autoRate !== false : Boolean(c.autoRate),
       feePct: c.feePct === undefined ? prev.feePct : pct(c.feePct, 'La comisión (%)'),
       costPerSale: c.costPerSale === undefined ? prev.costPerSale : nonNegative(c.costPerSale, `costo por venta de ${code}`),
       taxPct: c.taxPct === undefined ? prev.taxPct : pct(c.taxPct, 'El impuesto (%)'),

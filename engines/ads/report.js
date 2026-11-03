@@ -5,6 +5,7 @@
 import { COUNTRY_NAMES, DEFAULT_COUNTRY_TOKENS, deriveCountry, scopeCountry } from './country.js';
 import { ACTIONS, computeMetrics, isInactiveStatus, suggestAction } from './metrics.js';
 import { maskPhone, normalizeText, parseCt } from './parse.js';
+import { fxSummary, resolveRate } from './fx.js';
 import { isValidResult, matchesFlow } from './sheet.js';
 import { daysBetween, eachDate } from './time.js';
 
@@ -19,25 +20,27 @@ export function isMonitored(campaignName, prefix) {
   return String(campaignName ?? '').toLowerCase().startsWith(p);
 }
 
-const blank = (date, adId, country = '') => ({ date, adId, country, gasto: 0, spendNet: 0, vat: 0, mensajes: 0, valor: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
+const blank = (date, adId, country = '') => ({ date, adId, country, gasto: 0, spendNet: 0, vat: 0, mensajes: 0, valor: 0, valorNative: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
 
-// Settings of a country; the rate defaults to 1 while it is not set (flagged by the country table).
-export function countrySettings(config, country) {
+// Settings of a country on a day; the rate is the live one saved for that day (see fx.js), else the manual one, else 1
+// while nothing is known (flagged by the country table).
+export function countrySettings(config, country, date = '9999-12-31', fxRates = {}) {
   const c = config.countries?.[country];
-  return { currency: c?.currency ?? 'COP', rate: c?.rateToCop > 0 ? c.rateToCop : 1, rateSet: c ? c.currency === 'COP' || c.rateToCop > 0 : !country || country === 'CO', feePct: c?.feePct ?? 0, costPerSale: c?.costPerSale ?? 0, taxPct: c?.taxPct ?? 0 };
+  const r = c ? resolveRate(config, country, date, fxRates) : { rate: 1, set: !country || country === 'CO' };
+  return { currency: c?.currency ?? 'COP', rate: r.rate, rateSet: r.set, feePct: c?.feePct ?? 0, costPerSale: c?.costPerSale ?? 0, taxPct: c?.taxPct ?? 0 };
 }
 
 // Value of a payment in COP plus what it costs (fee and tax are % of that value; the cost is per sale).
-export function economics(sale, config, country) {
-  const s = countrySettings(config, country);
+export function economics(sale, config, country, fxRates = {}) {
+  const s = countrySettings(config, country, sale.date, fxRates);
   const valor = sale.valor * s.rate;
-  return { valor, comisiones: (valor * s.feePct) / 100, costos: s.costPerSale, impuestos: (valor * s.taxPct) / 100 };
+  return { valor, valorNative: sale.valor, comisiones: (valor * s.feePct) / 100, costos: s.costPerSale, impuestos: (valor * s.taxPct) / 100 };
 }
 
 // Spend as shown everywhere: `gasto` includes Meta's IVA, `spendNet` is what the API returned, `vat` the difference.
 // Map "date|adId[|country]" -> entry. `sales` must already be valid payments; `convert(sale)` may turn them into COP
 // and add costs (the default keeps the raw sheet value).
-export function joinByDateAndAd({ insights, sales, vatPct = 0, convert = (s) => ({ valor: s.valor, comisiones: 0, costos: 0, impuestos: 0 }) }) {
+export function joinByDateAndAd({ insights, sales, vatPct = 0, convert = (s) => ({ valor: s.valor, valorNative: s.valor, comisiones: 0, costos: 0, impuestos: 0 }) }) {
   const map = new Map();
   const entry = (date, adId, country) => {
     const key = country ? `${date}|${adId}|${country}` : `${date}|${adId}`;
@@ -56,6 +59,7 @@ export function joinByDateAndAd({ insights, sales, vatPct = 0, convert = (s) => 
     const e = entry(s.date, s.adId || '', s.country ?? '');
     const c = convert(s);
     e.valor += c.valor;
+    e.valorNative += c.valorNative ?? 0;
     e.comisiones += c.comisiones;
     e.costos += c.costos;
     e.impuestos += c.impuestos;
@@ -81,7 +85,7 @@ const dayOf = (ad, today) => {
 };
 
 const addTotals = (to, from) => {
-  for (const k of ['gasto', 'spendNet', 'vat', 'mensajes', 'valor', 'ventas', 'comisiones', 'costos', 'impuestos']) to[k] += from[k];
+  for (const k of ['gasto', 'spendNet', 'vat', 'mensajes', 'valor', 'valorNative', 'ventas', 'comisiones', 'costos', 'impuestos']) to[k] += from[k];
   return to;
 };
 
@@ -90,10 +94,10 @@ const withMetrics = (t) => {
   const margen = t.valor - t.gasto - t.comisiones - t.costos - t.impuestos;
   return { ...t, ...computeMetrics(t), margen, margenPct: t.valor ? margen / t.valor : 0 };
 };
-const zero = () => ({ gasto: 0, spendNet: 0, vat: 0, mensajes: 0, valor: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
+const zero = () => ({ gasto: 0, spendNet: 0, vat: 0, mensajes: 0, valor: 0, valorNative: 0, ventas: 0, comisiones: 0, costos: 0, impuestos: 0 });
 
 export function buildReport({
-  insights, comprobantes, identities = {}, ads = {}, config, from, to, group = 'campaign', today, country = '', splitCountry = false, raises = {},
+  insights, comprobantes, identities = {}, ads = {}, config, from, to, group = 'campaign', today, country = '', splitCountry = false, raises = {}, fxRates = {},
 }) {
   // "ct" is the legacy name of the grouping that merged campaigns by code: it is now the campaign grouping.
   if (group === 'ct') group = 'campaign';
@@ -125,7 +129,7 @@ export function buildReport({
   });
   const withCountry = new Map(attributable.map((c) => [c, saleCountry(c)]));
   const sales = attributable.filter((c) => countsAsSale(c, config.validResult)).map((c) => ({ ...c, country: withCountry.get(c) }));
-  const joinedAll = joinByDateAndAd({ insights: monitoredInsights, sales, vatPct: Math.max(0, Number(config.spendVatPct ?? 0)), convert: (s) => economics(s, config, s.country) });
+  const joinedAll = joinByDateAndAd({ insights: monitoredInsights, sales, vatPct: Math.max(0, Number(config.spendVatPct ?? 0)), convert: (s) => economics(s, config, s.country, fxRates) });
 
   // Countries that have data at all (before the enabled-countries scope), so the settings can offer them.
   const detectedMap = new Map();
@@ -210,7 +214,7 @@ export function buildReport({
   const countries = [...byCountry.entries()]
     .filter(([, totals]) => totals.gasto > 0 || totals.ventas > 0 || totals.valor > 0)
     .map(([code, totals]) => {
-      const s = countrySettings(config, code);
+      const s = countrySettings(config, code, to, fxRates);
       return {
         country: code, name: code ? (COUNTRY_NAMES[code] ?? code) : NO_COUNTRY, currency: s.currency, rateToCop: s.rate, rateMissing: totals.valor > 0 && !s.rateSet,
         ...withMetrics(totals),
@@ -296,7 +300,7 @@ export function buildReport({
         date: c.date,
         registered: c.registered,
         valor: c.valor,
-        valorCop: c.valor * countrySettings(config, code).rate,
+        valorCop: c.valor * countrySettings(config, code, c.date, fxRates).rate,
         bank: c.bank,
         flow: c.flow,
         adId: c.adId,
@@ -318,9 +322,19 @@ export function buildReport({
     })
     .sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? 1 : -1));
 
+  // Every enabled country is offered even without data (the selector always shows it).
+  const withData = new Set(countries.map((c) => c.country));
+  const enabledCountries = (config.enabledCountries ?? []).map((code) => ({
+    country: code, name: COUNTRY_NAMES[code] ?? code, currency: config.countries?.[code]?.currency ?? 'COP', hasData: withData.has(code),
+  }));
+  // Rate behind each enabled non-COP country at the end of the range (so "today" shows today's rate).
+  const fx = fxSummary(config, fxRates, to);
+
   return {
     range: { from, to },
     group,
+    enabledCountries,
+    fx,
     country: wanted,
     splitCountry,
     currency: config.currency,

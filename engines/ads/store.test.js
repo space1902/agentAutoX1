@@ -211,3 +211,17 @@ test('budget events and the WhatsApp outbox round trip', () => {
   s.markWhatsappSent(s.pendingWhatsapp()[0].id, 20);
   assert.equal(s.pendingWhatsapp().length, 0);
 });
+
+test('fx rates are stored once per currency and day, newest write wins, listed by date', () => {
+  const s = createStore();
+  assert.deepEqual(s.fxRates(), {});
+  s.saveFxRate({ currency: 'MXN', date: '2026-11-02', rate: 169, fetchedAt: 10, source: 'a' });
+  s.saveFxRate({ currency: 'MXN', date: '2026-11-01', rate: 168, fetchedAt: 5, source: 'a' });
+  s.saveFxRate({ currency: 'MXN', date: '2026-11-02', rate: 170, fetchedAt: 20, source: 'b' });
+  s.saveFxRate({ currency: 'USD', date: '2026-11-02', rate: 4000, fetchedAt: 20, source: 'b' });
+  assert.deepEqual(s.fxRates().MXN, [
+    { date: '2026-11-01', rate: 168, fetchedAt: 5, source: 'a' },
+    { date: '2026-11-02', rate: 170, fetchedAt: 20, source: 'b' },
+  ]);
+  assert.equal(s.fxRates().USD.length, 1);
+});

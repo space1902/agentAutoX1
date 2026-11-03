@@ -10,7 +10,19 @@ import DateRangeBar from "../components/ads/DateRangeBar";
 import VouchersPanel, { type VoucherFilter } from "../components/ads/VouchersPanel";
 import { Banner, Card, Notice, Skeleton, StatCard } from "../components/ui";
 import { errorText } from "../lib/api";
-import { hiddenInactive, readShowInactive, visibleRows, writeShowInactive } from "../lib/adsView";
+import {
+  countryChips,
+  formatNative,
+  fxLine,
+  hiddenInactive,
+  noDataNote,
+  readCountryChoice,
+  readShowInactive,
+  resolveCountryChoice,
+  visibleRows,
+  writeCountryChoice,
+  writeShowInactive,
+} from "../lib/adsView";
 import {
   adsApi,
   agoText,
@@ -27,6 +39,7 @@ import {
   type AdsStatus,
   type DecisionsData,
   type DecisionStatus,
+  type EnabledCountry,
   type Group,
   type Preset,
   type Report,
@@ -74,7 +87,9 @@ export default function Anuncios() {
   const [decisionData, setDecisionData] = useState<DecisionsData | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
-  const [country, setCountry] = useState("");
+  // The selected country ("" = Combinado) is remembered on this device.
+  const [country, setCountry] = useState(() => readCountryChoice());
+  const [fxWarning, setFxWarning] = useState<string | null>(null);
   const [split, setSplit] = useState(false);
   const [tracking, setTracking] = useState<TrackingItem[]>([]);
   const [chartKey, setChartKey] = useState("");
@@ -143,11 +158,27 @@ export default function Anuncios() {
     }
   }, []);
 
+  const changeCountry = useCallback((code: string) => {
+    setCountry(code);
+    writeCountryChoice(code);
+  }, []);
+
+  // Live exchange rates (free public sources): fetched on each data refresh, never in the background. A failure keeps
+  // the last saved rate and only shows a warning.
+  const refreshFx = useCallback(async () => {
+    try {
+      const res = await adsApi.fxRefresh();
+      setFxWarning(res.errors.length > 0 ? `No pude actualizar la tasa de ${res.errors.map((e) => e.currency).join(", ")}: uso la última guardada.` : null);
+    } catch (e) {
+      setFxWarning(`No pude actualizar la tasa de cambio: uso la última guardada. ${errorText(e)}`);
+    }
+  }, []);
+
   const doSync = useCallback(
     async () => {
       setSyncing(true);
       try {
-        const res = await adsApi.syncAuto();
+        const [res] = await Promise.all([adsApi.syncAuto(), refreshFx()]);
         if (res.backfilled && res.history) setBanner(`Historial cargado desde ${dmy(res.history.from)} (${res.history.days} días con datos).`);
         setProblems(syncProblems(res));
       } catch (e) {
@@ -157,7 +188,7 @@ export default function Anuncios() {
         setSyncing(false);
       }
     },
-    [loadReport, loadStatus, loadVouchers],
+    [loadReport, loadStatus, loadVouchers, refreshFx],
   );
 
   // First load: cached report right away, then a sync when the data is stale.
@@ -175,6 +206,7 @@ export default function Anuncios() {
       setLoaded(true);
       const { rangeValid: ok } = latest.current;
       if (s?.tokenPresent && ok && (!s.history?.backfill || !s.lastSync.meta || Date.now() - s.lastSync.meta > STALE_MS)) void doSync();
+      else void refreshFx().then(() => Promise.all([loadReport(), loadVouchers()]));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -247,10 +279,20 @@ export default function Anuncios() {
 
   const pendingCount = decisionData?.decisions.filter((d) => d.status === "pending").length ?? 0;
   const k = report?.kpis;
-  // A filter on a country that is no longer enabled would show nothing: go back to "Todos".
+  // Countries offered by the selector: every enabled one, even without data (before the first report, from the config).
+  const enabledCountries: EnabledCountry[] =
+    report?.enabledCountries ??
+    (config?.enabledCountries ?? []).map((code) => ({ country: code, name: countryName(code), currency: config?.countries[code]?.currency ?? "COP", hasData: true }));
+  // A saved choice on a country that is no longer enabled would show nothing: go back to "Combinado".
   useEffect(() => {
-    if (report && country && country !== "-" && !report.countries.some((c) => c.country === country)) setCountry("");
-  }, [report, country]);
+    if (!report?.enabledCountries) return;
+    const next = resolveCountryChoice(country, report.enabledCountries);
+    if (next !== country) changeCountry(next);
+  }, [report, country, changeCountry]);
+  const selectedEnabled = enabledCountries.find((c) => c.country === country);
+  const fxShown = (report?.fx ?? []).filter((f) => !country || country === "-" || f.country === country);
+  const emptyNote = noDataNote(country, enabledCountries);
+  const nativeValue = selectedEnabled && report && k?.valorNative !== undefined ? formatNative(selectedEnabled.currency, k.valorNative) : null;
   const changeShowInactive = (value: boolean) => {
     setShowInactive(value);
     writeShowInactive(value);
@@ -333,7 +375,8 @@ export default function Anuncios() {
             onTokenChange={() => void loadStatus()}
             onConfigSaved={(c) => {
               setConfig(c);
-              void loadReport();
+              // The rate mode or the enabled countries may have changed: refresh the live rates, then redraw.
+              void refreshFx().then(() => Promise.all([loadReport(), loadVouchers()]));
             }}
           />
         </Card>
@@ -342,6 +385,31 @@ export default function Anuncios() {
       {tab === "resumen" && (
       <>
       <Card>
+        {enabledCountries.length > 0 && (
+          <div className="ads-countries-bar" style={{ marginTop: 0, marginBottom: 12 }}>
+            <div className="chips" role="group" aria-label="País">
+              {countryChips(enabledCountries).map((c) => (
+                <button key={c.id || "all"} className={`chip ads-chip ${country === c.id ? "on" : ""}`} aria-pressed={country === c.id} onClick={() => changeCountry(c.id)}>
+                  {c.label}
+                </button>
+              ))}
+            </div>
+            {group === "campaign" && enabledCountries.length > 1 && (
+              <label className="ads-check">
+                <input type="checkbox" checked={split} onChange={(e) => setSplit(e.target.checked)} /> Separar campañas por país
+              </label>
+            )}
+          </div>
+        )}
+        {fxShown.length > 0 && (
+          <p className="muted ads-note" style={{ marginTop: 0, marginBottom: 10 }} role="status">
+            {fxShown.map((f) => (
+              <span key={f.country} style={{ marginRight: 14 }}>{fxLine(f, now)}</span>
+            ))}
+          </p>
+        )}
+        {fxWarning && <p className="ads-warn" role="status">{fxWarning}</p>}
+        {emptyNote && <p className="muted ads-note" style={{ marginTop: 0, marginBottom: 10 }} role="status">{emptyNote}</p>}
         <DateRangeBar
           preset={preset}
           range={range}
@@ -351,6 +419,8 @@ export default function Anuncios() {
           onRange={(from, to) => {
             setCustom({ from, to });
             setPreset("custom");
+            // "Aplicar" is a data refresh too: pick up today's exchange rate, then redraw.
+            void refreshFx().then(() => loadReport());
           }}
         >
           <div className="ads-refresh">
@@ -362,23 +432,6 @@ export default function Anuncios() {
             </button>
           </div>
         </DateRangeBar>
-        {report && report.countries.filter((c) => c.country).length > 1 && (
-          <div className="ads-countries-bar">
-            <div className="chips" role="group" aria-label="Filtrar por país">
-              <button className={`chip ads-chip ${country === "" ? "on" : ""}`} aria-pressed={country === ""} onClick={() => setCountry("")}>Todos</button>
-              {report.countries.filter((c) => c.country).map((c) => (
-                <button key={c.country} className={`chip ads-chip ${country === c.country ? "on" : ""}`} aria-pressed={country === c.country} onClick={() => setCountry(c.country)}>
-                  {c.country} · {countryName(c.country)}
-                </button>
-              ))}
-            </div>
-            {group === "campaign" && (
-              <label className="ads-check">
-                <input type="checkbox" checked={split} onChange={(e) => setSplit(e.target.checked)} /> Separar campañas por país
-              </label>
-            )}
-          </div>
-        )}
         <div className="ads-toggle-bar">
           <label className="ads-check">
             <input type="checkbox" checked={showInactive} onChange={(e) => changeShowInactive(e.target.checked)} /> Mostrar desactivadas
@@ -407,7 +460,7 @@ export default function Anuncios() {
               )
             }
           />
-          <StatCard icon={Banknote} label="Valor" value={formatMoney(k.valor)} caption={`Resultado ${formatMoney(k.resultado)}`} />
+          <StatCard icon={Banknote} label="Valor" value={formatMoney(k.valor)} caption={<>{nativeValue && <span className="ads-vat-line">{nativeValue}<br /></span>}{`Resultado ${formatMoney(k.resultado)}`}</>} />
           <StatCard icon={TrendingUp} label="ROAS" value={k.gasto > 0 ? formatRoas(k.roas) : "—"} caption="Valor / gasto" />
           <StatCard icon={Coins} label="Costo por venta" value={k.ventas > 0 && k.gasto > 0 ? formatMoney(k.costoVenta) : "—"} caption="Gasto / ventas" />
           <StatCard icon={MessageCircle} label="Mensajes" value={formatInt(k.mensajes)} caption={k.mensajes > 0 ? `${formatMoney(k.costoMensaje)} cada uno` : "Conversaciones iniciadas"} />
@@ -427,7 +480,7 @@ export default function Anuncios() {
           <h2 className="card-title">Por país</h2>
           <span className="muted">Gasto por país de entrega · ventas por país del cliente</span>
         </div>
-        {report ? <CountriesPanel countries={report.countries} selected={country} onSelect={setCountry} /> : <Skeleton height={100} />}
+        {report ? <CountriesPanel countries={report.countries} selected={country} onSelect={changeCountry} /> : <Skeleton height={100} />}
       </Card>
 
       <Card>

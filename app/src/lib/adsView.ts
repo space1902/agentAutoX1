@@ -1,5 +1,5 @@
 // Pure view logic of the Anuncios section (no React, no Tauri), so it can be tested with `node --test`.
-import type { TrackingItem } from "./adsApi";
+import type { EnabledCountry, FxInfo, TrackingItem } from "./adsApi";
 
 const dmyText = (iso: string) => iso.split("-").reverse().join("/");
 
@@ -119,3 +119,61 @@ export function formatVoucherPhone(raw: string | null | undefined): string {
 
 /** Digits of a phone as typed in the sheet. */
 export const phoneDigits = (raw: string | null | undefined) => String(raw ?? "").replace(/\D/g, "");
+
+// ---------------------------------------------------------------- country selector and live rate
+
+/** One chip per enabled country (even without data) and then "Combinado" (id "" = every enabled country, in COP). */
+export function countryChips(enabled: EnabledCountry[]): { id: string; label: string }[] {
+  return [...enabled.map((c) => ({ id: c.country, label: c.name })), { id: "", label: "Combinado" }];
+}
+
+/** The saved choice if it still exists (an enabled country or "-" = no country); otherwise Combinado. Nothing known yet: keep it. */
+export function resolveCountryChoice(choice: string, enabled: EnabledCountry[]): string {
+  if (!choice || choice === "-" || enabled.length === 0) return choice;
+  return enabled.some((c) => c.country === choice) ? choice : "";
+}
+
+const COUNTRY_KEY = "ads.country";
+
+/** The selected country of this viewer ("" = Combinado). Storage can be missing or blocked, so every access is guarded. */
+export function readCountryChoice(store: KeyValueStore | null = defaultStore()): string {
+  try {
+    const v = store?.getItem(COUNTRY_KEY) ?? "";
+    return /^([A-Z]{2}|-)?$/.test(v) ? v : "";
+  } catch {
+    return "";
+  }
+}
+
+export function writeCountryChoice(value: string, store: KeyValueStore | null = defaultStore()): void {
+  try {
+    store?.setItem(COUNTRY_KEY, value);
+  } catch {
+    // The choice just won't persist.
+  }
+}
+
+/** Muted note for a selected country that has no data in the range (null when there is nothing to say). */
+export function noDataNote(choice: string, enabled: EnabledCountry[]): string | null {
+  const c = choice && choice !== "-" ? enabled.find((e) => e.country === choice) : undefined;
+  return c && !c.hasData ? `Sin datos de ${c.name} en este rango` : null;
+}
+
+/** "MXN $ 1.235": the value in the country's own currency (null for COP, which is already what the card shows). */
+export function formatNative(currency: string, value: number): string | null {
+  return currency === "COP" ? null : `${currency} $ ${new Intl.NumberFormat("es-CO").format(Math.round(value))}`;
+}
+
+const two = (n: number) => String(n).padStart(2, "0");
+
+/** "1 MXN = $ 170,66 COP · actualizada 14:05 (open.er-api.com)". The date is added when the rate was fetched on another day. */
+export function fxLine(fx: FxInfo, now: number): string {
+  if (fx.mode === "none") return `1 ${fx.currency} = sin tasa (defínela en Configuración)`;
+  const rate = new Intl.NumberFormat("es-CO", { maximumFractionDigits: 2 }).format(fx.rate);
+  const head = `1 ${fx.currency} = $ ${rate} COP`;
+  if (fx.mode === "manual" || fx.fetchedAt === null) return `${head} · tasa manual`;
+  const at = new Date(fx.fetchedAt);
+  const sameDay = at.toDateString() === new Date(now).toDateString();
+  const day = sameDay ? "" : `${two(at.getDate())}/${two(at.getMonth() + 1)} `;
+  return `${head} · actualizada ${day}${two(at.getHours())}:${two(at.getMinutes())}${fx.source ? ` (${fx.source})` : ""}`;
+}

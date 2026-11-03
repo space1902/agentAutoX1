@@ -10,6 +10,12 @@ import { installViews, refreshAdCt, syncCountryRates, syncSpendVat } from './vie
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- Live exchange rates to COP: one row per currency and calendar day (the last fetch of that day wins), so past days
+-- keep the rate they had. rate_to_cop = COP per 1 unit of the currency.
+CREATE TABLE IF NOT EXISTS fx_rates (
+  currency TEXT NOT NULL, date TEXT NOT NULL, rate_to_cop REAL NOT NULL, fetched_at INTEGER NOT NULL, source TEXT NOT NULL,
+  PRIMARY KEY (currency, date)
+);
 CREATE TABLE IF NOT EXISTS insights (
   date TEXT NOT NULL, ad_id TEXT NOT NULL, ad_name TEXT NOT NULL, campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL,
   adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, gasto REAL NOT NULL, impressions INTEGER NOT NULL, clicks INTEGER NOT NULL,
@@ -173,6 +179,18 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
         for (const r of rows) insert.run(r.date, r.adId, r.adName, r.campaignId, r.campaignName, r.adsetId, r.adsetName, r.gasto, r.impressions, r.clicks, r.mensajes, now, r.country ?? '');
       });
       refreshAdCt(db);
+    },
+    saveFxRate: ({ currency, date, rate, fetchedAt, source }) => {
+      q(`INSERT INTO fx_rates (currency, date, rate_to_cop, fetched_at, source) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(currency, date) DO UPDATE SET rate_to_cop = excluded.rate_to_cop, fetched_at = excluded.fetched_at, source = excluded.source`).run(currency, date, rate, fetchedAt, source);
+    },
+    // { MXN: [{ date, rate, fetchedAt, source }, ...] } ascending by date.
+    fxRates() {
+      const out = {};
+      for (const r of q('SELECT currency, date, rate_to_cop, fetched_at, source FROM fx_rates ORDER BY currency, date').all()) {
+        (out[r.currency] ??= []).push({ date: r.date, rate: r.rate_to_cop, fetchedAt: r.fetched_at, source: r.source });
+      }
+      return out;
     },
     setCountryRates: (countries) => syncCountryRates(db, countries),
     setSpendVat: (pct) => syncSpendVat(db, pct),

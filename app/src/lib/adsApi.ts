@@ -20,6 +20,8 @@ export interface Totals {
   vat?: number;
   mensajes: number;
   valor: number;
+  /** Value in the countries' own currency (meaningful when a single country is shown). Absent in older payloads. */
+  valorNative?: number;
   ventas: number;
   resultado: number;
   roas: number;
@@ -131,6 +133,33 @@ export interface CountryRow extends Totals {
   rateMissing: boolean;
 }
 
+/** An enabled country, shown in the selector even when it has no data in the range. */
+export interface EnabledCountry {
+  country: string;
+  name: string;
+  currency: string;
+  hasData: boolean;
+}
+
+/** Rate behind an enabled non-COP country: auto = live rate saved by day, manual = the configured one, none = unknown. */
+export interface FxInfo {
+  country: string;
+  currency: string;
+  mode: "auto" | "manual" | "none";
+  /** COP per 1 unit of the currency. */
+  rate: number;
+  date?: string | null;
+  fetchedAt: number | null;
+  source: string | null;
+}
+
+export interface FxRefreshResult {
+  today: string;
+  rates: { currency: string; date: string; rate: number; fetchedAt: number; source: string }[];
+  errors: { currency: string; message: string }[];
+  fx: FxInfo[];
+}
+
 export interface HistoryInfo {
   from: string | null;
   source: string | null;
@@ -153,6 +182,8 @@ export interface Report {
   group: Group;
   country: string;
   splitCountry: boolean;
+  enabledCountries?: EnabledCountry[];
+  fx?: FxInfo[];
   countries: CountryRow[];
   /** Countries that have data at all (even if not enabled), for the settings. */
   detected: { country: string; gasto: number; ventas: number }[];
@@ -265,6 +296,8 @@ export interface DecisionsData {
 export interface CountrySettings {
   currency: string;
   rateToCop: number;
+  /** Follow the live rate (default on); the manual rate is then only the fallback. */
+  autoRate?: boolean;
   feePct: number;
   costPerSale: number;
   taxPct: number;
@@ -333,6 +366,8 @@ export const adsApi = {
   report: (from: string, to: string, group: Group, country = "", split = false) =>
     invoke<Report>("ads_report", { from, to, group, country: country || null, split }),
   vouchers: (from: string, to: string, country = "") => invoke<VouchersData>("ads_vouchers", { from, to, country: country || null }),
+  /** Fetches the live exchange rates (free sources, no key); a failure keeps the last saved rate. */
+  fxRefresh: () => invoke<FxRefreshResult>("ads_fx_refresh"),
   tracking: () => invoke<{ today: string; items: TrackingItem[] }>("ads_tracking"),
   comprobanteCountry: (key: string, code: string) => invoke<{ key: string; country: string }>("ads_comprobante_country", { key, code }),
   /** Accepts a payment by hand (or takes it back with `undo`); only the local database changes. */

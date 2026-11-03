@@ -108,7 +108,7 @@ test('per-country settings merge, validate and allow new countries', () => {
   assert.equal(DEFAULT_CONFIG.countries.CO.rateToCop, 1);
   assert.equal(DEFAULT_CONFIG.countries.MX.currency, 'MXN');
   const c = mergeConfig({ countries: { MX: { rateToCop: 215, feePct: 3.5, costPerSale: 1200, taxPct: 16 }, PE: { currency: 'pen', rateToCop: 1100 } } });
-  assert.deepEqual(c.countries.MX, { currency: 'MXN', rateToCop: 215, feePct: 3.5, costPerSale: 1200, taxPct: 16 });
+  assert.deepEqual(c.countries.MX, { currency: 'MXN', rateToCop: 215, autoRate: true, feePct: 3.5, costPerSale: 1200, taxPct: 16 });
   assert.equal(c.countries.PE.currency, 'PEN');
   assert.equal(c.countries.CO.rateToCop, 1, 'untouched countries keep their values');
   assert.throws(() => mergeConfig({ countries: { MX: { feePct: 120 } } }), /entre 0 y 100/);
@@ -133,4 +133,14 @@ test('a config saved before campaigns stopped being CT-only keeps working: the o
   // A prefix chosen after the change is respected.
   saveConfig(dir, { campaignPrefix: 'CT' });
   assert.equal(loadConfig(dir).campaignPrefix, 'CT');
+});
+
+test('autoRate defaults to on per country and can be turned off', () => {
+  assert.equal(DEFAULT_CONFIG.countries.MX.autoRate, true);
+  assert.equal(DEFAULT_CONFIG.countries.CO.autoRate, true);
+  assert.equal(mergeConfig({ countries: { PE: { currency: 'PEN' } } }).countries.PE.autoRate, true);
+  const off = mergeConfig({ countries: { MX: { autoRate: false } } });
+  assert.equal(off.countries.MX.autoRate, false);
+  assert.equal(off.countries.MX.rateToCop, 0, 'the manual rate is untouched');
+  assert.equal(mergeConfig({ countries: { MX: { rateToCop: 200 } } }).countries.MX.autoRate, true);
 });

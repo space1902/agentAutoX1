@@ -3,6 +3,7 @@
 import { DEFAULT_CONFIG, ConfigError, adsDir, loadConfig, saveConfig } from './config.js';
 import { MetaApi, friendlyMetaError } from './meta-api.js';
 import { fetchAccount } from './meta-data.js';
+import { fxSummary, refreshFxRates, resolveRate } from './fx.js';
 import { buildReport } from './report.js';
 import { existsSync } from 'node:fs';
 import { AlertsConfigError, ALERTS_DEFAULTS, loadAlertsConfig, saveAlertsConfig } from './monitor/alerts-config.js';
@@ -20,7 +21,7 @@ export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
 // 'ct' is the legacy name of the campaign grouping (the report never merges campaigns by CT code anymore).
 const GROUPS = ['campaign', 'ct', 'ad'];
-const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-accept', 'activities-probe'];
+const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-accept', 'activities-probe', 'fx-refresh'];
 const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
 export class AdsError extends Error {}
@@ -45,6 +46,16 @@ export function parseArgs(argv) {
 function checkRange({ from, to }) {
   if (!isIsoDate(from) || !isIsoDate(to)) throw new AdsError('Las fechas deben tener el formato AAAA-MM-DD.');
   if (from > to || daysBetween(from, to) > MAX_RANGE_DAYS) throw new AdsError(`El rango de fechas no es válido (máximo ${MAX_RANGE_DAYS} días).`);
+}
+
+// Config countries with the live rate (latest saved) as rateToCop where the country follows it: what the SQL views use.
+function effectiveCountries(config, fxRates) {
+  return Object.fromEntries(
+    Object.entries(config.countries).map(([code, c]) => {
+      const r = resolveRate(config, code, '9999-12-31', fxRates);
+      return [code, r.mode === 'auto' ? { ...c, rateToCop: r.rate } : c];
+    }),
+  );
 }
 
 const accountTimezone = (store) => store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
@@ -104,8 +115,20 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
 
   const store = openStoreAt(dataDir);
   try {
-    store.setCountryRates(config.countries);
+    // Views for the Analista see the live rate (latest saved) wherever the country follows it.
+    const fxRates = store.fxRates();
+    store.setCountryRates(effectiveCountries(config, fxRates));
     store.setSpendVat(config.spendVatPct);
+    // Live exchange rates: fetched on each data refresh (the app calls this; there is no background polling). Needs no
+    // token; a failed fetch keeps the last saved rate and is reported in `errors`.
+    if (command === 'fx-refresh') {
+      const tz = accountTimezone(store);
+      const date = localParts(now(), tz).date;
+      const result = await refreshFxRates({ store, config, today: date, fetchImpl, now });
+      const saved = store.fxRates();
+      store.setCountryRates(effectiveCountries(config, saved));
+      return { ...result, today: date, fx: fxSummary(config, saved, date) };
+    }
     if (command === 'sync' && (args.auto === true || args.auto === 'true')) {
       return await runAutoSync({ store, config, token, fetchImpl, now });
     }
@@ -188,6 +211,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
         identities: store.identities(),
         ads: {},
         config,
+        fxRates,
         from: args.from,
         to: args.to,
         group: 'campaign',
@@ -208,6 +232,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       identities: store.identities(),
       ads: store.adsWithFirstSpend(),
       config,
+      fxRates,
       from: args.from,
       to: args.to,
       group,

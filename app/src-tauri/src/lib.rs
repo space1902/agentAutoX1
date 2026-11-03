@@ -545,6 +545,13 @@ async fn ads_sync_auto(state: State<'_, AppState>) -> Result<Value, String> {
     blocking(move || ads::sync_auto(&settings)).await
 }
 
+/// Refreshes the live exchange rates (MXN/USD... to COP); a failed fetch keeps the last saved rate.
+#[tauri::command]
+async fn ads_fx_refresh(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::fx_refresh(&settings)).await
+}
+
 #[tauri::command]
 async fn ads_tracking(state: State<'_, AppState>) -> Result<Value, String> {
     let settings = state.current();
@@ -969,6 +976,7 @@ pub fn run() {
             ads_vouchers,
             ads_sync_auto,
             ads_tracking,
+            ads_fx_refresh,
             ads_comprobante_country,
             ads_comprobante_accept,
             ads_status,
