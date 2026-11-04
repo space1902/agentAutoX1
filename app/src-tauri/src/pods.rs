@@ -81,7 +81,7 @@ fn run_pods(settings: &Settings, args: &[&str]) -> Result<PsOutput, String> {
 pub fn timeout_for(action: &str) -> Duration {
     let minutes = |m: u64| Duration::from_secs(m * 60);
     match action {
-        "listar-json" | "info-json" | "wsp" | "ver" => Duration::from_secs(90),
+        "listar-json" | "info-json" | "wsp" | "ver" | "abrir-wa" => Duration::from_secs(90),
         "apagar" => minutes(3),
         "prender" => minutes(8),
         "renombrar" | "borrar" => minutes(10),
@@ -282,7 +282,7 @@ pub fn bluestacks_info(settings: &Settings) -> Result<BlueStacksInfo, String> {
 
 /// Actions the UI may trigger on a single pod.
 pub fn is_allowed_action(action: &str) -> bool {
-    matches!(action, "prender" | "apagar" | "ver")
+    matches!(action, "prender" | "apagar" | "ver" | "abrir-wa")
 }
 
 /// Starting two BlueStacks instances at the same time can leave the second one stuck while it boots (a window that
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn only_starting_a_pod_goes_through_the_one_at_a_time_gate() {
         assert!(serializes_starts("prender"));
-        assert!(!serializes_starts("apagar") && !serializes_starts("ver"));
+        assert!(!serializes_starts("apagar") && !serializes_starts("ver") && !serializes_starts("abrir-wa"));
     }
 
     #[test]
@@ -626,7 +626,7 @@ mod tests {
 
     #[test]
     fn only_whitelisted_actions() {
-        assert!(is_allowed_action("prender") && is_allowed_action("apagar") && is_allowed_action("ver"));
+        assert!(is_allowed_action("prender") && is_allowed_action("apagar") && is_allowed_action("ver") && is_allowed_action("abrir-wa"));
         assert!(!is_allowed_action("borrar") && !is_allowed_action("nuevo"));
     }
 
@@ -796,10 +796,11 @@ mod tests {
 
     #[test]
     fn every_pods_action_has_a_finite_timeout_and_starts_get_the_longest_short_one() {
-        for action in ["listar-json", "info-json", "prender", "apagar", "ver", "wsp", "renombrar", "borrar", "nuevo", "algo-nuevo"] {
+        for action in ["listar-json", "info-json", "prender", "apagar", "ver", "abrir-wa", "wsp", "renombrar", "borrar", "nuevo", "algo-nuevo"] {
             let t = timeout_for(action);
             assert!(t >= secs(30) && t <= secs(60 * 60), "{action}: {t:?}");
         }
+        assert_eq!(timeout_for("abrir-wa"), secs(90));
         assert!(timeout_for("prender") > timeout_for("apagar"));
         assert!(timeout_for("nuevo") > timeout_for("prender"));
     }

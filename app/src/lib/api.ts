@@ -258,7 +258,7 @@ export const api = {
   getDefaultSettings: () => invoke<Settings>("get_default_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
   listPods: () => invoke<Pod[]>("list_pods"),
-  podAction: (action: "prender" | "apagar" | "ver", name: string) =>
+  podAction: (action: "prender" | "apagar" | "ver" | "abrir-wa", name: string) =>
     invoke<string>("pod_action", { action, name }),
   resetPods: () => invoke<PodsResetReport>("reset_pods"),
   createPod: (name: string, phone: string) => invoke<string>("create_pod", { name, phone }),

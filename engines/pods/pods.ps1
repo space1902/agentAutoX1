@@ -11,6 +11,7 @@
     .\pods.ps1 prender <nombre>
     .\pods.ps1 apagar  <nombre>
     .\pods.ps1 ver     <nombre>         -> trae la ventana al frente (prende el pod si está apagado)
+    .\pods.ps1 abrir-wa <nombre>       -> abre WhatsApp Business dentro del pod (debe estar prendido)
     .\pods.ps1 borrar  <nombre>         -> pide escribir el nombre para confirmar
     .\pods.ps1 renombrar <nombre> <nuevo> -> cambia solo el nombre visible (la cuenta no se toca)
     .\pods.ps1 wsp <nombre> <numero>    -> etiqueta #wsp con el número del pod (se guarda en pods-wsp.json)
@@ -810,8 +811,23 @@ function Info-Json {
 function Prender([string] $nombre) {
     $pod = Obtener-Pod $nombre
     if (-not (Pod-Prendido $pod)) { Iniciar-Pod $pod }
-    Esperar-Android $pod | Out-Null
+    $serial = Esperar-Android $pod
     Escribir "Pod '$nombre' prendido." Green
+    # WhatsApp no tiene icono en el launcher de BlueStacks (se instala por adb): se abre solo para que no haya que buscarlo.
+    try {
+        if (-not (Wa-Instalado $serial)) { Escribir "    WhatsApp Business no está instalado en '$nombre'. Usa 'reinstalar-wa $nombre'." Yellow }
+        elseif (-not (Abrir-Wa $serial)) { Escribir '    No pude confirmar que WhatsApp quedó en primer plano; usa el botón WhatsApp de la app o 'abrir-wa'.' Yellow }
+    } catch { Escribir "    No pude abrir WhatsApp automáticamente: $($_.Exception.Message)" Yellow }
+}
+
+function Abrir-WaPod([string] $nombre) {
+    $pod = Obtener-Pod $nombre
+    if (-not (Pod-Prendido $pod)) { throw "El pod '$nombre' está apagado. Prende el pod primero (acción 'prender')." }
+    $serial = Obtener-Serial $pod
+    if (-not $serial -or -not (Android-Listo $serial)) { $serial = Esperar-Android $pod 45 }
+    if (-not (Wa-Instalado $serial)) { throw "WhatsApp Business no está instalado en el pod '$nombre'. Usa 'reinstalar-wa $nombre' para instalarlo sin perder la cuenta." }
+    if (Abrir-Wa $serial) { Escribir "WhatsApp Business abierto en el pod '$nombre'." Green }
+    else { throw "No pude confirmar que WhatsApp Business quedó abierto en '$nombre'. Revisa la ventana del pod o inténtalo de nuevo." }
 }
 
 function Apagar([string] $nombre) {
@@ -1047,6 +1063,7 @@ switch ($Accion) {
     'prender'       { Prender $Nombre }
     'apagar'        { Apagar $Nombre }
     'ver'           { Ver $Nombre }
+    'abrir-wa'      { Abrir-WaPod $Nombre }
     'borrar'        { Borrar $Nombre }
     'renombrar'     { Renombrar $Nombre $Extra }
     'wsp'           { Poner-Wsp $Nombre $Extra }
@@ -1054,5 +1071,5 @@ switch ($Accion) {
     'reinstalar-wa' { Reinstalar-Wa $Nombre }
     'prender-todos' { Todos 'prender' }
     'apagar-todos'  { Todos 'apagar' }
-    default         { throw "Acción desconocida '$Accion'. Usa: instalar, nuevo, listar, listar-json, info-json, prender, apagar, ver, borrar, renombrar, wsp, optimizar, reinstalar-wa, prender-todos, apagar-todos." }
+    default         { throw "Acción desconocida '$Accion'. Usa: instalar, nuevo, listar, listar-json, info-json, prender, apagar, ver, abrir-wa, borrar, renombrar, wsp, optimizar, reinstalar-wa, prender-todos, apagar-todos." }
 }

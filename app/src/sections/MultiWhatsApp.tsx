@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence } from "framer-motion";
-import { Check, Eye, Loader2, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, RotateCcw, Smartphone, Trash2 } from "lucide-react";
+import { Check, Eye, Loader2, MessageCircle, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, RotateCcw, Smartphone, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import EmbeddedView from "../components/EmbeddedView";
 import { KeepAliveCard, KeepAliveSwitch, useKeepAlive } from "../components/KeepAlive";
@@ -10,7 +10,7 @@ import { api, errorText, type Pod, type RegistryRow } from "../lib/api";
 import { POD_STEP_LABELS, type PodCreationState } from "../lib/podCreation";
 import { phoneConflict, podNameProblem, podPhone } from "../lib/phone";
 
-type Action = "prender" | "apagar" | "ver";
+type Action = "prender" | "apagar" | "ver" | "abrir-wa";
 
 /** The base BlueStacks instance hosts the Root.vhd shared by every pod: it can never be deleted. */
 const BASE_INSTANCE = "Rvc64";
@@ -168,6 +168,14 @@ export default function MultiWhatsApp({ creation }: Props) {
                   </button>
                   <button className="btn sm ghost" disabled={locked || !isOn} onClick={() => void run("apagar", pod.name)}>
                     <PowerOff size={14} aria-hidden /> Apagar
+                  </button>
+                  <button
+                    className="btn sm ghost"
+                    disabled={locked || !isOn}
+                    title={isOn ? "Abrir WhatsApp Business dentro del pod" : "Prende el pod para abrir WhatsApp"}
+                    onClick={() => void run("abrir-wa", pod.name)}
+                  >
+                    <MessageCircle size={14} aria-hidden /> WhatsApp
                   </button>
                   <button className="btn sm ghost" disabled={locked} onClick={() => void run("ver", pod.name)}>
                     <Eye size={14} aria-hidden /> Ver
