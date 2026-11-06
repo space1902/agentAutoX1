@@ -135,3 +135,13 @@ test('formatEstimate: mentions every tester and the total API calls', () => {
   assert.match(text, /24(\.0)?\/h/);
   assert.match(text, /API calls\/hour/i);
 });
+
+test('backoffMs doubles from the base and stops at the maximum', async () => {
+  const { backoffMs } = await import('./tester-schedule.js');
+  assert.equal(backoffMs(0, 300_000, 3_600_000), 300_000);
+  assert.equal(backoffMs(1, 300_000, 3_600_000), 600_000);
+  assert.equal(backoffMs(3, 300_000, 3_600_000), 2_400_000);
+  assert.equal(backoffMs(4, 300_000, 3_600_000), 3_600_000);
+  assert.equal(backoffMs(50, 300_000, 3_600_000), 3_600_000);
+  assert.equal(backoffMs(-2, 300_000, 3_600_000), 300_000);
+});

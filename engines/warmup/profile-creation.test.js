@@ -16,7 +16,7 @@ import {
 } from './profile-creation.js';
 
 const config = (extra = {}) => ({
-  botNumber: '573167585233',
+  botNumber: '573000000002',
   testers: ['tester1', 'tester2', { id: 'tester3', proxy: 'http://p:1' }, 'tester4'],
   testerPersonas: { tester1: 'Eres una persona A.', tester2: 'Eres una persona B.' },
   rounds: 3,
@@ -39,9 +39,9 @@ test('normalizePhone rejects numbers outside 11-15 digits', () => {
 });
 
 test('phoneProblem flags numbers used by another tester or by the bot', () => {
-  const ctx = { taken: new Set(['573001234567']), botNumbers: ['573167585233'] };
+  const ctx = { taken: new Set(['573001234567']), botNumbers: ['573000000002'] };
   assert.match(phoneProblem('573001234567', ctx), /otro/);
-  assert.match(phoneProblem('573167585233', ctx), /bot/);
+  assert.match(phoneProblem('573000000002', ctx), /bot/);
   assert.equal(phoneProblem('573009998888', ctx), null);
 });
 
@@ -108,7 +108,7 @@ function scripted(answers) {
 }
 
 test('collectProfile asks only for unlinked numbers and re-asks on invalid or duplicated input', async () => {
-  const io = scripted(['2', 'hola', '573167585233', '3001234567', 'G']);
+  const io = scripted(['2', 'hola', '573000000002', '3001234567', 'G']);
   const result = await collectProfile({
     ...io,
     config: config(),

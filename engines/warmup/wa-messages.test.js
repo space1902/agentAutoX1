@@ -217,11 +217,11 @@ test('resolveSessionProxy uses the default bot session id when none is configure
 
 test('resolveSessionPhone reads the number of the bot or of a tester entry, digits only', () => {
   const config = {
-    botNumber: '573167585233',
+    botNumber: '573000000002',
     bot: { sessionId: 'bot' },
     testers: ['tester1', { id: 'tester2', phone: '+57 300-123 4567' }, { id: 'tester3' }, { id: 'tester4', phone: '123' }],
   };
-  assert.equal(resolveSessionPhone(config, 'bot'), '573167585233');
+  assert.equal(resolveSessionPhone(config, 'bot'), '573000000002');
   assert.equal(resolveSessionPhone({ ...config, bot: { phone: '+52 55 1234 5678' } }, 'bot'), '525512345678');
   assert.equal(resolveSessionPhone(config, 'tester2'), '573001234567');
   assert.equal(resolveSessionPhone(config, 'tester1'), null);
@@ -230,7 +230,7 @@ test('resolveSessionPhone reads the number of the bot or of a tester entry, digi
   assert.equal(resolveSessionPhone(config, 'unknown'), null);
   assert.equal(resolveSessionPhone({}, 'bot'), null);
   assert.equal(resolveSessionPhone(null, 'bot'), null);
-  assert.equal(resolveSessionPhone({ botNumber: 573167585233 }, 'bot'), '573167585233');
+  assert.equal(resolveSessionPhone({ botNumber: 573000000002 }, 'bot'), '573000000002');
 });
 
 test('createRecentMap is bounded and evicts the oldest entries first', () => {

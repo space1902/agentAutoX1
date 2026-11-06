@@ -136,7 +136,7 @@ The window is 14 days. Not linked = 0 and red. Otherwise the score is the sum of
 | Estabilidad | 20 | `20 - min(12, 4 x disconnects) - 10 x relinks - 10 x auth failures`, never below 0 |
 | Actividad reciente | 10 | last activity <= 24 h: 10, <= 72 h: 6, <= 7 days: 3, older or never: 0 |
 
-Light: green from 70, yellow from 40, red below. A logout (`logged_out_relink`) or `auth_failure` in the last 72 h forces red.
+Light: green from 70, yellow from 40, red below. A logout (the number is paused and nothing is relinked automatically) or an `auth_failure` in the last 72 h forces red. Older runs also logged `logged_out_relink`; those events still count the same way.
 These are community heuristics, not official WhatsApp numbers. Hover a badge in Números or on a profile card for the breakdown.
 
 ### Phone of each linked session

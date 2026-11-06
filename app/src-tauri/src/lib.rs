@@ -456,6 +456,29 @@ fn read_warmup_data(state: State<'_, AppState>) -> Result<data::WarmupData, Stri
 }
 
 #[tauri::command]
+/// Per-number schedule state (active, outside its window, at its daily cap, paused), messages sent today and
+/// the cap. Computed by the engine with the same rules the warm-up run uses.
+#[tauri::command]
+async fn schedule_status(state: State<'_, AppState>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || profiles::call(&settings, "schedule-status", &json!({}))).await
+}
+
+/// Pausar: takes one number out of the cycle. Allowed while a profile runs (that is the point): the engine
+/// watches the pause file and closes that number's socket. `hours` makes it a timed pause.
+#[tauri::command]
+async fn tester_pause(state: State<'_, AppState>, id: String, hours: Option<f64>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || profiles::call(&settings, "pause-tester", &json!({ "id": id, "hours": hours }))).await
+}
+
+/// Reanudar: puts the number back in the cycle (a running engine reconnects it by itself).
+#[tauri::command]
+async fn tester_resume(state: State<'_, AppState>, id: String) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || profiles::call(&settings, "resume-tester", &json!({ "id": id }))).await
+}
+
 fn read_pods_wsp(state: State<'_, AppState>) -> Result<BTreeMap<String, String>, String> {
     data::read_pods_wsp(&state.current())
 }
@@ -1005,6 +1028,9 @@ pub fn run() {
             voices_call,
             voices_key_status,
             voices_key_set,
+            schedule_status,
+            tester_pause,
+            tester_resume,
             voices_key_clear,
             agent_call,
             agent_start,

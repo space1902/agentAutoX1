@@ -1,10 +1,14 @@
 // Runs the bot session: listens to the test group and answers with the local model (Ollama).
 // Messages arriving while the model is writing are grouped into one reply.
 import {
+  cachedGroupId,
   exitCleanlyOnCtrlC,
   isEntryPoint,
+  isShuttingDown,
   DATA_DIR,
+  RESULTS_DIR,
   loadConfig,
+  pauseStore,
   randomBetween,
   resolveGroupId,
   formatVoiceLine,
@@ -13,8 +17,12 @@ import {
   sendVoiceNote,
   sleep,
   startClient,
+  stopClient,
   waitForVoiceTranscript,
 } from './lib.js';
+import { normalizeSchedule, resolveTimezone } from './activity-schedule.js';
+import { createBotWatcher } from './bot-watcher.js';
+import { createSendGate } from './send-gate.js';
 import { parseRunArgs } from './session-selection.js';
 import {
   DEFAULT_BOT_VOICE,
@@ -50,7 +58,9 @@ function loadBotConfig() {
   bot.audioChance = Math.min(1, Math.max(0, Number(bot.audioChance ?? DEFAULT_BOT.audioChance) || 0));
   bot.voice = String(bot.voice || DEFAULT_BOT.voice).trim();
   if (config.audio?.enabled === false) bot.audioChance = 0;
-  return { config, bot };
+  // Same activity window and daily-cap rules as the testers (bot cap: schedule.botDailyCap, default 150).
+  const schedule = normalizeSchedule(config.schedule);
+  return { config, bot, schedule };
 }
 
 function buildSystemPrompt(bot) {
@@ -62,6 +72,10 @@ function buildSystemPrompt(bot) {
     'You are a person, not an assistant or a bot. Never say you are an AI, never offer help like a service would, and do not end every message with a question. Share your own opinions, plans and small stories, and follow the flow of the conversation.',
   ].join('\n\n');
 }
+
+// A paused bot keeps its socket closed and is checked again this often (Reanudar takes effect within it).
+const BOT_POLL_MS = 15_000;
+const REVIVE_RETRY_MS = 5 * 60_000;
 
 const SPOKEN_INSTRUCTION =
   'You are about to record this as a WhatsApp voice note: write exactly what you would say out loud, ' +
@@ -86,18 +100,24 @@ async function generateReply(ai, bot, systemPrompt, history, spoken = false) {
 
 // groupName: the warm-up group to talk in (a profile's group); defaults to config.groupName.
 // Resolves with { client, groupId, groupName } so the testers can reuse the group the bot found.
+// client is null when the bot number is paused: testers keep working without it, and the bot reconnects
+// by itself when it is resumed.
 export async function startBotSession({ groupName: groupNameOption = null } = {}) {
-  const { config, bot } = loadBotConfig();
+  const { config, bot, schedule } = loadBotConfig();
   const groupName = String(groupNameOption ?? '').trim() || config.groupName;
   const ai = createAi({ config, dataDir: DATA_DIR });
   const systemPrompt = buildSystemPrompt(bot);
-  const client = await startClient(bot.sessionId);
-  const groupId = await resolveGroupId(client, config, { groupName });
+  const gate = createSendGate({
+    sessionId: bot.sessionId,
+    schedule,
+    timezone: resolveTimezone(schedule, { timezone: bot.timezone }),
+    resultsDir: RESULTS_DIR,
+    flatCap: schedule.botDailyCap,
+  });
 
-  console.log(
-    `[bot] listening in "${groupName}" with ${ai.label}`,
-  );
-  console.log(`[voice] ${bot.sessionId}: ${bot.voice}, audio chance ${Math.round(bot.audioChance * 100)}%`);
+  let client = null;
+  let groupId = cachedGroupId(config, groupName);
+  let lastQuiet = null;
 
   const history = [];
   const remember = (line) => {
@@ -107,6 +127,17 @@ export async function startBotSession({ groupName: groupNameOption = null } = {}
 
   let pending = [];
   let busy = false;
+
+  // Why the bot must not reply right now, or null when it may.
+  function quietReason() {
+    const pause = pauseStore.get(bot.sessionId);
+    if (pause) return `paused (${pause.reason})`;
+    if (!client || client.stopped) return 'not connected';
+    const status = gate.check();
+    if (status.state === 'capped') return `daily cap reached (${status.count}/${status.cap})`;
+    if (status.state === 'outside_window') return 'outside its activity window';
+    return null;
+  }
 
   async function processQueue() {
     if (busy) return;
@@ -121,6 +152,15 @@ export async function startBotSession({ groupName: groupNameOption = null } = {}
         const batch = pending;
         pending = [];
         for (const item of batch) remember(`${item.name}: ${item.text}`);
+
+        // Paused, out of hours or at its daily cap: keep reading the group, say nothing.
+        const quiet = quietReason();
+        if (quiet) {
+          if (lastQuiet !== quiet) console.log(`[bot] staying quiet: ${quiet}`);
+          lastQuiet = quiet;
+          continue;
+        }
+        lastQuiet = null;
 
         if (Math.random() > bot.replyChance) {
           console.log('[bot] skipping this turn, like a person who just reads');
@@ -147,6 +187,7 @@ export async function startBotSession({ groupName: groupNameOption = null } = {}
           }
 
           if (!sentAsVoice) await sendLikeHuman(client, groupId, reply, 6000);
+          gate.recordSent();
           remember(`${bot.displayName}: ${sentAsVoice ? '[voice note] ' : ''}${reply}`);
           console.log(`[bot] -> ${sentAsVoice ? '[voice] ' : ''}${reply}`);
         } catch (error) {
@@ -160,24 +201,69 @@ export async function startBotSession({ groupName: groupNameOption = null } = {}
     }
   }
 
-  client.on('message', async (msg) => {
-    const isVoice = !msg.body?.trim() && isVoiceMessage(msg);
-    if (msg.from !== groupId || (!msg.body?.trim() && !isVoice)) return;
+  function listen(live) {
+    live.on('message', async (msg) => {
+      const isVoice = !msg.body?.trim() && isVoiceMessage(msg);
+      if (msg.from !== groupId || (!msg.body?.trim() && !isVoice)) return;
 
+      try {
+        const name = msg.pushName || msg.author || 'Someone';
+
+        const text = isVoice
+          ? formatVoiceLine(await waitForVoiceTranscript(msg.id?.id))
+          : msg.body.trim();
+
+        console.log(`[bot] <- ${name}: ${text}`);
+        pending.push({ name, text });
+        if (!busy) void processQueue();
+      } catch (error) {
+        console.error(`[bot] could not process incoming message: ${error?.message || error}`);
+      }
+    });
+  }
+
+  async function connect() {
+    const live = await startClient(bot.sessionId);
     try {
-      const name = msg.pushName || msg.author || 'Someone';
-
-      const text = isVoice
-        ? formatVoiceLine(await waitForVoiceTranscript(msg.id?.id))
-        : msg.body.trim();
-
-      console.log(`[bot] <- ${name}: ${text}`);
-      pending.push({ name, text });
-      if (!busy) void processQueue();
+      groupId = await resolveGroupId(live, config, { groupName });
+      listen(live);
     } catch (error) {
-      console.error(`[bot] could not process incoming message: ${error?.message || error}`);
+      await stopClient(live);
+      throw error;
     }
+    client = live;
+    console.log(`[bot] listening in "${groupName}" with ${ai.label}`);
+    console.log(`[voice] ${bot.sessionId}: ${bot.voice}, audio chance ${Math.round(bot.audioChance * 100)}%`);
+  }
+
+  const pausedAtStart = pauseStore.get(bot.sessionId);
+  if (pausedAtStart) {
+    console.warn(`[bot] is paused (${pausedAtStart.reason}); it stays disconnected and the testers go on without it.`);
+  } else {
+    try {
+      await connect();
+    } catch (error) {
+      // A logged-out bot is paused and untouched (see lib.js); anything else stops the run as before.
+      if (error?.code !== 'LOGGED_OUT') throw error;
+      console.warn(error.message);
+    }
+  }
+
+  // Keeps the bot's connection in line with its pause state: closes it while paused, reopens it when resumed.
+  const botWatcher = createBotWatcher({
+    isPaused: () => Boolean(pauseStore.get(bot.sessionId)),
+    isShuttingDown,
+    getClient: () => client,
+    stopClient,
+    connect: async () => {
+      await connect();
+      console.log('[bot] reconnected after its pause.');
+    },
+    retryMs: REVIVE_RETRY_MS,
   });
+  // One connect at a time: a tick that finds the previous connect still pending does nothing.
+  const watcher = setInterval(() => void botWatcher.tick(), BOT_POLL_MS);
+  watcher.unref();
 
   return { client, groupId, groupName };
 }
@@ -188,7 +274,10 @@ export async function startBot(options) {
 
 if (isEntryPoint(import.meta.url)) {
   exitCleanlyOnCtrlC();
+  // A paused bot has no socket to keep the process alive; this keeps it running until Ctrl+C.
+  const keepAlive = setInterval(() => {}, 2 ** 30);
   startBot({ groupName: parseRunArgs(process.argv.slice(2)).group }).catch((error) => {
+    clearInterval(keepAlive);
     console.error(error?.stack || error?.message || error);
     process.exitCode = 1;
   });

@@ -6,7 +6,10 @@ import qrcode from 'qrcode-terminal';
 import { installConsoleFilter } from './console-filter.js';
 import { dataPaths, resolveDataDir } from './data-dir.js';
 import { isQrMode, normalizeLinkPhone, parsePhoneHints, persistTesterPhone, resolveLinkPhone } from './link-phone.js';
-import { archiveLoggedOutSession } from './session-archive.js';
+import { createDisconnectTracker } from './disconnect-brake.js';
+import { appendEvent } from './event-log.js';
+import { createPauseStore } from './pause-state.js';
+import { createSupervisor } from './session-supervisor.js';
 import { hasSavedSession } from './session-selection.js';
 import { rememberVoiceTranscript } from './voice-transcripts.js';
 import { WaClient } from './wa-client.js';
@@ -41,8 +44,8 @@ export const RESULTS_DIR = DATA.resultsDir;
 const EVENTS_FILE = path.join(RESULTS_DIR, 'events.jsonl');
 
 const activeClients = new Set();
-// Sessions already relinked after a logout in this run (only one automatic relink per session).
-const relinkedThisRun = new Set();
+// Live client of each session id, so a pause can close the right socket.
+const clientsById = new Map();
 let shutdownPromise = null;
 
 // Baileys can reject in-flight requests when a socket drops (the session reconnects on its own).
@@ -56,11 +59,15 @@ process.on('unhandledRejection', (reason) => {
   throw reason;
 });
 
+// True once the run is closing its sessions: nothing may reconnect after that.
+export const isShuttingDown = () => shutdownPromise !== null;
+
 export async function stopAllClients() {
   if (shutdownPromise) return shutdownPromise;
 
   const clients = [...activeClients];
   activeClients.clear();
+  clientsById.clear();
   shutdownPromise = Promise.allSettled(
     clients.map(async (client) => {
       try {
@@ -78,14 +85,41 @@ export async function stopAllClients() {
 // Append-only session event log (ready / qr / disconnected / auth_failure) used by health.js.
 // Logging must never break a run, so every failure is swallowed.
 export function logEvent(session, event, detail) {
+  appendEvent(EVENTS_FILE, session, event, detail);
+}
+
+// Persistent pause state of the numbers (<data dir>/warmup-pauses.json) and the rules that change it.
+// A paused number sends nothing and its socket is closed and not reopened until it is resumed.
+export const pauseStore = createPauseStore({ file: DATA.pausesFile });
+
+function phoneOf(id) {
   try {
-    fs.mkdirSync(path.dirname(EVENTS_FILE), { recursive: true });
-    const entry = { at: new Date().toISOString(), session, event };
-    if (detail !== undefined && detail !== null) entry.detail = String(detail);
-    fs.appendFileSync(EVENTS_FILE, `${JSON.stringify(entry)}\n`, 'utf8');
+    return resolveSessionPhone(loadConfig(), id);
   } catch {
-    // Ignore: the event log is best effort.
+    return null;
   }
+}
+
+export const supervisor = createSupervisor({
+  store: pauseStore,
+  tracker: createDisconnectTracker(),
+  fleetSize: () => activeClients.size,
+  logEvent,
+  stopSession: (id) => {
+    const client = clientsById.get(id);
+    if (client) void stopClient(client);
+  },
+  numberOf: phoneOf,
+});
+
+// Heartbeat (to notice a frozen process) and periodic sweep (timed pauses end, the brake is judged).
+let backgroundTimers = false;
+function ensureBackgroundTimers() {
+  if (backgroundTimers) return;
+  backgroundTimers = true;
+  supervisor.beat();
+  setInterval(() => supervisor.beat(), 10_000).unref();
+  setInterval(() => supervisor.sweep(), 60_000).unref();
 }
 
 export function readEvents() {
@@ -109,6 +143,7 @@ export function readEvents() {
 // Close one session early (health.js opens them one at a time to save memory).
 export async function stopClient(client) {
   activeClients.delete(client);
+  for (const [id, current] of clientsById) if (current === client) clientsById.delete(id);
   try {
     await client.destroy();
   } catch (error) {
@@ -220,8 +255,10 @@ export function startClient(
     linkMode = process.env.LINK_MODE,
     persistPhone = (args) => persistTesterPhone({ configFile: CONFIG_FILE, ...args }),
     maxPairingAttempts = MAX_PAIRING_ATTEMPTS,
+    supervisor: rules = supervisor,
   } = {},
 ) {
+  ensureBackgroundTimers();
   // Only a session that was really linked can be "logged out"; an unlinked one needs a pairing code.
   const wasLinked = hasSavedSession(authRoot, id);
   const qrMode = isQrMode(linkMode);
@@ -268,6 +305,7 @@ export function startClient(
   });
 
   activeClients.add(client);
+  clientsById.set(id, client);
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -295,6 +333,7 @@ export function startClient(
       settled = true;
       cleanupTimers();
       activeClients.delete(client);
+      if (clientsById.get(id) === client) clientsById.delete(id);
       withTimeout(client.destroy(), 15_000, 'Closing a stuck session')
         .catch(() => {})
         .finally(() => reject(error));
@@ -370,42 +409,32 @@ export function startClient(
       cleanupTimers();
       console.log(`[${id}] ready`);
       logEvent(id, 'ready');
+      rules.markStarted(id);
       resolve(client);
     });
 
     client.on('disconnected', (reason) => {
       console.warn(`[${id}] disconnected: ${reason}`);
       logEvent(id, 'disconnected', reason);
+      // LOGOUT is handled by 'logged_out'; CONFLICT and FATAL do not reconnect, so they are not flapping.
+      if (!/^(LOGOUT|CONFLICT|FATAL)/.test(String(reason))) rules.onDisconnect(id, String(reason));
     });
 
     client.on('logged_out', () => {
+      // WhatsApp ended this session. The number is paused until a human resumes it: nothing is archived,
+      // deleted or linked again automatically, and no QR or pairing code is requested.
+      if (wasLinked || isReady) rules.onLoggedOut(id);
       if (isReady) return;
 
-      if (wasLinked && !relinkedThisRun.has(id) && !settled) {
-        // WhatsApp ended this session: keep it in _logged_out and link the number again from scratch.
-        relinkedThisRun.add(id);
-        settled = true;
-        cleanupTimers();
-        activeClients.delete(client);
-        withTimeout(client.destroy(), 15_000, 'Closing a logged-out session')
-          .catch(() => {})
-          .then(() => {
-            const archived = archiveLoggedOutSession(authRoot, id);
-            console.warn(
-              `[${id}] WhatsApp logged this session out; it was moved to ${archived ?? '(nothing to move)'} ` +
-                'and the number will be linked again.',
-            );
-            logEvent(id, 'logged_out_relink');
-            return startClient(id, { authRoot, clientFactory });
-          })
-          .then(resolve, reject);
-        return;
-      }
-
       fail(
-        new Error(
-          `[${id}] WhatsApp logged this number out. Close this run, delete ".baileys_auth\\${id}", ` +
-            `remove old entries in WhatsApp > Linked devices on that phone, and link it again with a pairing code.`,
+        Object.assign(
+          new Error(
+            wasLinked
+              ? `[${id}] WhatsApp logged this number out. It is paused and its saved session was left untouched. ` +
+                  'Link it again yourself, then resume it.'
+              : `[${id}] WhatsApp logged this number out before it was linked. Link it again with a pairing code.`,
+          ),
+          { code: 'LOGGED_OUT' },
         ),
       );
     });

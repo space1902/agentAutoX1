@@ -1,7 +1,7 @@
 import { AnimatePresence } from "framer-motion";
 import { ArrowLeft, ArrowRight, Check, Copy, Flame, Link2, Loader2, MessagesSquare, Pencil, Play, Plus, RefreshCw, Square, Trash2, TriangleAlert, Users } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { HealthBadge, useLineHealth } from "../components/Health";
+import { HealthBadge, ScheduleList, useLineHealth, useScheduleStatus } from "../components/Health";
 import { DuplicateBanner } from "../components/DuplicateBanner";
 import LinkPodsModal from "../components/LinkPods";
 import { Modal, Warning } from "../components/Modal";
@@ -31,11 +31,13 @@ export default function CalentadorBots({ running, profile, logs, pairing, onClea
   const [dialog, setDialog] = useState<Dialog>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const health = useLineHealth();
+  const schedule = useScheduleStatus();
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     void health.reload();
+    void schedule.reload();
     try {
       const overview = await api.profilesOverview();
       setData(overview.data);
@@ -178,6 +180,7 @@ export default function CalentadorBots({ running, profile, logs, pairing, onClea
                     );
                   })}
                 </div>
+                <ScheduleList ids={[...p.testers.map((t) => t.id), "bot"]} schedule={schedule} live={isThis} />
                 {isThis && pairing.map((c) => <PairingCodeCard key={c.id} card={c} />)}
                 <div className="row-actions">
                   {isThis ? (

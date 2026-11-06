@@ -237,6 +237,40 @@ export interface LineHealthData {
   lines: Record<string, LineHealth>;
 }
 
+/** What a number is doing now: sending, waiting for its window, done for the day, or taken out of the cycle. */
+export type ScheduleState = "active" | "outside_window" | "capped" | "paused";
+
+export interface PauseInfo {
+  /** logged_out (WhatsApp ended the session), repeated_disconnects (brake) or manual. */
+  reason: string;
+  /** engine or user. */
+  source: string;
+  since: string;
+  /** null = until someone resumes it. */
+  until: string | null;
+  detail: string | null;
+}
+
+export interface SessionSchedule {
+  state: ScheduleState;
+  pause: PauseInfo | null;
+  /** Messages sent today (local day of the number's time zone). */
+  count: number;
+  /** Today's cap; null when the schedule is off. */
+  cap: number | null;
+  low: boolean;
+  window: { startAt: string; endAt: string } | null;
+  nextOpenAt: string | null;
+  timezone: string;
+}
+
+export interface ScheduleStatus {
+  generatedAt: string;
+  enabled: boolean;
+  sessions: Record<string, SessionSchedule>;
+  warnings: string[];
+}
+
 /** Result of "Reiniciar pods". */
 export interface PodsResetReport {
   restarted: string[];
@@ -258,7 +292,7 @@ export const api = {
   getDefaultSettings: () => invoke<Settings>("get_default_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
   listPods: () => invoke<Pod[]>("list_pods"),
-  podAction: (action: "prender" | "apagar" | "ver" | "abrir-wa", name: string) =>
+  podAction: (action: "prender" | "apagar" | "ver" | "abrir-wa" | "reinstalar-wa", name: string) =>
     invoke<string>("pod_action", { action, name }),
   resetPods: () => invoke<PodsResetReport>("reset_pods"),
   createPod: (name: string, phone: string) => invoke<string>("create_pod", { name, phone }),
@@ -289,6 +323,9 @@ export const api = {
   keepAliveStatus: () => invoke<KeepAliveStatus>("keepalive_status"),
   setKeepAlive: (enabled: boolean) => invoke<KeepAliveStatus>("set_keep_alive", { enabled }),
   lineHealth: () => invoke<LineHealthData>("line_health"),
+  scheduleStatus: () => invoke<ScheduleStatus>("schedule_status"),
+  testerPause: (id: string, hours: number | null = null) => invoke<unknown>("tester_pause", { id, hours }),
+  testerResume: (id: string) => invoke<unknown>("tester_resume", { id }),
   readWarmupData: () => invoke<WarmupData>("read_warmup_data"),
   readPodsWsp: () => invoke<Record<string, string>>("read_pods_wsp"),
   warmupStatus: () => invoke<WarmupStatus>("warmup_status"),

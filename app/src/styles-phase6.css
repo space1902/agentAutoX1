@@ -281,3 +281,13 @@
 .rm-ct { width: 110px; }
 .rs-launch { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .rs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+
+/* Schedule per number: state, messages today / cap, Pausar and Reanudar. */
+.sched { margin-bottom: 16px; }
+.sched-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.sched-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.sched-id { font-weight: 600; min-width: 64px; }
+.sched-count { font-variant-numeric: tabular-nums; }
+.sched-detail { flex: 1; min-width: 120px; }
+.sched-note { font-size: 12px; margin: 0 0 6px; }
+.sched-note.error { color: var(--red); }

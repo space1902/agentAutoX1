@@ -5,24 +5,24 @@ import { buildRegistry, phoneKey } from './registry.js';
 
 const config = {
   groupName: 'Calentamiento',
-  botNumber: '573167585233',
-  testers: ['tester1', { id: 'tester2', phone: '573042370764' }, { id: 'tester3', phone: '573001112233' }],
+  botNumber: '573000000002',
+  testers: ['tester1', { id: 'tester2', phone: '573000000001' }, { id: 'tester3', phone: '573001112233' }],
 };
 const profiles = {
   uno: { testers: ['tester2'], groupName: 'Grupo A' },
   dos: { testers: ['tester2', 'tester3'] },
 };
 const pods = [
-  { name: 'pod1', instanceId: 'Rvc64_1', state: 'running', phone: '3042370764' },
+  { name: 'pod1', instanceId: 'Rvc64_1', state: 'running', phone: '3000000001' },
   { name: 'pod2', instanceId: 'Rvc64_2', state: 'stopped', phone: '3109998877' },
   { name: 'pod3', instanceId: 'Rvc64_3', state: 'stopped', phone: null },
 ];
 const hasSession = (id) => id === 'tester2';
 
 test('phoneKey treats 57XXXXXXXXXX and XXXXXXXXXX as the same line', () => {
-  assert.equal(phoneKey('573042370764'), '3042370764');
-  assert.equal(phoneKey('304 237 0764'), '3042370764');
-  assert.equal(phoneKey('+57 304 237 0764'), '3042370764');
+  assert.equal(phoneKey('573000000001'), '3000000001');
+  assert.equal(phoneKey('300 000 0001'), '3000000001');
+  assert.equal(phoneKey('+57 300 000 0001'), '3000000001');
   assert.equal(phoneKey('14155550123'), '14155550123');
   assert.equal(phoneKey('abc'), '');
   assert.equal(phoneKey(null), '');
@@ -30,7 +30,7 @@ test('phoneKey treats 57XXXXXXXXXX and XXXXXXXXXX as the same line', () => {
 
 test('merges pod, tester, session, profiles and groups into one row per phone', () => {
   const { rows } = buildRegistry({ config, profiles, pods, hasSession });
-  const row = rows.find((r) => r.key === '3042370764');
+  const row = rows.find((r) => r.key === '3000000001');
   assert.equal(row.source, 'pod');
   assert.equal(row.pod.name, 'pod1');
   assert.equal(row.pod.state, 'running');
@@ -65,10 +65,10 @@ test('flags the bot number', () => {
   const out = buildRegistry({
     config,
     profiles,
-    pods: [...pods, { name: 'bot', instanceId: 'Rvc64_9', state: 'stopped', phone: '3167585233' }],
+    pods: [...pods, { name: 'bot', instanceId: 'Rvc64_9', state: 'stopped', phone: '3000000002' }],
     hasSession,
   });
-  const bot = out.rows.find((r) => r.key === '3167585233');
+  const bot = out.rows.find((r) => r.key === '3000000002');
   assert.equal(bot.isBot, true);
   assert.equal(out.rows.filter((r) => r.isBot).length, 1);
 });
@@ -117,7 +117,7 @@ test('config phone wins over the session phone and a difference is flagged as mi
   const { testers } = buildRegistry({
     config,
     pods,
-    sessionPhoneOf: (id) => (id === 'tester3' ? '573009998877' : id === 'tester2' ? '573042370764' : null),
+    sessionPhoneOf: (id) => (id === 'tester3' ? '573009998877' : id === 'tester2' ? '573000000001' : null),
   });
   assert.equal(testers.tester3.phone, '573001112233');
   assert.equal(testers.tester3.phoneSource, 'config');
@@ -140,7 +140,7 @@ test('testers sharing a number are reported as duplicates of each other', () => 
 });
 
 test('a tester using the bot number is a duplicate of the bot', () => {
-  const botConfig = { botNumber: '573167585233', testers: [{ id: 'tester1', phone: '3167585233' }, 'tester2'] };
+  const botConfig = { botNumber: '573000000002', testers: [{ id: 'tester1', phone: '3000000002' }, 'tester2'] };
   const { testers, duplicates } = buildRegistry({ config: botConfig, sessionPhoneOf: () => null });
   assert.deepEqual(testers.tester1.duplicateOf, ['bot']);
   assert.deepEqual(duplicates[0].members, ['bot', 'tester1']);
@@ -148,8 +148,8 @@ test('a tester using the bot number is a duplicate of the bot', () => {
 });
 
 test('the bot session phone is used when the config has no bot number', () => {
-  const botConfig = { testers: [{ id: 'tester1', phone: '3167585233' }] };
-  const { testers } = buildRegistry({ config: botConfig, sessionPhoneOf: (id) => (id === 'bot' ? '573167585233' : null) });
+  const botConfig = { testers: [{ id: 'tester1', phone: '3000000002' }] };
+  const { testers } = buildRegistry({ config: botConfig, sessionPhoneOf: (id) => (id === 'bot' ? '573000000002' : null) });
   assert.deepEqual(testers.tester1.duplicateOf, ['bot']);
 });
 

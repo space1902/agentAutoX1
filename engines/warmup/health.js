@@ -6,6 +6,7 @@
 import {
   exitCleanlyOnCtrlC,
   loadConfig,
+  pauseStore,
   readEvents,
   resolveGroupId,
   sleep,
@@ -171,6 +172,13 @@ async function main() {
 
   for (const session of sessions) {
     try {
+      // A paused number keeps its socket closed, also for the health report.
+      const pause = pauseStore.get(session);
+      if (pause) {
+        console.warn(`[${session}] is paused (${pause.reason}); not connecting it. Resume it first to include it.`);
+        accounts.push({ session, error: `paused (${pause.reason})` });
+        continue;
+      }
       console.log(`\nStarting ${session}...`);
       const client = await startClient(session);
       const account = await analyzeClient(session, client, {

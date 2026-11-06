@@ -155,3 +155,37 @@ test('buildLineHealth takes the earliest of ready event, csv row and sent messag
   assert.equal(out.tester1.stats.firstActivityAt, '2026-10-01T08:00:00.000Z');
   assert.equal(out.tester1.stats.days, 28);
 });
+
+test('paused / resumed events are not incidents: no extra disconnects, relinks or double counting', () => {
+  const base = [
+    { at: '2026-10-10T10:00:00.000Z', session: 'tester1', event: 'ready' },
+    { at: '2026-10-27T10:00:00.000Z', session: 'tester1', event: 'disconnected', detail: 'LOGOUT' },
+  ];
+  const run = (extra) =>
+    buildLineHealth({
+      testerIds: ['tester1'],
+      linkedOf: () => true,
+      events: [...base, ...extra],
+      activityOf: () => ({ messages: [], earliestSent: null }),
+      csvTexts: [],
+      now: NOW,
+    }).tester1;
+
+  const plain = run([]);
+  const withBrake = run([
+    { at: '2026-10-27T10:05:00.000Z', session: 'tester1', event: 'paused', detail: 'repeated_disconnects; source=engine' },
+    { at: '2026-10-27T16:05:00.000Z', session: 'tester1', event: 'resumed', detail: 'expired' },
+  ]);
+  assert.equal(withBrake.stats.disconnected, plain.stats.disconnected);
+  assert.equal(withBrake.stats.relinks, 0);
+  assert.equal(withBrake.score, plain.score);
+  assert.equal(withBrake.severeRecent, false);
+
+  // A logout pause is the same event as before (WhatsApp ended the session): it flags the line as severe,
+  // without adding another disconnect or relink to the penalty.
+  const loggedOut = run([{ at: '2026-10-27T10:00:01.000Z', session: 'tester1', event: 'paused', detail: 'logged_out; source=engine' }]);
+  assert.equal(loggedOut.severeRecent, true);
+  assert.equal(loggedOut.stats.disconnected, plain.stats.disconnected);
+  assert.equal(loggedOut.stats.relinks, 0);
+  assert.equal(loggedOut.light, 'rojo');
+});

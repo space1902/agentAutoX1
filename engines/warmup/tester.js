@@ -7,12 +7,15 @@ import { generateUsableMessage } from './local-model.js';
 import {
   DATA_DIR,
   RESULTS_DIR,
+  cachedGroupId,
   digitsOnly,
   exitCleanlyOnCtrlC,
   formatVoiceLine,
   isEntryPoint,
+  isShuttingDown,
   isVoiceMessage,
   loadConfig,
+  pauseStore,
   readEvents,
   resolveGroupId,
   sendLikeHuman,
@@ -20,6 +23,7 @@ import {
   sleep,
   startClient,
   stopAllClients,
+  stopClient,
   waitForVoiceTranscript,
   withTimeout,
 } from './lib.js';
@@ -49,6 +53,10 @@ import {
   writeHealthReport,
 } from './health-analysis.js';
 import { accountFromRecentReport, trendForReport } from './health-metrics.js';
+import { sessionAge } from './session-age.js';
+import { normalizeSchedule, resolveTimezone } from './activity-schedule.js';
+import { createSendGate } from './send-gate.js';
+import { readActivity } from './wa-activity.js';
 import {
   describePaceChange,
   estimateRates,
@@ -57,6 +65,7 @@ import {
   hourlyWaitMs,
   initialOffsetMs,
   nextDelayMs,
+  backoffMs,
   normalizeAutoPacing,
   createLimiter,
   pickPacing,
@@ -71,6 +80,17 @@ const HISTORY_LIMIT = 15;
 const MAX_TOKENS = 120;
 const ANALYSIS_TIMEOUT_MS = 3 * 60_000;
 const MAX_CONCURRENT_ANALYSES = 3;
+// How often a paused or idle tester looks at the pause file and the clock. Long enough to be cheap,
+// short enough that Reanudar from the app takes effect within a few seconds.
+const PAUSE_POLL_MS = 15_000;
+const IDLE_POLL_MS = 60_000;
+// A session that could not reconnect after its pause ended is retried this often.
+const REVIVE_RETRY_MS = 5 * 60_000;
+// Group membership that cannot be confirmed: wait 5 min, then 10, 20 ... up to 1 h (never a 5 s retry).
+const MEMBERSHIP_RETRY_MS = 5 * 60_000;
+const MEMBERSHIP_RETRY_MAX_MS = 60 * 60_000;
+// The daily-cap age is re-read this often.
+const AGE_REFRESH_MS = 60 * 60_000;
 
 const TOPICS = [
   'recetas fáciles para preparar en casa',
@@ -97,6 +117,40 @@ const PERSONAS = [
   'Eres una persona interesada en cocinar que hace preguntas variadas.',
   'Eres una persona indecisa que necesita aclarar algunas dudas.',
 ];
+
+// A socket that was closed (paused, destroyed) or never opened.
+const clientDead = (client) => !client || client.stopped === true;
+
+const PAUSE_REASON_TEXT = {
+  logged_out: 'WhatsApp logged the session out',
+  repeated_disconnects: 'too many disconnects',
+  manual: 'paused by the user',
+};
+
+function describePause(pause) {
+  const why = PAUSE_REASON_TEXT[pause.reason] ?? pause.reason;
+  return pause.until ? `${why}, until ${pause.until}` : why;
+}
+
+const hhmm = (minutes) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+
+const clock = (ms, timeZone) =>
+  new Intl.DateTimeFormat('en-GB', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(ms));
+
+// Age and real incidents for the daily cap. Same function the app uses (session-age.js), refreshed on its
+// own schedule whether or not auto pacing is on. Raw disconnects/QR events are not incidents here.
+function readAge(id) {
+  try {
+    return sessionAge({
+      session: id,
+      events: readEvents(),
+      earliestSentSeconds: readActivity(RESULTS_DIR, id, Number.MAX_SAFE_INTEGER).earliestSent,
+      now: new Date(),
+    });
+  } catch {
+    return null;
+  }
+}
 
 function loadTesterConfig() {
   const config = {
@@ -142,6 +196,8 @@ function loadTesterConfig() {
   );
 
   config.autoPacing = normalizeAutoPacing(config.autoPacing);
+  // Activity window and daily caps; every field has a default, so an unedited config.json works.
+  config.schedule = normalizeSchedule(config.schedule);
 
   if (!Array.isArray(config.testers) || !config.testers.length) {
     throw new Error('No testers configured in the configuration file.');
@@ -213,7 +269,8 @@ function createCsvLog() {
   };
 }
 
-function createConversationObserver(observer, groupId, botNumber) {
+// getGroupId: the group may be resolved after the observer exists (every number paused at start).
+function createConversationObserver(getGroupId, botNumber) {
   let botReplyTotal = 0;
   const history = [];
 
@@ -240,9 +297,9 @@ function createConversationObserver(observer, groupId, botNumber) {
     if (history.length > 100) history.splice(0, history.length - 100);
   }
 
-  observer.on('message', async (msg) => {
+  const onMessage = async (msg) => {
     const isVoice = !msg.body?.trim() && isVoiceMessage(msg);
-    if (msg.from !== groupId || (!msg.body?.trim() && !isVoice)) return;
+    if (msg.from !== getGroupId() || (!msg.body?.trim() && !isVoice)) return;
 
     try {
       const authorNumber = digitsOnly(msg.author);
@@ -268,10 +325,15 @@ function createConversationObserver(observer, groupId, botNumber) {
         );
       }
     }
-  });
+  };
 
   return {
     history,
+
+    // Listens to the group through this client (a paused client is replaced by another live one).
+    attach(client) {
+      client.on('message', onMessage);
+    },
 
     rememberOwnMessage(author, text) {
       remember(author, text);
@@ -376,11 +438,55 @@ export async function runTests({
   const ai = createAi({ config, dataDir: DATA_DIR });
   const sessions = [];
 
+  // A tester session. client is null while the number is paused: it is not connected and will be
+  // reconnected by its own loop when the pause ends.
+  const newSession = (settings, configuredTester, client) => {
+    const session = {
+      id: settings.id,
+      client,
+      sentAt: [],
+      messagesSent: 0,
+      entry: configuredTester,
+      baseSettings: settings,
+      settings,
+      pacingMode: 'off',
+      pacingReason: 'auto pacing disabled',
+      lastAnalysisAt: null,
+      lastFailed: false,
+      ready: Promise.resolve(),
+      // { days, incidents }: set from the health analysis; until then a rough age from the activity log.
+      age: readAge(settings.id),
+      ageAt: Date.now(),
+      // Group membership must be confirmed before a number that was not connected at start sends.
+      needsMembership: !client,
+      membershipFailures: 0,
+      heldUntil: 0,
+      nextReviveAt: 0,
+      lastState: null,
+    };
+    session.gate = createSendGate({
+      sessionId: settings.id,
+      schedule: config.schedule,
+      timezone: resolveTimezone(config.schedule, configuredTester),
+      resultsDir: RESULTS_DIR,
+      getAge: () => session.age,
+    });
+    return session;
+  };
+
   try {
     for (const configuredTester of config.testers) {
       const settings = resolveTesterSettings(configuredTester, config);
 
       if (!settings) continue;
+
+      // A paused number is not connected at all: no socket, no reconnects, no pairing code.
+      const pause = pauseStore.get(settings.id);
+      if (pause) {
+        console.warn(`[${settings.id}] is paused (${describePause(pause)}); it stays disconnected until it is resumed.`);
+        sessions.push(newSession(settings, configuredTester, null));
+        continue;
+      }
 
       // A session that cannot connect must not take down the whole run:
       // retry once, then skip this tester and keep going with the others.
@@ -390,7 +496,9 @@ export async function runTests({
           client = await startClient(settings.id);
         } catch (error) {
           // No phone / codes never entered: retrying right away cannot help, skip this tester for this run.
-          if (error?.code === 'NO_PHONE' || error?.code === 'PAIRING_EXPIRED') {
+          // A logged-out number is already paused (and untouched): connecting it again would only repeat the 401.
+          if (error?.code === 'NO_PHONE' || error?.code === 'PAIRING_EXPIRED' || error?.code === 'LOGGED_OUT') {
+            if (error.code === 'LOGGED_OUT') console.warn(error.message);
             if (error.code === 'PAIRING_EXPIRED') console.warn(error.message);
             break;
           }
@@ -399,25 +507,17 @@ export async function runTests({
         }
       }
 
+      if (!client && pauseStore.get(settings.id)) {
+        sessions.push(newSession(settings, configuredTester, null));
+        continue;
+      }
+
       if (!client) {
         console.warn(`[${settings.id}] skipped for this run. Its saved session is kept; it will be retried on the next run.`);
         continue;
       }
 
-      sessions.push({
-        id: settings.id,
-        client,
-        sentAt: [],
-        messagesSent: 0,
-        entry: configuredTester,
-        baseSettings: settings,
-        settings,
-        pacingMode: 'off',
-        pacingReason: 'auto pacing disabled',
-        lastAnalysisAt: null,
-        lastFailed: false,
-        ready: Promise.resolve(),
-      });
+      sessions.push(newSession(settings, configuredTester, client));
     }
 
     if (!sessions.length) {
@@ -430,11 +530,16 @@ export async function runTests({
     }
 
     // The bot is always in the group; a tester might not be (yet), so it must not resolve the group.
-    const groupId = groupIdOption ?? (await resolveGroupId(botClient ?? sessions[0].client, config, { groupName }));
+    // With every number paused there may be no live client: the id is then resolved when one reconnects.
+    const firstLive = () => sessions.find((s) => !clientDead(s.client));
+    const resolver = botClient ?? firstLive()?.client ?? null;
+    let groupId = groupIdOption ?? (resolver ? await resolveGroupId(resolver, config, { groupName }) : cachedGroupId(config, groupName));
 
-    if (botClient) {
-      const { ready, skipped } = await ensureTestersInGroup({ botClient, groupId, groupName, sessions });
-      sessions.splice(0, sessions.length, ...ready);
+    if (botClient && groupId) {
+      const live = sessions.filter((s) => !clientDead(s.client));
+      const paused = sessions.filter((s) => clientDead(s.client));
+      const { ready, skipped } = await ensureTestersInGroup({ botClient, groupId, groupName, sessions: live });
+      sessions.splice(0, sessions.length, ...ready, ...paused);
       if (!sessions.length) {
         throw new Error(
           `No tester is a member of "${groupName}" (skipped: ${skipped.map((s) => s.id).join(', ')}). ` +
@@ -443,18 +548,33 @@ export async function runTests({
       }
     }
 
-    const observer = createConversationObserver(
-      sessions[0].client,
-      groupId,
-      config.botNumber,
-    );
+    const observer = createConversationObserver(() => groupId, config.botNumber);
+    let observedClient = null;
+    // Listen to the group through one live client; when it is paused, move to another live one.
+    const rebindObserver = () => {
+      if (observedClient && !clientDead(observedClient)) return;
+      const target = firstLive();
+      if (!target) return;
+      observer.attach(target.client);
+      observedClient = target.client;
+    };
+    rebindObserver();
 
     const log = createCsvLog();
 
     console.log(`\nGroup found: ${groupName}`);
     console.log(`Model: ${ai.label}`);
     console.log(`Testers: ${sessions.map((s) => s.id).join(', ')}`);
+    const pausedAtStart = sessions.filter((s) => clientDead(s.client)).map((s) => s.id);
+    if (pausedAtStart.length) console.log(`Paused (not connected): ${pausedAtStart.join(', ')}`);
     console.log(`Results: ${log.file}`);
+    console.log(
+      config.schedule.enabled
+        ? `[schedule] on: window per number and day (about ${hhmm(config.schedule.start.min)}-${hhmm(config.schedule.start.max)} to ` +
+            `${hhmm(config.schedule.end.min)}-${hhmm(config.schedule.end.max)}, ${config.schedule.timezone} unless a tester sets its own), ` +
+            `daily caps ${config.schedule.caps.map((c) => c.cap).join('/')} by age.`
+        : '[schedule] off (config.schedule.enabled = false): no activity window and no daily cap.',
+    );
 
     // Voice notes: one distinct voice per tester (the bot's voice is kept out of the pool).
     const botVoice = config.bot?.voice || DEFAULT_BOT_VOICE;
@@ -657,7 +777,8 @@ export async function runTests({
       const startedAt = new Date();
 
       // One analysis per tester, in parallel; each tester's loop waits only for its own.
-      const analyses = sessions.map((session) => {
+      const analyzed = sessions.filter((s) => !clientDead(s.client));
+      const analyses = analyzed.map((session) => {
         const promise = (async () => {
           const account = await analyzeSafely(session.id, session.client);
           try {
@@ -683,7 +804,7 @@ export async function runTests({
           console.log('\n=== Pacing from health ===');
           console.log(
             formatPacingTable(
-              sessions.map((session, index) => ({
+              analyzed.map((session, index) => ({
                 id: session.id,
                 number: accounts[index].number,
                 phase: accounts[index].phase?.phase,
@@ -707,6 +828,7 @@ export async function runTests({
       const estimate = estimateRates(sessions.map((s) => s.settings));
       console.log(formatEstimate(estimate));
     }
+    // Paused numbers have no analysis yet; their first recheck runs when they reconnect.
 
     console.log(
       `Each tester sends on its own schedule (staggered start, up to its max delay).\n`,
@@ -721,6 +843,12 @@ export async function runTests({
 
     async function sendOneMessage(session, persona) {
       return lock(async () => {
+        // The number may have been paused while this turn waited for the lock.
+        if (clientDead(session.client) || pauseStore.get(session.id)) {
+          throw Object.assign(new Error('paused'), { code: 'SESSION_PAUSED' });
+        }
+        if (!groupId) throw new Error('The warm-up group is not resolved yet.');
+
         // Avoid picking the same topic twice in a row.
         let topic;
         do {
@@ -770,6 +898,7 @@ export async function runTests({
 
         session.sentAt.push(sentAt);
         session.messagesSent++;
+        session.gate.recordSent();
 
         // Keep our own outgoing message in the conversation context.
         observer.rememberOwnMessage(
@@ -816,6 +945,118 @@ export async function runTests({
       });
     }
 
+    // A long wait ends early when the run stops or the app pauses this number (Pausar), so a pause
+    // takes effect within a second or two instead of after the current pacing delay.
+    const stillGoing = (session) => () => !control.stopped && !pauseStore.get(session.id);
+
+    // Logs a state change once (not on every poll).
+    function noteState(session, key, text) {
+      if (session.lastState === key) return;
+      session.lastState = key;
+      console.log(`[${session.id}] ${text}`);
+    }
+
+    // True when this tester is a member of the warm-up group. The bot (admin) can add it; without a live
+    // bot the tester's own view of the member list is used. Anything uncertain counts as "not confirmed".
+    async function confirmMembership(session) {
+      if (!groupId || clientDead(session.client)) return false;
+      try {
+        if (botClient && !clientDead(botClient)) {
+          const { ready } = await ensureTestersInGroup({ botClient, groupId, groupName, sessions: [session] });
+          return ready.length > 0;
+        }
+        const members = await session.client.groupMembers(groupId);
+        const phone = session.client.info?.wid?.user;
+        const lid = session.client.info?.wid?.lid;
+        return Boolean((phone && members.phones.includes(phone)) || (lid && members.lids.includes(lid)));
+      } catch {
+        return false;
+      }
+    }
+
+    // Reconnects a session whose pause ended. Returns true when it is live again. A number that WhatsApp
+    // logged out is paused again by startClient itself, so this never loops on a dead session.
+    async function reviveSession(session) {
+      if (control.stopped || isShuttingDown()) return false;
+      try {
+        const client = await startClient(session.id);
+        session.client = client;
+        session.lastAnalysisAt = null; // analyze it again with the live client
+        session.needsMembership = true; // it skipped the start-up group check
+        if (!groupId) groupId = await resolveGroupId(client, config, { groupName });
+        rebindObserver();
+        console.log(`[${session.id}] reconnected after its pause.`);
+        return true;
+      } catch (error) {
+        session.nextReviveAt = Date.now() + REVIVE_RETRY_MS;
+        console.warn(`[${session.id}] could not reconnect after its pause (${error?.message || error}); retrying in 5 min.`);
+        return false;
+      }
+    }
+
+    // Waits until this tester may send: not paused, connected, inside its window and under its daily cap.
+    // Returns null when the run was stopped. Idle waits are short polls that honor stop, never a busy loop.
+    async function waitUntilAllowed(session) {
+      while (!control.stopped) {
+        rebindObserver();
+
+        const pause = pauseStore.get(session.id);
+        if (pause) {
+          if (!clientDead(session.client)) await stopClient(session.client);
+          noteState(session, `paused:${pause.since}`, `paused (${describePause(pause)}); idle until it is resumed.`);
+          await sleepWhile(() => !control.stopped, PAUSE_POLL_MS);
+          continue;
+        }
+
+        if (clientDead(session.client)) {
+          if (Date.now() < session.nextReviveAt || !(await reviveSession(session))) {
+            await sleepWhile(() => !control.stopped, PAUSE_POLL_MS);
+            continue;
+          }
+        }
+
+        // A number that was not connected at start (or just reconnected) must be in the group before it
+        // sends. If that cannot be confirmed it stays out, retrying with a growing wait (5 min up to 1 h).
+        if (session.needsMembership) {
+          if (Date.now() < session.heldUntil) {
+            noteState(session, 'held', 'not confirmed as a member of the group yet; waiting before it checks again.');
+            await sleepWhile(() => !control.stopped, PAUSE_POLL_MS);
+            continue;
+          }
+          if (await confirmMembership(session)) {
+            session.needsMembership = false;
+            session.membershipFailures = 0;
+          } else {
+            session.heldUntil = Date.now() + backoffMs(session.membershipFailures++, MEMBERSHIP_RETRY_MS, MEMBERSHIP_RETRY_MAX_MS);
+            noteState(session, 'held', 'could not confirm it is a member of the group; it will not send and checks again later.');
+            continue;
+          }
+        }
+
+        if (Date.now() - session.ageAt > AGE_REFRESH_MS) {
+          session.age = readAge(session.id) ?? session.age;
+          session.ageAt = Date.now();
+        }
+
+        const gate = session.gate.check();
+        if (gate.state === 'active') {
+          noteState(session, 'active', `active: ${gate.count}/${gate.cap ?? 'no cap'} messages today${gate.low ? ' (low-activity day)' : ''}.`);
+          return gate;
+        }
+
+        const opens = gate.nextOpenMs ? clock(gate.nextOpenMs, resolveTimezone(config.schedule, session.entry)) : '?';
+        noteState(
+          session,
+          `${gate.state}:${gate.dateKey}`,
+          gate.state === 'capped'
+            ? `daily cap reached (${gate.count}/${gate.cap}); idle until ${opens}.`
+            : `outside its activity window; idle until ${opens}.`,
+        );
+        await sleepWhile(() => !control.stopped, Math.min(IDLE_POLL_MS, Math.max(1000, (gate.nextOpenMs ?? 0) - Date.now())));
+      }
+      return null;
+    }
+
     async function runTesterLoop(session, persona) {
       // Wait only for this tester's own analysis (no-op when auto pacing is off).
       await untilSettledOrStopped(session.ready);
@@ -827,6 +1068,8 @@ export async function runTests({
       );
 
       while (!control.stopped) {
+        if (!(await waitUntilAllowed(session))) break;
+
         if (
           autoPacing.enabled &&
           recheckDue(
@@ -852,13 +1095,20 @@ export async function runTests({
             console.log(
               `[${session.id}] hourly limit reached; pausing about ${Math.ceil(waitMs / 60000)} min`,
             );
-            await sleepWhile(() => !control.stopped, waitMs);
+            await sleepWhile(stillGoing(session), waitMs);
             session.sentAt = pruneSentAt(session.sentAt);
             if (control.stopped) break;
+            // The window, the cap or a pause may have changed while waiting: decide again.
+            continue;
           }
 
           await sendOneMessage(session, persona);
         } catch (error) {
+          if (error?.code === 'SESSION_PAUSED') {
+            await sleepWhile(() => !control.stopped, 1000);
+            continue;
+          }
+
           stats.errors++;
 
           console.error(
@@ -884,9 +1134,11 @@ export async function runTests({
           await sleepWhile(() => !control.stopped, 5000);
         }
 
+        // Pace (manual or automatic) and, with a daily cap, spread the rest of the cap over the rest of
+        // the window so it is not burned in the morning. Both carry jitter.
         await sleepWhile(
-          () => !control.stopped,
-          nextDelayMs(session.settings),
+          stillGoing(session),
+          Math.max(nextDelayMs(session.settings), session.gate.spreadDelayMs()),
         );
       }
     }

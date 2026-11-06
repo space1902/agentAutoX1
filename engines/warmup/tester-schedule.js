@@ -59,6 +59,10 @@ export function hourlyWaitMs(sentAt, now, maxPerHour) {
   return Math.max(1000, HOUR_MS - (now - recent[0]) + 1000);
 }
 
+// Wait before retrying something that keeps failing: base, 2x, 4x ... capped at max.
+export const backoffMs = (failures, baseMs, maxMs) =>
+  Math.min(maxMs, baseMs * 2 ** Math.max(0, Math.floor(Number(failures) || 0)));
+
 // Upper-bound estimate: ignores typing time and API latency.
 export function estimateRates(testers) {
   const perTester = testers.map((tester) => {

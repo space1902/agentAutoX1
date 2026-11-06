@@ -138,8 +138,15 @@ export function buildLineHealth({ testerIds, linkedOf, events = [], activityOf, 
     const loggedOut = own.filter((e) => e.event === 'logged_out_relink' && new Date(e.at) >= since).length;
     const relinks = Math.max(incidents.qr, loggedOut);
     const severeSince = now.getTime() - SEVERE_WINDOW_MS;
+    // A pause because WhatsApp ended the session replaces the old automatic relink as the "severe" signal.
+    // It only sets this flag: it never adds to the disconnect or relink counts (the LOGOUT disconnect is
+    // already one incident), so nothing is counted twice.
     const severeRecent = own.some(
-      (e) => (e.event === 'auth_failure' || e.event === 'logged_out_relink') && new Date(e.at).getTime() >= severeSince,
+      (e) =>
+        (e.event === 'auth_failure' ||
+          e.event === 'logged_out_relink' ||
+          (e.event === 'paused' && String(e.detail ?? '').startsWith('logged_out'))) &&
+        new Date(e.at).getTime() >= severeSince,
     );
 
     const stats = {

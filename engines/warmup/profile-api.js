@@ -7,8 +7,14 @@ import path from 'node:path';
 
 import { buildUpdatedConfig, normalizePhone, writeJsonAtomic } from './profile-creation.js';
 import { buildLineHealth } from './line-health.js';
+import { sessionAge } from './session-age.js';
 import { botKeys, buildRegistry, phoneKey } from './registry.js';
 import { readActivity } from './wa-activity.js';
+import { dateKeyFor, evaluateGate, normalizeSchedule, resolveTimezone } from './activity-schedule.js';
+import { appendEvent } from './event-log.js';
+import { PAUSE_FILE_NAME, createPauseStore } from './pause-state.js';
+import { countSentOnDay } from './send-gate.js';
+import { resolveSessionPhone } from './wa-messages.js';
 import {
   SelectionError,
   addProfile,
@@ -56,6 +62,31 @@ function paths(dataDir) {
     profilesFile: path.join(dataDir, 'profiles.json'),
     authDir: path.join(dataDir, '.baileys_auth'),
   };
+}
+
+const eventsFile = (dataDir) => path.join(dataDir, 'results', 'events.jsonl');
+
+// The pause file shared with the running engine (see pause-state.js). Problems go to `warnings`.
+function pauseStoreFor(dataDir, now, warnings, strict = false) {
+  return createPauseStore({
+    file: path.join(dataDir, PAUSE_FILE_NAME),
+    now: () => now.getTime(),
+    warn: (message) => warnings.push(message),
+    strict,
+  });
+}
+
+// Pausar / Reanudar must never report success when the file did not change.
+function saveFailed(error) {
+  return new SelectionError(`No se pudo guardar la pausa: ${error?.message || error}. Cierra lo que tenga abierto ese archivo e inténtalo de nuevo.`);
+}
+
+// A tester id from config.json, or the bot session. Anything else is a typo in the UI call.
+function knownSession(config, value) {
+  const id = clean(value);
+  const known = [...testerIds(config.testers), clean(config.bot?.sessionId) || 'bot'];
+  if (!id || !known.includes(id)) throw new SelectionError(`No conozco el número «${id}» en config.json.`);
+  return id;
 }
 
 function writeWithBackup(file, value, now) {
@@ -217,6 +248,90 @@ const COMMANDS = {
       now,
     });
     return { generatedAt: now.toISOString(), lines };
+  },
+
+  // Per-number schedule state for the app: paused / active / outside its window / at its daily cap, the
+  // messages sent today and the cap. Read-only; the engine and this command use the same rules.
+  'schedule-status'(payload, { dataDir, now }) {
+    const { configFile } = paths(dataDir);
+    const config = readConfig(configFile);
+    const resultsDir = path.join(dataDir, 'results');
+    const warnings = [];
+    const store = pauseStoreFor(dataDir, now, warnings);
+    const schedule = normalizeSchedule(config.schedule);
+    const ids = testerIds(config.testers);
+    const botId = clean(config.bot?.sessionId) || 'bot';
+    const events = readLines(eventsFile(dataDir));
+
+    const describe = (id, timezone, { days, incidents, flatCap }) => {
+      const count = countSentOnDay({ resultsDir, session: id, dateKey: dateKeyFor(now.getTime(), timezone), timezone });
+      const gate = evaluateGate({ sessionId: id, now: now.getTime(), count, days, incidents, flatCap, schedule, timezone });
+      const pause = store.get(id);
+      return {
+        state: pause ? 'paused' : gate.state,
+        pause: pause
+          ? { reason: pause.reason, source: pause.source, since: pause.since, until: pause.until, detail: pause.detail ?? null }
+          : null,
+        count,
+        cap: gate.cap,
+        low: gate.low,
+        window: gate.window
+          ? { startAt: new Date(gate.window.startMs).toISOString(), endAt: new Date(gate.window.endMs).toISOString() }
+          : null,
+        nextOpenAt: gate.nextOpenMs ? new Date(gate.nextOpenMs).toISOString() : null,
+        timezone,
+      };
+    };
+
+    const sessions = {};
+    for (const id of ids) {
+      sessions[id] = describe(id, resolveTimezone(schedule, testerEntry(config, id)), {
+        // Same age source as the engine (session-age.js), so the cap shown is the cap applied.
+        ...sessionAge({ session: id, events, earliestSentSeconds: readActivity(resultsDir, id, Number.MAX_SAFE_INTEGER).earliestSent, now }),
+      });
+    }
+    sessions[botId] = describe(botId, resolveTimezone(schedule, { timezone: config.bot?.timezone }), {
+      flatCap: schedule.botDailyCap,
+    });
+
+    return { generatedAt: now.toISOString(), enabled: schedule.enabled, sessions, warnings };
+  },
+
+  // Pausar: takes one number out of the cycle. The running engine notices within seconds and the pause
+  // survives restarts. hours (optional) makes it a timed pause; otherwise it lasts until Reanudar.
+  'pause-tester'(payload, { dataDir, now }) {
+    const config = readConfig(paths(dataDir).configFile);
+    const id = knownSession(config, payload.id);
+    const hours = Number(payload.hours);
+    const durationMs = Number.isFinite(hours) && hours > 0 ? Math.min(Math.max(hours, 1), 720) * 3_600_000 : null;
+    const warnings = [];
+    const store = pauseStoreFor(dataDir, now, warnings, true);
+
+    const existing = store.get(id);
+    if (existing) return { paused: false, alreadyPaused: true, pause: existing, warnings };
+
+    let pause;
+    try {
+      pause = store.pause({ session: id, number: resolveSessionPhone(config, id), reason: 'manual', source: 'user', durationMs });
+    } catch (error) {
+      throw saveFailed(error);
+    }
+    appendEvent(eventsFile(dataDir), id, 'paused', `manual; source=user${pause.until ? `; until ${pause.until}` : ''}`, now);
+    return { paused: true, pause, warnings };
+  },
+
+  'resume-tester'(payload, { dataDir, now }) {
+    const config = readConfig(paths(dataDir).configFile);
+    const id = knownSession(config, payload.id);
+    const warnings = [];
+    let resumed;
+    try {
+      resumed = pauseStoreFor(dataDir, now, warnings, true).resume(id);
+    } catch (error) {
+      throw saveFailed(error);
+    }
+    if (resumed) appendEvent(eventsFile(dataDir), id, 'resumed', 'source=user', now);
+    return { resumed, warnings };
   },
 
   list(payload, { dataDir }) {
