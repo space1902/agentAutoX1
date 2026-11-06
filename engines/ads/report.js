@@ -7,6 +7,7 @@ import { ACTIONS, computeMetrics, isInactiveStatus, suggestAction } from './metr
 import { maskPhone, normalizeText, parseCt } from './parse.js';
 import { fxSummary, resolveRate } from './fx.js';
 import { isValidResult, matchesFlow } from './sheet.js';
+import { matchesName, scopeInsights } from './scope.js';
 import { daysBetween, eachDate } from './time.js';
 
 export const NO_AD = 'Sin anuncio';
@@ -98,6 +99,8 @@ const zero = () => ({ gasto: 0, spendNet: 0, vat: 0, mensajes: 0, valor: 0, valo
 
 export function buildReport({
   insights, comprobantes, identities = {}, ads = {}, config, from, to, group = 'campaign', today, country = '', splitCountry = false, raises = {}, fxRates = {},
+  // Scope: `accounts` = { all, ids } (null/all = every account), `names` = lowercase ad-name prefixes, `accountMeta` = { act_id: { name, currency, portfolioName } }.
+  accounts = null, names = [], accountMeta = {},
 }) {
   // "ct" is the legacy name of the grouping that merged campaigns by code: it is now the campaign grouping.
   if (group === 'ct') group = 'campaign';
@@ -108,9 +111,18 @@ export function buildReport({
   const matches = (code) => !wanted || (wanted === '-' ? code === '' : code === wanted);
   const inRange = (d) => d >= from && d <= to;
 
-  const monitoredInsights = insights.filter((r) => inRange(r.date) && isMonitored(r.campaignName, prefix));
+  const accountSel = accounts && !accounts.all ? new Set(accounts.ids) : null;
+  const filtering = Boolean(accountSel) || names.length > 0;
+  // "Todas" means the configured accounts plus rows with no account (legacy): a removed account's history stays in the
+  // database but no longer counts.
+  const configured = accounts ? new Set(['', ...accounts.ids]) : null;
+  const scoped = scopeInsights({
+    rows: insights.filter((r) => inRange(r.date) && isMonitored(r.campaignName, prefix)),
+    accounts: accountSel ?? configured, names, accountMeta, config, fxRates,
+  });
+  const monitoredInsights = scoped.rows;
   const seen = {};
-  for (const r of insights) seen[r.adId] = { adName: r.adName, campaignId: r.campaignId, campaignName: r.campaignName };
+  for (const r of insights) seen[r.adId] = { adName: r.adName, campaignId: r.campaignId, campaignName: r.campaignName, accountId: r.accountId ?? '' };
   // Ads known from Meta's ad list (even without spend in the loaded insights) still tell which campaign owns them.
   const fromAds = (adId) => {
     const ad = ads[adId];
@@ -123,10 +135,24 @@ export function buildReport({
 
   // Payments of the flow that belong to a monitored ad, to an unknown ad, or to no ad at all.
   const flowRows = comprobantes.filter((c) => inRange(c.date) && matchesFlow(c.flow, config.flowPrefix));
-  const attributable = flowRows.filter((c) => {
+  const accountOfAd = (adId) => identities[adId]?.accountId || seen[adId]?.accountId || ads[adId]?.accountId || '';
+  const monitoredRows = flowRows.filter((c) => {
     const id = identityOf(c.adId);
     return !id || isMonitored(id.campaignName, prefix);
   });
+  // With an account or name filter a payment counts only when it maps to an ad of that scope; the rest is reported in `notes`.
+  let unattributed = 0;
+  const attributable = !filtering ? monitoredRows.filter((c) => !configured || configured.has(accountOfAd(c.adId))) : monitoredRows.filter((c) => {
+    const id = identityOf(c.adId);
+    if (!id || (accountSel && !accountOfAd(c.adId))) {
+      unattributed += 1;
+      return false;
+    }
+    return (!accountSel || accountSel.has(accountOfAd(c.adId))) && matchesName(id.adName, names);
+  });
+  const notes = unattributed
+    ? [{ code: 'unattributed_sales', count: unattributed, message: `${unattributed} ${unattributed === 1 ? 'pago sin anuncio identificable no se cuenta' : 'pagos sin anuncio identificable no se cuentan'} porque hay un filtro de cuenta o nombre. Quita el filtro para verlos.` }]
+    : [];
   const withCountry = new Map(attributable.map((c) => [c, saleCountry(c)]));
   const sales = attributable.filter((c) => countsAsSale(c, config.validResult)).map((c) => ({ ...c, country: withCountry.get(c) }));
   const joinedAll = joinByDateAndAd({ insights: monitoredInsights, sales, vatPct: Math.max(0, Number(config.spendVatPct ?? 0)), convert: (s) => economics(s, config, s.country, fxRates) });
@@ -220,6 +246,21 @@ export function buildReport({
         ...withMetrics(totals),
       };
     })
+    .sort((a, b) => b.gasto - a.gasto || b.valor - a.valor);
+
+  // Per ad account (whatever the country filter): "Sin cuenta" holds what cannot be tied to an account.
+  const byAccount = new Map();
+  for (const e of joined.values()) {
+    const id = accountOfAd(e.adId);
+    if (!byAccount.has(id)) byAccount.set(id, zero());
+    addTotals(byAccount.get(id), e);
+  }
+  const accountRows = [...byAccount.entries()]
+    .filter(([, totals]) => totals.gasto > 0 || totals.ventas > 0 || totals.valor > 0)
+    .map(([id, totals]) => ({
+      accountId: id, name: id ? (accountMeta[id]?.name || id) : 'Sin cuenta', portfolioName: accountMeta[id]?.portfolioName ?? '',
+      currency: accountMeta[id]?.currency || config.currency, ...withMetrics(totals),
+    }))
     .sort((a, b) => b.gasto - a.gasto || b.valor - a.valor);
 
   const groups = new Map();
@@ -336,6 +377,11 @@ export function buildReport({
     enabledCountries,
     fx,
     country: wanted,
+    accountFilter: accountSel ? { all: false, ids: [...accountSel] } : { all: true, ids: [] },
+    nameFilter: names,
+    accounts: accountRows,
+    warnings: scoped.warnings,
+    notes,
     splitCountry,
     currency: config.currency,
     spendVatPct: config.spendVatPct ?? 0,

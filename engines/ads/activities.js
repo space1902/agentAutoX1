@@ -6,11 +6,11 @@ import { fetchActivities } from './meta-data.js';
 import { redact } from './redact.js';
 
 // { ok, count, events } or { ok: false, error }. Failures are not fatal: snapshots are the fallback.
-export async function syncActivities({ api, store, config, since, timezone, token }) {
+export async function syncActivities({ api, store, config, since, timezone, token, accountId = config.adAccountId }) {
   try {
-    const rows = await fetchActivities(api, config.adAccountId, since);
+    const rows = await fetchActivities(api, accountId, since);
     const events = rows.map((a) => parseActivity(a, timezone)).filter(Boolean);
-    store.upsertBudgetEvents(events);
+    store.upsertBudgetEvents(events, accountId);
     store.setKv('activitiesOk', true);
     return { ok: true, count: rows.length, events: events.length };
   } catch (error) {
@@ -21,8 +21,8 @@ export async function syncActivities({ api, store, config, since, timezone, toke
 
 // Diagnostics for the real response shape: counts per event type and the keys/value kinds of budget events.
 // No names and no actors are returned.
-export async function probeActivities({ api, config, since }) {
-  const rows = await fetchActivities(api, config.adAccountId, since);
+export async function probeActivities({ api, config, since, accountId = config.adAccountId }) {
+  const rows = await fetchActivities(api, accountId, since);
   const byType = {};
   const budgetShapes = {};
   let sample = null;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { countryChips, formatNative, formatVoucherPhone, fxLine, groupTracking, hiddenInactive, noDataNote, rangeProblem, readCountryChoice, readShowInactive, resolveCountryChoice, visibleRows, writeCountryChoice, writeShowInactive } from "./adsView.ts";
+import { accountChipGroups, accountsArg, countryChips, nameFilterProblem, readAccountsChoice, readNameFilter, resolveAccountsChoice, selectOnlyAccount, toggleAccount, writeAccountsChoice, writeNameFilter, formatNative, formatVoucherPhone, fxLine, groupTracking, hiddenInactive, noDataNote, rangeProblem, readCountryChoice, readShowInactive, resolveCountryChoice, visibleRows, writeCountryChoice, writeShowInactive } from "./adsView.ts";
 
 test("rangeProblem accepts a valid range and explains each invalid one", () => {
   assert.equal(rangeProblem("2026-10-21", "2026-10-29", "2026-09-23", "2026-10-29"), null);
@@ -164,4 +164,81 @@ test("fxLine describes the live rate with its time and source, or says it is man
   assert.equal(fxLine(old, now), "1 MXN = $ 170,66 COP · actualizada 01/11 09:30 (open.er-api.com)");
   assert.equal(fxLine({ ...live, mode: "manual" as const, fetchedAt: null, source: null, rate: 50 }, now), "1 MXN = $ 50 COP · tasa manual");
   assert.equal(fxLine({ ...live, mode: "none" as const, fetchedAt: null, source: null, rate: 1 }, now), "1 MXN = sin tasa (defínela en Configuración)");
+});
+
+// ---- account selector and name filter
+
+const accts = [
+  { id: "act_11111", name: "Uno", portfolioId: "principal", portfolioName: "Principal" },
+  { id: "act_22222", name: "Dos", portfolioId: "bm-dos", portfolioName: "BM dos" },
+  { id: "act_33333", name: "Tres", portfolioId: "bm-dos", portfolioName: "BM dos" },
+];
+const memory = () => {
+  const saved = new Map<string, string>();
+  return { getItem: (k: string) => saved.get(k) ?? null, setItem: (k: string, v: string) => void saved.set(k, v) };
+};
+const denied = {
+  getItem: () => {
+    throw new Error("denied");
+  },
+  setItem: () => {
+    throw new Error("denied");
+  },
+};
+
+test("no stored account choice means every account; storage can fail", () => {
+  const store = memory();
+  assert.deepEqual(readAccountsChoice(store), []);
+  writeAccountsChoice(["act_22222", "act_33333"], store);
+  assert.deepEqual(readAccountsChoice(store), ["act_22222", "act_33333"]);
+  store.setItem("ads.accounts", "{not json");
+  assert.deepEqual(readAccountsChoice(store), []);
+  store.setItem("ads.accounts", JSON.stringify(["act_1", "x'; drop", 5, "act_22222"]));
+  assert.deepEqual(readAccountsChoice(store), ["act_22222"], "only well-formed ids survive");
+  assert.deepEqual(readAccountsChoice(denied), []);
+  assert.doesNotThrow(() => writeAccountsChoice(["act_22222"], denied));
+  assert.deepEqual(readAccountsChoice(null), []);
+});
+
+test("a stored choice is checked against the accounts that exist now", () => {
+  assert.deepEqual(resolveAccountsChoice(["act_22222"], accts), ["act_22222"]);
+  assert.deepEqual(resolveAccountsChoice(["act_99999"], accts), [], "a removed account falls back to all");
+  assert.deepEqual(resolveAccountsChoice(["act_22222", "act_99999"], accts), ["act_22222"]);
+  assert.deepEqual(resolveAccountsChoice(["act_11111", "act_22222", "act_33333"], accts), [], "everything selected is just all");
+  assert.deepEqual(resolveAccountsChoice(["act_22222"], []), ["act_22222"], "nothing known yet: keep it");
+});
+
+test("chips: tap selects only that account; the checkbox adds or removes; 'Todas' is the empty choice", () => {
+  assert.deepEqual(selectOnlyAccount("act_22222", accts), ["act_22222"]);
+  assert.deepEqual(selectOnlyAccount("act_11111", [accts[0]]), [], "a single account is always all");
+  assert.deepEqual(toggleAccount([], "act_22222", accts), ["act_11111", "act_33333"], "unticking from 'all' leaves the others");
+  assert.deepEqual(toggleAccount(["act_11111"], "act_22222", accts), ["act_11111", "act_22222"]);
+  assert.deepEqual(toggleAccount(["act_11111", "act_22222"], "act_33333", accts), [], "ticking the last one is all again");
+  assert.deepEqual(toggleAccount(["act_11111"], "act_11111", accts), ["act_11111"], "never an empty selection");
+});
+
+test("accountsArg is null for all and a comma list otherwise", () => {
+  assert.equal(accountsArg([], accts), null);
+  assert.equal(accountsArg(["act_22222", "act_11111"], accts), "act_22222,act_11111");
+  assert.equal(accountsArg(["act_11111", "act_22222", "act_33333"], accts), null);
+});
+
+test("chips are grouped by portfolio only when there is more than one", () => {
+  assert.deepEqual(accountChipGroups([accts[0]]).map((g) => g.label), [""]);
+  const groups = accountChipGroups(accts);
+  assert.deepEqual(groups.map((g) => [g.label, g.accounts.length]), [["Principal", 1], ["BM dos", 2]]);
+});
+
+test("the name filter is persisted trimmed and validated like the engine does", () => {
+  const store = memory();
+  assert.equal(readNameFilter(store), "");
+  writeNameFilter("  ct, pzz ", store);
+  assert.equal(readNameFilter(store), "ct, pzz");
+  assert.equal(readNameFilter(denied), "");
+  assert.doesNotThrow(() => writeNameFilter("ct", denied));
+  assert.equal(nameFilterProblem("ct, PZZ ,"), null);
+  assert.equal(nameFilterProblem(""), null);
+  assert.match(nameFilterProblem("x'; DROP") ?? "", /no válidos/);
+  assert.match(nameFilterProblem("<b>") ?? "", /no válidos/);
+  assert.match(nameFilterProblem("a".repeat(401)) ?? "", /largo/);
 });

@@ -4,6 +4,7 @@ import { MetaApi, friendlyMetaError } from './meta-api.js';
 import { syncActivities } from './activities.js';
 import { deriveCountry } from './country.js';
 import { fetchAccount, fetchAds, fetchFirstSpendDate, fetchInsights } from './meta-data.js';
+import { PRINCIPAL_ID, redactAll, targetsFor } from './portfolios.js';
 import { redact } from './redact.js';
 import { fetchSheetCsv, parseComprobantes } from './sheet.js';
 import { isMonitored } from './report.js';
@@ -33,35 +34,70 @@ export function lookbackPlan({ ads, first, checked, from, prefix, today }) {
 
 export { redact };
 
-async function syncMeta({ store, config, token, from, to, fetchImpl, now }) {
+// Token of the portfolio that owns an account. `tokens` is { portfolioId: token }; the single legacy `token` belongs to
+// the principal portfolio (older callers and data dirs).
+export const tokenOfTarget = ({ tokens, token }, target) => String(tokens?.[target.portfolioId] ?? (target.portfolioId === PRINCIPAL_ID ? token : '') ?? '').trim();
+
+// Timezone of an account's "today": what Meta told us, else the config, else the legacy single record, else Bogota.
+export const timezoneFor = (store, target) =>
+  store.getKv(`account:${target.accountId}`)?.timezone || target.timezone || store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
+
+const labelOf = (target) => (target.name && target.name !== target.accountId ? `${target.name} (${target.accountId})` : target.accountId);
+
+// One account: details, insights, ads/budgets and first-spend lookback. Never throws (the caller keeps going with the next account).
+async function syncAccount({ store, config, target, token, from, to, fetchImpl, now }) {
+  const base = { accountId: target.accountId, portfolioId: target.portfolioId, name: target.name };
   if (!token) {
-    return { ok: false, code: 'NO_TOKEN', error: 'Falta el token de Meta. Impórtalo o pégalo en la configuración de Anuncios.' };
+    return { ...base, ok: false, code: 'NO_TOKEN', error: 'Falta el token de Meta. Impórtalo o pégalo en la configuración de Anuncios.' };
   }
+  const id = target.accountId;
   const api = new MetaApi({ token, version: config.graphVersion, fetchImpl, now });
   try {
-    const account = await fetchAccount(api, config.adAccountId);
-    const timezone = account.timezone || store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
-    store.setKv('account', { name: account.name, timezone, currency: account.currency || config.currency });
+    const account = await fetchAccount(api, id);
+    const timezone = account.timezone || timezoneFor(store, target);
+    store.setAccountInfo(id, { name: account.name, timezone, currency: account.currency || target.currency || config.currency }, { primary: id === config.adAccountId });
 
-    const insights = await fetchInsights(api, config.adAccountId, from, to);
-    store.upsertInsights(insights, now());
+    const insights = await fetchInsights(api, id, from, to);
+    store.upsertInsights(insights, now(), id);
 
-    const ads = await fetchAds(api, config.adAccountId);
-    store.upsertAds(ads, now());
+    const ads = await fetchAds(api, id);
+    store.upsertAds(ads, now(), id);
     const today = localParts(now(), timezone).date;
-    store.recordBudgets(ads, today, now());
+    store.recordBudgets(ads, today, now(), id);
     store.refreshFirstSpend();
 
     const plan = lookbackPlan({ ads, first: store.firstSpendMap(), checked: store.getKv('lookbackChecked') ?? [], from, prefix: config.campaignPrefix, today });
     if (plan && plan.since <= plan.until) {
-      store.upsertInsights(await fetchInsights(api, config.adAccountId, plan.since, plan.until), now());
+      store.upsertInsights(await fetchInsights(api, id, plan.since, plan.until), now(), id);
       store.refreshFirstSpend();
     }
     if (plan) store.setKv('lookbackChecked', [...new Set([...(store.getKv('lookbackChecked') ?? []), ...plan.ids])].slice(-2000));
-    return { ok: true, insightRows: insights.length, ads: ads.length };
+    return { ...base, ok: true, insightRows: insights.length, ads: ads.length };
   } catch (error) {
-    return { ok: false, code: error?.code ?? 'META', error: redact(friendlyMetaError(error), token) };
+    return { ...base, ok: false, code: error?.code ?? 'META', error: redact(friendlyMetaError(error), token) };
   }
+}
+
+// Every requested account, one after the other (gentle on Meta's rate limits). One failing never stops the rest.
+// `rangeFor(target)` may give an account its own { from, to } (the first-time backfill).
+async function syncMeta({ store, config, targets, tokens, token, from, to, rangeFor, fetchImpl, now }) {
+  const results = [];
+  for (const target of targets) {
+    const range = rangeFor?.(target) ?? { from, to };
+    const result = await syncAccount({ store, config, target, token: tokenOfTarget({ tokens, token }, target), from: range.from, to: range.to, fetchImpl, now });
+    results.push(result);
+  }
+  const failed = results.filter((r) => !r.ok);
+  const everything = [...Object.values(tokens ?? {}), token].filter(Boolean);
+  const message = failed.map((r) => (results.length > 1 ? `${labelOf(r)}: ${r.error}` : r.error)).join(' · ');
+  return {
+    ok: results.length > 0 && failed.length === 0,
+    partial: results.some((r) => r.ok),
+    ...(failed.length ? { code: failed[0].code, error: redactAll(message, everything) } : {}),
+    insightRows: results.reduce((n, r) => n + (r.insightRows ?? 0), 0),
+    ads: results.reduce((n, r) => n + (r.ads ?? 0), 0),
+    accounts: results.map(({ accountId, portfolioId, ok, code, error, insightRows, ads }) => ({ accountId, portfolioId, ok, ...(ok ? { insightRows, ads } : { code, error }) })),
+  };
 }
 
 async function syncSheet({ store, config, fetchImpl, now }) {
@@ -89,70 +125,107 @@ export function deriveStoredCountries(store, config) {
   return changes.length;
 }
 
-export async function runSync({ store, config, token, from, to, fetchImpl = globalThis.fetch, now = Date.now }) {
+// Accounts to work on: the explicit `targets`, else every configured account (or the legacy single account).
+const resolveTargets = (config, targets) => targets ?? targetsFor(config, null);
+
+export async function runSync({ store, config, token, tokens, targets, rangeFor, from, to, fetchImpl = globalThis.fetch, now = Date.now }) {
+  const list = resolveTargets(config, targets);
   const [meta, sheet] = await Promise.all([
-    syncMeta({ store, config, token, from, to, fetchImpl, now }),
+    syncMeta({ store, config, targets: list, tokens, token, from, to, rangeFor, fetchImpl, now }),
     syncSheet({ store, config, fetchImpl, now }),
   ]);
   deriveStoredCountries(store, config);
   const previous = store.getKv('lastSync') ?? {};
+  const at = now();
+  const accounts = { ...(previous.accounts ?? {}) };
+  for (const a of meta.accounts) accounts[a.accountId] = a.ok ? { ok: true, at, error: null } : { ok: false, at: accounts[a.accountId]?.at ?? null, error: a.error };
   store.setKv('lastSync', {
-    meta: meta.ok ? now() : (previous.meta ?? null),
-    sheet: sheet.ok ? now() : (previous.sheet ?? null),
+    // Some accounts failing does not hide that the others were refreshed; the failures are listed in metaError / accounts.
+    meta: meta.ok || meta.partial ? at : (previous.meta ?? null),
+    sheet: sheet.ok ? at : (previous.sheet ?? null),
     metaError: meta.ok ? null : meta.error,
     sheetError: sheet.ok ? null : sheet.error,
+    accounts,
   });
-  const timezone = store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
-  return { range: { from, to }, today: localParts(now(), timezone).date, syncedAt: now(), meta, sheet };
+  const timezone = list[0] ? timezoneFor(store, list[0]) : DEFAULT_TIMEZONE;
+  return { range: { from, to }, today: localParts(now(), timezone).date, syncedAt: now(), meta, sheet, accounts: meta.accounts };
 }
 
 const BACKFILL_RECENT_DAYS = 3;
 
-// Incremental sync with a one-time history backfill.
-//  - First run (or after the insights table was rebuilt): everything from the history start, month by month.
-//    The start is the configured "Historial desde", else the earliest day found in the payments sheet or in Meta.
-//  - Afterwards: the last 3 days (Meta restates recent days) plus today.
-export async function runAutoSync({ store, config, token, fetchImpl = globalThis.fetch, now = Date.now }) {
-  const timezone = store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
-  const today = localParts(now(), timezone).date;
-  if (store.insightsRebuilt && store.getKv('backfillDone')) store.setKv('backfillDone', null);
-  let backfill = store.getKv('backfillDone');
-  const wantedStart = config.historyFrom || null;
-  if (backfill && wantedStart && wantedStart < backfill.from) backfill = null; // the user asked for an earlier history
+const backfillKey = (accountId) => `backfillDone:${accountId}`;
 
-  let from = addDays(today, -BACKFILL_RECENT_DAYS);
-  if (!backfill) {
-    let sheetMin = null;
+// Incremental sync with a one-time history backfill PER ACCOUNT.
+//  - First run of an account (or after the insights table was rebuilt): everything from its history start, month by month.
+//    The start is the configured "Historial desde", else the earliest day with spend found in Meta (the principal account
+//    also looks at the payments sheet).
+//  - Afterwards: the last 3 days (Meta restates recent days) plus today.
+export async function runAutoSync({ store, config, token, tokens, targets, fetchImpl = globalThis.fetch, now = Date.now }) {
+  const list = resolveTargets(config, targets);
+  const wantedStart = config.historyFrom || null;
+  if (store.insightsRebuilt) {
+    for (const r of store.db.prepare("SELECT key FROM kv WHERE key = 'backfillDone' OR key LIKE 'backfillDone:%'").all()) store.setKv(r.key, null);
+  }
+
+  // Per account: its backfill marker (the old global marker belongs to the principal account) and its own "today".
+  const plans = list.map((target) => {
+    const legacy = target.accountId === config.adAccountId;
+    let backfill = store.getKv(backfillKey(target.accountId)) ?? (legacy ? store.getKv('backfillDone') : null);
+    if (backfill && wantedStart && wantedStart < backfill.from) backfill = null; // the user asked for an earlier history
+    return { target, legacy, backfill, today: localParts(now(), timezoneFor(store, target)).date, token: tokenOfTarget({ tokens, token }, target) };
+  });
+
+  let sheetMin = null;
+  if (plans.some((p) => !p.backfill)) {
     try {
       const parsed = parseComprobantes(await fetchSheetCsv({ sheetId: config.sheetId, tab: config.sheetTab, fetchImpl }));
       sheetMin = parsed.rows.map((r) => parseDateToIso(r.registered)).filter(Boolean).sort()[0] ?? null;
     } catch {
       /* the regular sync below reports the sheet problem */
     }
+  }
+  for (const plan of plans) {
+    plan.from = addDays(plan.today, -BACKFILL_RECENT_DAYS);
+    if (plan.backfill) continue;
     let metaMin = null;
-    if (token && !wantedStart) {
+    if (plan.token && !wantedStart) {
       try {
-        metaMin = await fetchFirstSpendDate(new MetaApi({ token, version: config.graphVersion, fetchImpl, now }), config.adAccountId);
+        metaMin = await fetchFirstSpendDate(new MetaApi({ token: plan.token, version: config.graphVersion, fetchImpl, now }), plan.target.accountId);
       } catch {
         /* same: reported by the regular sync */
       }
     }
-    const detected = [metaMin, sheetMin].filter(Boolean).sort()[0] ?? null;
-    const start = wantedStart
-      ? { date: wantedStart, source: 'config' }
-      : (store.getKv('historyStart') ?? (detected ? { date: detected, source: 'auto' } : { date: addDays(today, -30), source: 'default' }));
-    store.setKv('historyStart', start);
-    from = start.date;
+    let start;
+    if (wantedStart) start = { date: wantedStart, source: 'config' };
+    else if (plan.legacy) {
+      const detected = [metaMin, sheetMin].filter(Boolean).sort()[0] ?? null;
+      start = store.getKv('historyStart') ?? (detected ? { date: detected, source: 'auto' } : { date: addDays(plan.today, -30), source: 'default' });
+    } else {
+      start = metaMin ? { date: metaMin, source: 'auto' } : { date: addDays(plan.today, -30), source: 'default' };
+    }
+    const known = store.getKv('historyStart');
+    if (plan.legacy || wantedStart || !known || start.date < known.date) store.setKv('historyStart', start);
+    plan.from = start.date;
   }
+  const byAccount = new Map(plans.map((p) => [p.target.accountId, p]));
+  const lastDay = plans.map((p) => p.today).sort().at(-1) ?? localParts(now(), DEFAULT_TIMEZONE).date;
 
-  const result = await runSync({ store, config, token, from, to: today, fetchImpl, now });
+  const result = await runSync({
+    store, config, token, tokens, targets: list, from: plans.map((p) => p.from).sort()[0] ?? lastDay, to: lastDay, fetchImpl, now,
+    rangeFor: (target) => ({ from: byAccount.get(target.accountId).from, to: byAccount.get(target.accountId).today }),
+  });
   result.backfilled = false;
-  if (!backfill && result.meta.ok) {
-    store.setKv('backfillDone', { from, at: now() });
+  const okIds = new Set(result.meta.accounts.filter((a) => a.ok).map((a) => a.accountId));
+  for (const plan of plans) {
+    if (plan.backfill || !okIds.has(plan.target.accountId)) continue;
+    const marker = { from: plan.from, at: now() };
+    store.setKv(backfillKey(plan.target.accountId), marker);
+    store.setKv('backfillDone', marker); // "something was backfilled" for the Historial line
     result.backfilled = true;
-    if (token) {
-      const api = new MetaApi({ token, version: config.graphVersion, fetchImpl, now });
-      result.activities = await syncActivities({ api, store, config, since: from, timezone: store.getKv('account')?.timezone || timezone, token });
+    if (plan.token) {
+      const api = new MetaApi({ token: plan.token, version: config.graphVersion, fetchImpl, now });
+      const activities = await syncActivities({ api, store, config, since: plan.from, timezone: timezoneFor(store, plan.target), token: plan.token, accountId: plan.target.accountId });
+      result.activities = result.activities ? { ...activities, ok: result.activities.ok && activities.ok } : activities;
     }
   }
   result.history = historyInfo(store);

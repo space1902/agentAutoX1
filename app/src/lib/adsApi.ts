@@ -175,6 +175,26 @@ export interface LastSync {
   sheet: number | null;
   metaError: string | null;
   sheetError: string | null;
+  /** Per ad account: did its last refresh work, when, and what went wrong. */
+  accounts?: Record<string, { ok: boolean; at: number | null; error: string | null }>;
+}
+
+export interface ReportAccount {
+  accountId: string;
+  /** "Sin cuenta" for what cannot be tied to an ad account. */
+  name: string;
+  portfolioName: string;
+  currency: string;
+  gasto: number;
+  ventas: number;
+  valor: number;
+  roas: number;
+}
+
+export interface ReportNote {
+  code: string;
+  message: string;
+  count?: number;
 }
 
 export interface Report {
@@ -200,6 +220,13 @@ export interface Report {
   inactive: { gasto: number; count: number };
   comprobantes: Voucher[];
   reviewCount: number;
+  /** Spend and sales per ad account (including "Sin cuenta"). */
+  accounts?: ReportAccount[];
+  /** Spend left out because no exchange rate was known, etc. */
+  warnings?: { code: string; message: string }[];
+  /** E.g. payments that cannot be tied to an ad and are not counted under a filter. */
+  notes?: ReportNote[];
+  nameFilter?: string[];
   today: string;
   timezone: string;
   lastSync: LastSync;
@@ -212,10 +239,22 @@ export interface SyncPart {
   code?: string;
 }
 
+export interface SyncAccountResult {
+  accountId: string;
+  portfolioId: string;
+  ok: boolean;
+  code?: string;
+  error?: string;
+}
+
 export interface SyncResult {
   today: string;
   syncedAt: number;
-  meta: SyncPart & { insightRows?: number; ads?: number };
+  meta: SyncPart & { insightRows?: number; ads?: number; partial?: boolean; accounts?: SyncAccountResult[] };
+  /** Portfolios whose token could not be read from the Credential Manager (their accounts were skipped). */
+  portfolioWarnings?: string[];
+  /** Per-account outcome: one failing account never hides the others. */
+  accounts?: SyncAccountResult[];
   sheet: SyncPart & { rows?: number };
   backfilled?: boolean;
   history?: HistoryInfo;
@@ -303,7 +342,31 @@ export interface CountrySettings {
   taxPct: number;
 }
 
+export interface AdAccount {
+  /** act_1234567890 */
+  id: string;
+  name: string;
+  currency: string;
+  timezone: string;
+}
+
+/** A Meta Business Manager. Its token lives in the Credential Manager, keyed by `id`; it is never in the config. */
+export interface Portfolio {
+  id: string;
+  name: string;
+  accounts: AdAccount[];
+}
+
+export interface TokenTestResult {
+  portfolio: string;
+  name: string;
+  id: string;
+  /** Ad accounts the token can see, to offer them as quick picks. */
+  accounts: { id: string; name: string; currency: string; timezone: string; status: number | null }[];
+}
+
 export interface AdsConfig {
+  portfolios: Portfolio[];
   /** Countries shown in the views (default only CO). */
   enabledCountries: string[];
   /** Group the other countries as "Otros países" instead of leaving them out. */
@@ -328,6 +391,7 @@ export interface AdsConfig {
 
 export interface AdsStatus {
   tokenPresent: boolean;
+  portfolios?: { id: string; tokenPresent: boolean }[];
   lastSync: LastSync;
   counts: { insights: number; ads: number; comprobantes: number; budgets: number };
   account: { name: string; timezone: string; currency: string } | null;
@@ -361,11 +425,13 @@ export interface TrackingItem {
 }
 
 export const adsApi = {
-  sync: (from: string, to: string) => invoke<SyncResult>("ads_sync", { from, to }),
-  syncAuto: () => invoke<SyncResult>("ads_sync_auto"),
-  report: (from: string, to: string, group: Group, country = "", split = false) =>
-    invoke<Report>("ads_report", { from, to, group, country: country || null, split }),
-  vouchers: (from: string, to: string, country = "") => invoke<VouchersData>("ads_vouchers", { from, to, country: country || null }),
+  /** `accounts` = comma list of act ids; null/omitted = every account. Only those accounts are queried in Meta. */
+  sync: (from: string, to: string, accounts: string | null = null) => invoke<SyncResult>("ads_sync", { from, to, accounts }),
+  syncAuto: (accounts: string | null = null) => invoke<SyncResult>("ads_sync_auto", { accounts }),
+  report: (from: string, to: string, group: Group, country = "", split = false, accounts: string | null = null, name = "") =>
+    invoke<Report>("ads_report", { from, to, group, country: country || null, split, accounts, name: name.trim() || null }),
+  vouchers: (from: string, to: string, country = "", accounts: string | null = null, name = "") =>
+    invoke<VouchersData>("ads_vouchers", { from, to, country: country || null, accounts, name: name.trim() || null }),
   /** Fetches the live exchange rates (free sources, no key); a failure keeps the last saved rate. */
   fxRefresh: () => invoke<FxRefreshResult>("ads_fx_refresh"),
   tracking: () => invoke<{ today: string; items: TrackingItem[] }>("ads_tracking"),
@@ -378,11 +444,21 @@ export const adsApi = {
   decisions: () => invoke<DecisionsData>("ads_decisions"),
   decisionStatus: (id: number, status: DecisionStatus) => invoke<{ id: number; status: DecisionStatus }>("ads_decision_status", { id, status }),
   tickNow: () => invoke<{ created: Decision[]; warnings: string[]; snapshot: boolean; synced: boolean }>("ads_tick_now"),
+  /** Legacy single-token commands: they act on the principal portfolio. */
   tokenStatus: () => invoke<boolean>("ads_token_status"),
-  tokenSet: (token: string) => invoke<void>("ads_token_set", { token }),
-  tokenClear: () => invoke<void>("ads_token_clear"),
-  tokenTest: () => invoke<{ accountName: string; currency: string; timezone: string }>("ads_token_test"),
   tokenImport: () => invoke<void>("ads_token_import_from_monitor"),
+  /** Token presence by portfolio id (never the values). */
+  portfolioTokenStatus: (portfolios: string[]) => invoke<Record<string, boolean>>("ads_portfolio_token_status", { portfolios }),
+  portfolioTokenSet: (portfolio: string, token: string) => invoke<void>("ads_portfolio_token_set", { portfolio, token }),
+  /** The principal portfolio (alerts monitor and main account) only accepts this with `confirmPrincipal` after the user confirmed. */
+  portfolioTokenClear: (portfolio: string, confirmPrincipal = false) => invoke<void>("ads_portfolio_token_clear", { portfolio, confirmPrincipal }),
+  portfolioTokenTest: (portfolio: string) => invoke<TokenTestResult>("ads_portfolio_token_test", { portfolio }),
+  /** Creates the portfolio and stores its token. */
+  portfolioAdd: (name: string, token: string) => invoke<{ portfolio: { id: string; name: string }; config: AdsConfig }>("ads_portfolio_add", { name, token }),
+  /** Removes the portfolio and its token; the stored history stays in the database. */
+  portfolioRemove: (portfolio: string, confirmPrincipal = false) => invoke<{ config: AdsConfig }>("ads_portfolio_remove", { portfolio, confirmPrincipal }),
+  /** Meta is asked first; the account is saved only if the portfolio's token can read it. */
+  accountAdd: (portfolio: string, account: string, name = "") => invoke<{ account: AdAccount; config: AdsConfig }>("ads_account_add", { portfolio, account, name }),
 };
 
 // ---------------------------------------------------------------- dates (local calendar days)

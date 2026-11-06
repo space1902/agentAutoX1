@@ -5,8 +5,8 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-import { adsDir } from './config.js';
-import { installViews, refreshAdCt, syncCountryRates, syncSpendVat } from './views.js';
+import { adsDir, loadConfig } from './config.js';
+import { installViews, refreshAdCt, syncCountryRates, syncExcludedAccounts, syncSpendVat } from './views.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -19,18 +19,21 @@ CREATE TABLE IF NOT EXISTS fx_rates (
 CREATE TABLE IF NOT EXISTS insights (
   date TEXT NOT NULL, ad_id TEXT NOT NULL, ad_name TEXT NOT NULL, campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL,
   adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, gasto REAL NOT NULL, impressions INTEGER NOT NULL, clicks INTEGER NOT NULL,
-  mensajes INTEGER NOT NULL, synced_at INTEGER NOT NULL, country TEXT NOT NULL DEFAULT '', PRIMARY KEY (date, ad_id, country)
+  mensajes INTEGER NOT NULL, synced_at INTEGER NOT NULL, country TEXT NOT NULL DEFAULT '',
+  -- Ad ids are unique across Meta, so the account does not need to be part of the key.
+  account_id TEXT NOT NULL DEFAULT '', PRIMARY KEY (date, ad_id, country)
 );
 CREATE INDEX IF NOT EXISTS insights_ad ON insights (ad_id, date);
 CREATE TABLE IF NOT EXISTS ads (
   ad_id TEXT PRIMARY KEY, name TEXT NOT NULL, created_time TEXT NOT NULL, effective_status TEXT NOT NULL,
   campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL, adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, updated_at INTEGER NOT NULL,
-  first_spend_date TEXT -- first day with spend > 0: "day 1" of the ad (created_time is only a reference)
+  first_spend_date TEXT, -- first day with spend > 0: "day 1" of the ad (created_time is only a reference)
+  account_id TEXT NOT NULL DEFAULT ''
 );
 -- Budgets are stored as Meta returns them (currency minor units). A row is appended only when the value changes.
 CREATE TABLE IF NOT EXISTS budget_history (
   id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, date TEXT NOT NULL,
-  daily_budget REAL, lifetime_budget REAL, first_seen INTEGER NOT NULL
+  daily_budget REAL, lifetime_budget REAL, first_seen INTEGER NOT NULL, account_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS budget_entity ON budget_history (entity_type, entity_id, id);
 CREATE TABLE IF NOT EXISTS comprobantes (
@@ -49,7 +52,7 @@ CREATE TABLE IF NOT EXISTS comprobante_accepts (key TEXT PRIMARY KEY, accepted_a
 -- Exact budget changes read from the account activity log (when Meta exposes it).
 CREATE TABLE IF NOT EXISTS budget_events (
   entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, time INTEGER NOT NULL, date TEXT NOT NULL,
-  old_budget REAL NOT NULL, new_budget REAL NOT NULL, PRIMARY KEY (entity_type, entity_id, time, new_budget)
+  old_budget REAL NOT NULL, new_budget REAL NOT NULL, account_id TEXT NOT NULL DEFAULT '', PRIMARY KEY (entity_type, entity_id, time, new_budget)
 );
 -- Issued decisions. The key makes each one unique: (kind, entity, window start, day).
 CREATE TABLE IF NOT EXISTS decisions (
@@ -81,13 +84,48 @@ export function keyRows(rows) {
   });
 }
 
+// ADD COLUMN that tolerates another process having added it between our check and our ALTER.
+function addColumn(db, table, ddl) {
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  } catch (error) {
+    if (!/duplicate column/i.test(String(error?.message))) throw error;
+  }
+}
+
 const columns = (db, table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
 
+const ACCOUNT_TABLES = ['insights', 'ads', 'budget_history', 'budget_events'];
+
+// account_id on every Meta table. Rows from before accounts existed (account_id = '') belong to the principal account,
+// and its stored info / backfill markers are copied to the per-account keys. Safe to repeat: it only touches '' rows.
+function migrateAccounts(db, defaultAccountId) {
+  for (const table of ACCOUNT_TABLES) {
+    if (!columns(db, table).includes('account_id')) addColumn(db, table, "account_id TEXT NOT NULL DEFAULT ''");
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS insights_account ON insights (account_id, date)');
+  if (!defaultAccountId) return;
+  const kv = (key) => db.prepare('SELECT value FROM kv WHERE key = ?').get(key)?.value;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const table of ACCOUNT_TABLES) db.prepare(`UPDATE ${table} SET account_id = ? WHERE account_id = ''`).run(defaultAccountId);
+    const put = db.prepare('INSERT OR IGNORE INTO kv (key, value) VALUES (?, ?)');
+    for (const [from, to] of [['account', `account:${defaultAccountId}`], ['backfillDone', `backfillDone:${defaultAccountId}`]]) {
+      const value = kv(from);
+      if (value !== undefined) put.run(to, value);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
 // Brings databases created by earlier versions up to date. Returns true when insights had to be rebuilt.
-function migrate(db) {
+function migrate(db, defaultAccountId = '') {
   let rebuilt = false;
   if (!columns(db, 'insights').includes('country')) {
-    db.exec('BEGIN');
+    db.exec('BEGIN IMMEDIATE');
     db.exec('ALTER TABLE insights RENAME TO insights_old');
     db.exec(`CREATE TABLE insights (
       date TEXT NOT NULL, ad_id TEXT NOT NULL, ad_name TEXT NOT NULL, campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL,
@@ -107,13 +145,13 @@ function migrate(db) {
     ['country', "country TEXT NOT NULL DEFAULT ''"], ['country_source', "country_source TEXT NOT NULL DEFAULT ''"],
     ['client_name', "client_name TEXT NOT NULL DEFAULT ''"], ['payer_name', "payer_name TEXT NOT NULL DEFAULT ''"],
   ]) {
-    if (!cols.includes(name)) db.exec(`ALTER TABLE comprobantes ADD COLUMN ${ddl}`);
+    if (!cols.includes(name)) addColumn(db, 'comprobantes', ddl);
   }
   const loose = db.prepare('SELECT id, registered, phone FROM comprobantes WHERE key IS NULL ORDER BY id').all();
   if (loose.length) {
     const seen = new Map();
     const set = db.prepare('UPDATE comprobantes SET key = ?, first_seen = COALESCE(first_seen, synced_at) WHERE id = ?');
-    db.exec('BEGIN');
+    db.exec('BEGIN IMMEDIATE');
     for (const r of loose) {
       const base = `${r.registered}|${r.phone}`;
       const n = seen.get(base) ?? 0;
@@ -124,19 +162,23 @@ function migrate(db) {
   }
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS comprobantes_key ON comprobantes (key)');
   // Meta reports "unknown" when it cannot place an impression: store that as no country.
+  migrateAccounts(db, defaultAccountId);
   db.exec("UPDATE insights SET country = '' WHERE country = 'unknown' AND NOT EXISTS (SELECT 1 FROM insights i2 WHERE i2.date = insights.date AND i2.ad_id = insights.ad_id AND i2.country = '')");
   return rebuilt;
 }
 
 // `readOnly`: opens an existing database for reading only (no schema, migration or view work). Used by the Analista.
-export function createStore(file = ':memory:', { readOnly = false } = {}) {
+// `defaultAccountId`: the account that rows from before accounts existed belong to (the principal account).
+export function createStore(file = ':memory:', { readOnly = false, defaultAccountId = '' } = {}) {
   const db = new DatabaseSync(file, readOnly ? { readOnly: true } : {});
   let insightsRebuilt = false;
   if (!readOnly) {
+    // Several processes (the app's ticks and syncs) can open a not-yet-migrated database at once: wait for each other.
+    db.exec('PRAGMA busy_timeout = 15000;');
     if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
     db.exec(SCHEMA);
-    insightsRebuilt = migrate(db);
-    if (!db.prepare('PRAGMA table_info(ads)').all().some((c) => c.name === 'first_spend_date')) db.exec('ALTER TABLE ads ADD COLUMN first_spend_date TEXT');
+    insightsRebuilt = migrate(db, defaultAccountId);
+    if (!db.prepare('PRAGMA table_info(ads)').all().some((c) => c.name === 'first_spend_date')) addColumn(db, 'ads', 'first_spend_date TEXT');
     // Analysis views for the Analista (helper tables + views); rebuilt only when their version changes.
     if (installViews(db) || db.prepare('SELECT COUNT(*) n FROM ad_ct').get().n === 0) refreshAdCt(db);
   }
@@ -163,20 +205,29 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
     setKv(key, value) {
       q('INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, JSON.stringify(value ?? null));
     },
+    // { name, timezone, currency } of an account (account:<act_id>), falling back to the legacy single record.
+    accountInfo(accountId) {
+      return (accountId ? this.getKv(`account:${accountId}`) : null) ?? this.getKv('account');
+    },
+    // `primary` also refreshes the legacy `account` record that single-account readers (the Analista) still use.
+    setAccountInfo(accountId, info, { primary = false } = {}) {
+      this.setKv(`account:${accountId}`, info);
+      if (primary) this.setKv('account', info);
+    },
 
     // Replaces every row of each (date, ad) in the batch, so Meta restating a day (or the country split appearing)
     // never double counts. Days Meta does not return are left untouched.
-    upsertInsights(rows, now) {
+    upsertInsights(rows, now, accountId = '') {
       const remove = q('DELETE FROM insights WHERE date = ? AND ad_id = ?');
-      const insert = q(`INSERT INTO insights (date, ad_id, ad_name, campaign_id, campaign_name, adset_id, adset_name, gasto, impressions, clicks, mensajes, synced_at, country)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      const insert = q(`INSERT INTO insights (date, ad_id, ad_name, campaign_id, campaign_name, adset_id, adset_name, gasto, impressions, clicks, mensajes, synced_at, country, account_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(date, ad_id, country) DO UPDATE SET ad_name = excluded.ad_name, campaign_id = excluded.campaign_id, campaign_name = excluded.campaign_name,
           adset_id = excluded.adset_id, adset_name = excluded.adset_name, gasto = gasto + excluded.gasto, impressions = impressions + excluded.impressions,
-          clicks = clicks + excluded.clicks, mensajes = mensajes + excluded.mensajes, synced_at = excluded.synced_at`);
+          clicks = clicks + excluded.clicks, mensajes = mensajes + excluded.mensajes, synced_at = excluded.synced_at, account_id = excluded.account_id`);
       tx(() => {
         const groups = new Set(rows.map((r) => `${r.date}|${r.adId}`));
         for (const g of groups) remove.run(...g.split('|'));
-        for (const r of rows) insert.run(r.date, r.adId, r.adName, r.campaignId, r.campaignName, r.adsetId, r.adsetName, r.gasto, r.impressions, r.clicks, r.mensajes, now, r.country ?? '');
+        for (const r of rows) insert.run(r.date, r.adId, r.adName, r.campaignId, r.campaignName, r.adsetId, r.adsetName, r.gasto, r.impressions, r.clicks, r.mensajes, now, r.country ?? '', r.accountId ?? accountId);
       });
       refreshAdCt(db);
     },
@@ -194,10 +245,15 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
     },
     setCountryRates: (countries) => syncCountryRates(db, countries),
     setSpendVat: (pct) => syncSpendVat(db, pct),
-    insightsBetween: (from, to) =>
-      q('SELECT * FROM insights WHERE date >= ? AND date <= ? ORDER BY date, ad_id, country').all(from, to).map((r) => ({
+    setExcludedAccounts: (ids) => syncExcludedAccounts(db, ids),
+    // `accounts`: null = every account; a list (possibly empty) limits the rows to those accounts.
+    insightsBetween: (from, to, accounts = null) =>
+      (accounts
+        ? q('SELECT * FROM insights WHERE date >= ? AND date <= ? AND account_id IN (SELECT value FROM json_each(?)) ORDER BY date, ad_id, country').all(from, to, JSON.stringify(accounts))
+        : q('SELECT * FROM insights WHERE date >= ? AND date <= ? ORDER BY date, ad_id, country').all(from, to)
+      ).map((r) => ({
         date: r.date, adId: r.ad_id, adName: r.ad_name, campaignId: r.campaign_id, campaignName: r.campaign_name,
-        adsetId: r.adset_id, adsetName: r.adset_name, gasto: r.gasto, impressions: r.impressions, clicks: r.clicks, mensajes: r.mensajes, country: r.country,
+        adsetId: r.adset_id, adsetName: r.adset_name, gasto: r.gasto, impressions: r.impressions, clicks: r.clicks, mensajes: r.mensajes, country: r.country, accountId: r.account_id ?? '',
       })),
     insightsRebuilt,
     // What the database holds: first/last day with data and how many days are stored.
@@ -208,19 +264,19 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
     },
     // Latest known names per ad (any day), so payments of days without spend can still be attributed.
     identities() {
-      const rows = q(`SELECT i.ad_id, i.ad_name, i.campaign_id, i.campaign_name FROM insights i
+      const rows = q(`SELECT i.* FROM insights i
         JOIN (SELECT ad_id, MAX(date) AS date FROM insights GROUP BY ad_id) m ON i.ad_id = m.ad_id AND i.date = m.date`).all();
-      return Object.fromEntries(rows.map((r) => [r.ad_id, { adName: r.ad_name, campaignId: r.campaign_id, campaignName: r.campaign_name }]));
+      return Object.fromEntries(rows.map((r) => [r.ad_id, { adName: r.ad_name, campaignId: r.campaign_id, campaignName: r.campaign_name, accountId: r.account_id ?? '' }]));
     },
 
-    upsertAds(ads, now) {
-      const stmt = q(`INSERT INTO ads (ad_id, name, created_time, effective_status, campaign_id, campaign_name, adset_id, adset_name, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    upsertAds(ads, now, accountId = '') {
+      const stmt = q(`INSERT INTO ads (ad_id, name, created_time, effective_status, campaign_id, campaign_name, adset_id, adset_name, updated_at, account_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ad_id) DO UPDATE SET name = excluded.name, created_time = excluded.created_time, effective_status = excluded.effective_status,
           campaign_id = excluded.campaign_id, campaign_name = excluded.campaign_name, adset_id = excluded.adset_id, adset_name = excluded.adset_name,
-          updated_at = excluded.updated_at`);
+          updated_at = excluded.updated_at, account_id = excluded.account_id`);
       tx(() => {
-        for (const a of ads) stmt.run(a.adId, a.name, a.createdTime, a.effectiveStatus, a.campaignId, a.campaignName, a.adsetId, a.adsetName, now);
+        for (const a of ads) stmt.run(a.adId, a.name, a.createdTime, a.effectiveStatus, a.campaignId, a.campaignName, a.adsetId, a.adsetName, now, a.accountId ?? accountId);
       });
     },
     // Stores the first day with spend > 0 of every ad that has insights. Past rows are never deleted, so it is stable.
@@ -240,14 +296,14 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
     adsMap() {
       const rows = q('SELECT * FROM ads').all();
       return Object.fromEntries(
-        rows.map((r) => [r.ad_id, { name: r.name, createdTime: r.created_time, effectiveStatus: r.effective_status, campaignId: r.campaign_id, campaignName: r.campaign_name, adsetId: r.adset_id, firstSpendDate: r.first_spend_date }]),
+        rows.map((r) => [r.ad_id, { name: r.name, createdTime: r.created_time, effectiveStatus: r.effective_status, campaignId: r.campaign_id, campaignName: r.campaign_name, adsetId: r.adset_id, firstSpendDate: r.first_spend_date, accountId: r.account_id ?? '' }]),
       );
     },
 
     // Appends a budget row for each ad set / campaign whose budget differs from the last one seen.
-    recordBudgets(ads, date, now) {
+    recordBudgets(ads, date, now, accountId = '') {
       const last = q('SELECT daily_budget, lifetime_budget FROM budget_history WHERE entity_type = ? AND entity_id = ? ORDER BY id DESC LIMIT 1');
-      const insert = q('INSERT INTO budget_history (entity_type, entity_id, date, daily_budget, lifetime_budget, first_seen) VALUES (?, ?, ?, ?, ?, ?)');
+      const insert = q('INSERT INTO budget_history (entity_type, entity_id, date, daily_budget, lifetime_budget, first_seen, account_id) VALUES (?, ?, ?, ?, ?, ?, ?)');
       const done = new Set();
       const record = (type, id, daily, lifetime) => {
         const key = `${type}|${id}`;
@@ -255,7 +311,7 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
         done.add(key);
         const prev = last.get(type, id);
         if (prev && prev.daily_budget === daily && prev.lifetime_budget === lifetime) return;
-        insert.run(type, id, date, daily, lifetime, now);
+        insert.run(type, id, date, daily, lifetime, now, accountId);
       };
       tx(() => {
         for (const a of ads) {
@@ -319,10 +375,10 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
         country: r.override_country ?? r.country, countrySource: r.override_country ? 'manual' : r.country_source,
       })),
 
-    upsertBudgetEvents(events) {
-      const stmt = q('INSERT OR IGNORE INTO budget_events (entity_type, entity_id, time, date, old_budget, new_budget) VALUES (?, ?, ?, ?, ?, ?)');
+    upsertBudgetEvents(events, accountId = '') {
+      const stmt = q('INSERT OR IGNORE INTO budget_events (entity_type, entity_id, time, date, old_budget, new_budget, account_id) VALUES (?, ?, ?, ?, ?, ?, ?)');
       tx(() => {
-        for (const e of events) stmt.run(e.entityType, e.entityId, e.time, e.date, e.oldBudget, e.newBudget);
+        for (const e of events) stmt.run(e.entityType, e.entityId, e.time, e.date, e.oldBudget, e.newBudget, e.accountId ?? accountId);
       });
     },
     budgetEvents: () =>
@@ -378,7 +434,8 @@ export function createStore(file = ':memory:', { readOnly = false } = {}) {
 // <data dir>/ads/ads.db
 export function openStoreAt(dataDir) {
   fs.mkdirSync(adsDir(dataDir), { recursive: true });
-  return createStore(path.join(adsDir(dataDir), 'ads.db'));
+  // Rows saved before accounts existed belong to the account the single-account config pointed at.
+  return createStore(path.join(adsDir(dataDir), 'ads.db'), { defaultAccountId: loadConfig(dataDir).adAccountId });
 }
 
 // Read-only handle on an existing ads.db (the Analista never writes to it).

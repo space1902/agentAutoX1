@@ -2,11 +2,18 @@
 // AGENTAUTO_META_TOKEN environment variable.
 import fs from 'node:fs';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { DEFAULT_COUNTRY_TOKENS } from './country.js';
+import { ACCOUNT_RE, PRINCIPAL_ID, SLUG_RE } from './portfolios.js';
 
 export const DEFAULT_CONFIG = Object.freeze({
+  // Legacy single account. With portfolios it only mirrors the principal portfolio's first account (the alerts monitor and
+  // older readers use it); the default is what a pre-portfolio data dir was syncing.
   adAccountId: 'act_1962423981398837',
+  // Meta Business Managers and their ad accounts: [{ id: slug, name, accounts: [{ id: 'act_...', name, currency, timezone }] }].
+  // Tokens are never here: each portfolio's token lives in the OS keyring (see portfolios.js).
+  portfolios: Object.freeze([]),
   graphVersion: 'v26.0',
   // "all" (or empty) monitors every campaign. Version 2 of the scope: before it the default was "CT" (CT campaigns only).
   campaignPrefix: 'all',
@@ -92,20 +99,77 @@ const wholeDays = (value, label) => {
   return n;
 };
 
+const MAX_PORTFOLIOS = 20;
+const MAX_ACCOUNTS = 50;
+
+const accountId = (value) => {
+  const raw = text(value, 'La cuenta publicitaria');
+  const id = /^\d+$/.test(raw) ? `act_${raw}` : raw;
+  if (!ACCOUNT_RE.test(id)) throw new ConfigError('La cuenta publicitaria debe verse como act_1234567890.');
+  return id;
+};
+
+const assertNoSecretKeys = (obj) => {
+  for (const key of Object.keys(obj ?? {})) {
+    if (SECRET_KEYS.test(key)) throw new ConfigError('El token de Meta no se guarda en la configuración.');
+  }
+};
+
+// Validated copy of the portfolio list (unknown keys dropped, ids normalized, uniqueness enforced).
+export function normalizePortfolios(list) {
+  if (!Array.isArray(list) || list.length > MAX_PORTFOLIOS) throw new ConfigError('Los portafolios deben ser una lista (máximo 20).');
+  const seenPortfolios = new Set();
+  const owner = new Map();
+  return list.map((raw) => {
+    if (!raw || typeof raw !== 'object') throw new ConfigError('Cada portafolio debe tener identificador, nombre y cuentas.');
+    assertNoSecretKeys(raw);
+    const id = String(raw.id ?? '').trim();
+    if (!SLUG_RE.test(id)) throw new ConfigError('El identificador del portafolio no es válido (minúsculas, números y guiones, hasta 40).');
+    if (seenPortfolios.has(id)) throw new ConfigError(`El portafolio «${id}» está repetido.`);
+    seenPortfolios.add(id);
+    const name = text(raw.name, 'El nombre del portafolio', { max: 80 });
+    const accounts = raw.accounts ?? [];
+    if (!Array.isArray(accounts) || accounts.length > MAX_ACCOUNTS) throw new ConfigError('Las cuentas de un portafolio deben ser una lista (máximo 50).');
+    const seenHere = new Set();
+    return {
+      id,
+      name,
+      accounts: accounts.map((a) => {
+        assertNoSecretKeys(a);
+        const aid = accountId(a?.id);
+        if (seenHere.has(aid)) throw new ConfigError(`La cuenta ${aid} está repetida en el portafolio.`);
+        if (owner.has(aid) && owner.get(aid) !== id) throw new ConfigError(`La cuenta ${aid} ya está en otro portafolio.`);
+        seenHere.add(aid);
+        owner.set(aid, id);
+        return {
+          id: aid,
+          name: text(a.name, 'El nombre de la cuenta', { allowEmpty: true, max: 100 }) || aid,
+          currency: text(a.currency, 'La moneda de la cuenta', { allowEmpty: true, pattern: /^[A-Za-z]{3}$/ }).toUpperCase(),
+          timezone: text(a.timezone, 'La zona horaria de la cuenta', { allowEmpty: true, max: 60, pattern: /^[A-Za-z0-9_+/-]+$/ }),
+        };
+      }),
+    };
+  });
+}
+
+// Account the single-account readers (alerts monitor, old callers) use: the principal portfolio's first account, else the first one.
+export function primaryAccountId(portfolios) {
+  const withAccounts = (portfolios ?? []).filter((p) => p.accounts?.length);
+  return (withAccounts.find((p) => p.id === PRINCIPAL_ID) ?? withAccounts[0])?.accounts[0].id ?? null;
+}
+
 // Defaults + validated overrides. Unknown keys are dropped; anything that looks like a secret is refused.
 export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
   const p = partial ?? {};
   for (const key of Object.keys(p)) {
     if (SECRET_KEYS.test(key)) throw new ConfigError('El token de Meta no se guarda en la configuración.');
   }
-  const out = { ...base, thresholds: { ...base.thresholds }, lifecycle: { ...base.lifecycle }, countries: structuredClone(base.countries), enabledCountries: [...base.enabledCountries], countryWords: structuredClone(base.countryWords) };
+  const out = { ...base, portfolios: structuredClone(base.portfolios ?? []), thresholds: { ...base.thresholds }, lifecycle: { ...base.lifecycle }, countries: structuredClone(base.countries), enabledCountries: [...base.enabledCountries], countryWords: structuredClone(base.countryWords) };
 
-  if (p.adAccountId !== undefined) {
-    const raw = text(p.adAccountId, 'La cuenta publicitaria');
-    const id = /^\d+$/.test(raw) ? `act_${raw}` : raw;
-    if (!/^act_\d{5,25}$/.test(id)) throw new ConfigError('La cuenta publicitaria debe verse como act_1234567890.');
-    out.adAccountId = id;
-  }
+  if (p.adAccountId !== undefined) out.adAccountId = accountId(p.adAccountId);
+  if (p.portfolios !== undefined) out.portfolios = normalizePortfolios(p.portfolios);
+  // With portfolios, the legacy field follows the principal one.
+  out.adAccountId = primaryAccountId(out.portfolios) ?? out.adAccountId;
   if (p.graphVersion !== undefined) out.graphVersion = text(p.graphVersion, 'La versión de Graph', { pattern: /^v\d+\.\d+$/ });
   if (p.campaignPrefix !== undefined) out.campaignPrefix = text(p.campaignPrefix, 'El prefijo de campañas', { allowEmpty: true, max: 40 });
   if (p.sheetId !== undefined) out.sheetId = text(p.sheetId, 'El ID de la hoja', { pattern: /^[A-Za-z0-9_-]{10,100}$/ });
@@ -179,16 +243,100 @@ export function mergeConfig(partial = {}, base = DEFAULT_CONFIG) {
 export const adsDir = (dataDir) => path.join(dataDir, 'ads');
 export const configPath = (dataDir) => path.join(adsDir(dataDir), 'config.json');
 
-export function loadConfig(dataDir) {
+const dbPath = (dataDir) => path.join(adsDir(dataDir), 'ads.db');
+
+// Name/currency/timezone the old single-account sync stored in the database (read-only; any failure = nothing known).
+function legacyAccountInfo(dataDir) {
+  let db;
   try {
-    const raw = fs.readFileSync(configPath(dataDir), 'utf8').replace(/^﻿/, '');
-    const parsed = JSON.parse(raw);
-    const cfg = mergeConfig(parsed);
+    db = new DatabaseSync(dbPath(dataDir), { readOnly: true });
+    const row = db.prepare("SELECT value FROM kv WHERE key = 'account'").get();
+    const info = row ? JSON.parse(row.value) : null;
+    return info && typeof info === 'object' ? info : null;
+  } catch {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      /* nothing to close */
+    }
+  }
+}
+
+// A pre-portfolio data dir (config without a `portfolios` key, or no config but a database) becomes one "principal"
+// portfolio holding its single account. Same input -> same output, so running it again changes nothing.
+function legacyPortfolios(dataDir, legacyId) {
+  const info = legacyAccountInfo(dataDir) ?? {};
+  const safe = (fn) => {
+    try {
+      return fn();
+    } catch {
+      return '';
+    }
+  };
+  return normalizePortfolios([
+    {
+      id: PRINCIPAL_ID,
+      name: 'Portafolio principal',
+      accounts: [{
+        id: legacyId,
+        name: safe(() => text(info.name, 'nombre', { allowEmpty: true, max: 100 })),
+        currency: safe(() => text(info.currency, 'moneda', { allowEmpty: true, pattern: /^[A-Za-z]{3}$/ })),
+        timezone: safe(() => text(info.timezone, 'zona', { allowEmpty: true, max: 60, pattern: /^[A-Za-z0-9_+/-]+$/ })),
+      }],
+    },
+  ]);
+}
+
+export function loadConfig(dataDir) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(fs.readFileSync(configPath(dataDir), 'utf8').replace(/^﻿/, ''));
+  } catch {
+    /* missing or broken file: defaults */
+  }
+  try {
+    const cfg = mergeConfig(parsed ?? {});
     // The old default only showed CT campaigns; it is not a choice the user made, so it widens to every campaign once.
-    if (parsed?.prefixVersion !== 2 && String(parsed?.campaignPrefix ?? '').trim() === 'CT') cfg.campaignPrefix = 'all';
+    if (parsed && parsed.prefixVersion !== 2 && String(parsed.campaignPrefix ?? '').trim() === 'CT') cfg.campaignPrefix = 'all';
+    if (!Array.isArray(parsed?.portfolios) && (parsed || fs.existsSync(dbPath(dataDir)))) {
+      cfg.portfolios = legacyPortfolios(dataDir, cfg.adAccountId);
+    }
     return cfg;
   } catch {
     return mergeConfig({});
+  }
+}
+
+// Writes the migrated portfolios once (a no-op when the config already has them or there is nothing to migrate).
+export function ensureMigrated(dataDir) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(fs.readFileSync(configPath(dataDir), 'utf8').replace(/^﻿/, ''));
+  } catch {
+    /* no file */
+  }
+  if (Array.isArray(parsed?.portfolios)) return false;
+  const cfg = loadConfig(dataDir);
+  if (!cfg.portfolios.length) return false;
+  saveConfig(dataDir, { portfolios: cfg.portfolios });
+  return true;
+}
+
+// Windows can refuse a rename while another process has the target open for a moment (EPERM/EBUSY/EACCES).
+function renameWithRetry(from, to, attempts = 40) {
+  for (let i = 0; ; i++) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (error) {
+      if (i >= attempts || !['EPERM', 'EBUSY', 'EACCES'].includes(error?.code)) {
+        fs.rmSync(from, { force: true });
+        throw error;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 + i * 5);
+    }
   }
 }
 
@@ -208,6 +356,6 @@ export function saveConfig(dataDir, partial, { now = () => new Date() } = {}) {
   }
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
-  fs.renameSync(tmp, file);
+  renameWithRetry(tmp, file);
   return next;
 }

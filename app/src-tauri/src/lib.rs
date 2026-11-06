@@ -456,12 +456,6 @@ async fn line_health(state: State<'_, AppState>) -> Result<Value, String> {
     blocking(move || profiles::call(&settings, "line-health", &json!({}))).await
 }
 
-#[tauri::command]
-fn read_warmup_data(state: State<'_, AppState>) -> Result<data::WarmupData, String> {
-    data::read_warmup(&state.current())
-}
-
-#[tauri::command]
 /// Per-number schedule state (active, outside its window, at its daily cap, paused), messages sent today and
 /// the cap. Computed by the engine with the same rules the warm-up run uses.
 #[tauri::command]
@@ -485,6 +479,12 @@ async fn tester_resume(state: State<'_, AppState>, id: String) -> Result<Value, 
     blocking(move || profiles::call(&settings, "resume-tester", &json!({ "id": id }))).await
 }
 
+#[tauri::command]
+fn read_warmup_data(state: State<'_, AppState>) -> Result<data::WarmupData, String> {
+    data::read_warmup(&state.current())
+}
+
+#[tauri::command]
 fn read_pods_wsp(state: State<'_, AppState>) -> Result<BTreeMap<String, String>, String> {
     data::read_pods_wsp(&state.current())
 }
@@ -549,29 +549,38 @@ fn ollama_launch() -> Result<(), String> {
 // ---- Anuncios section
 
 #[tauri::command]
-async fn ads_sync(state: State<'_, AppState>, from: String, to: String) -> Result<Value, String> {
+async fn ads_sync(state: State<'_, AppState>, from: String, to: String, accounts: Option<String>) -> Result<Value, String> {
     let settings = state.current();
-    blocking(move || ads::sync(&settings, &from, &to)).await
+    blocking(move || ads::sync(&settings, &from, &to, accounts.as_deref())).await
 }
 
 #[tauri::command]
-async fn ads_report(state: State<'_, AppState>, from: String, to: String, group: String, country: Option<String>, split: Option<bool>) -> Result<Value, String> {
+async fn ads_report(
+    state: State<'_, AppState>,
+    from: String,
+    to: String,
+    group: String,
+    country: Option<String>,
+    split: Option<bool>,
+    accounts: Option<String>,
+    name: Option<String>,
+) -> Result<Value, String> {
     let settings = state.current();
-    blocking(move || ads::report(&settings, &from, &to, &group, country.as_deref(), split.unwrap_or(false))).await
+    blocking(move || ads::report(&settings, &from, &to, &group, country.as_deref(), split.unwrap_or(false), accounts.as_deref(), name.as_deref())).await
 }
 
 /// Payments of an arbitrary range for the Comprobantes card.
 #[tauri::command]
-async fn ads_vouchers(state: State<'_, AppState>, from: String, to: String, country: Option<String>) -> Result<Value, String> {
+async fn ads_vouchers(state: State<'_, AppState>, from: String, to: String, country: Option<String>, accounts: Option<String>, name: Option<String>) -> Result<Value, String> {
     let settings = state.current();
-    blocking(move || ads::vouchers(&settings, &from, &to, country.as_deref())).await
+    blocking(move || ads::vouchers(&settings, &from, &to, country.as_deref(), accounts.as_deref(), name.as_deref())).await
 }
 
 /// Incremental sync (last days + today); the first run backfills the whole history.
 #[tauri::command]
-async fn ads_sync_auto(state: State<'_, AppState>) -> Result<Value, String> {
+async fn ads_sync_auto(state: State<'_, AppState>, accounts: Option<String>) -> Result<Value, String> {
     let settings = state.current();
-    blocking(move || ads::sync_auto(&settings)).await
+    blocking(move || ads::sync_auto(&settings, accounts.as_deref())).await
 }
 
 /// Refreshes the live exchange rates (MXN/USD... to COP); a failed fetch keeps the last saved rate.
@@ -767,7 +776,8 @@ async fn ads_monitor_start(app: AppHandle, state: State<'_, AppState>, confirm_c
     let alerts = state.alerts.clone();
     let emit = event_emitter(&app);
     blocking(move || {
-        let token = ads::stored_token()?;
+        // Token and account come from the same portfolio (the one that owns the primary account).
+        let token = ads::monitor_token(&settings)?;
         alerts.start_monitor(&settings, &root, token, confirm_conflict, emit)?;
         Ok(alerts.monitor.status())
     })
@@ -814,26 +824,70 @@ async fn ads_wa_import_session(state: State<'_, AppState>, overwrite: bool) -> R
     .await
 }
 
-/// Only whether a token exists; the value never reaches the UI.
+/// Only whether each portfolio's token exists; the values never reach the UI.
+#[tauri::command]
+async fn ads_portfolio_token_status(portfolios: Vec<String>) -> Result<BTreeMap<String, bool>, String> {
+    blocking(move || ads::token_statuses(&portfolios)).await
+}
+
+#[tauri::command]
+async fn ads_portfolio_token_set(portfolio: String, token: String) -> Result<(), String> {
+    blocking(move || ads::set_token(&portfolio, &token)).await
+}
+
+#[tauri::command]
+async fn ads_portfolio_token_clear(portfolio: String, confirm_principal: Option<bool>) -> Result<(), String> {
+    blocking(move || ads::clear_portfolio_token(&portfolio, confirm_principal.unwrap_or(false))).await
+}
+
+/// Checks the portfolio's token with Meta and lists the ad accounts it can see.
+#[tauri::command]
+async fn ads_portfolio_token_test(state: State<'_, AppState>, portfolio: String) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::test_token(&settings, &portfolio)).await
+}
+
+/// New portfolio: the engine creates it, the token goes to the Credential Manager.
+#[tauri::command]
+async fn ads_portfolio_add(state: State<'_, AppState>, name: String, token: String) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::portfolio_add(&settings, &name, &token)).await
+}
+
+/// Drops the portfolio from the configuration and deletes its token; the history in ads.db stays.
+#[tauri::command]
+async fn ads_portfolio_remove(state: State<'_, AppState>, portfolio: String, confirm_principal: Option<bool>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::portfolio_remove(&settings, &portfolio, confirm_principal.unwrap_or(false))).await
+}
+
+/// New ad account: saved only after Meta confirms the portfolio's token can read it.
+#[tauri::command]
+async fn ads_account_add(state: State<'_, AppState>, portfolio: String, account: String, name: Option<String>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::account_add(&settings, &portfolio, &account, name.as_deref().unwrap_or(""))).await
+}
+
+/// Legacy aliases of the single-token commands: they act on the principal portfolio (the `meta-token` entry).
 #[tauri::command]
 async fn ads_token_status() -> Result<bool, String> {
-    blocking(ads::token_present).await
+    blocking(|| ads::token_present(ads::PRINCIPAL)).await
 }
 
 #[tauri::command]
 async fn ads_token_set(token: String) -> Result<(), String> {
-    blocking(move || ads::set_token(&token)).await
+    blocking(move || ads::set_token(ads::PRINCIPAL, &token)).await
 }
 
 #[tauri::command]
-async fn ads_token_clear() -> Result<(), String> {
-    blocking(ads::clear_token).await
+async fn ads_token_clear(confirm_principal: Option<bool>) -> Result<(), String> {
+    blocking(move || ads::clear_portfolio_token(ads::PRINCIPAL, confirm_principal.unwrap_or(false))).await
 }
 
 #[tauri::command]
 async fn ads_token_test(state: State<'_, AppState>) -> Result<Value, String> {
     let settings = state.current();
-    blocking(move || ads::test_token(&settings)).await
+    blocking(move || ads::test_token(&settings, ads::PRINCIPAL)).await
 }
 
 #[tauri::command]
@@ -974,6 +1028,9 @@ pub fn run() {
             profile_delete,
             profile_set_group,
             line_health,
+            schedule_status,
+            tester_pause,
+            tester_resume,
             plan_pod_links,
             run_pod_links,
             cancel_pod_links,
@@ -1009,6 +1066,13 @@ pub fn run() {
             ads_comprobante_country,
             ads_comprobante_accept,
             ads_status,
+            ads_portfolio_token_status,
+            ads_portfolio_token_set,
+            ads_portfolio_token_clear,
+            ads_portfolio_token_test,
+            ads_portfolio_add,
+            ads_portfolio_remove,
+            ads_account_add,
             ads_config_get,
             ads_config_set,
             ads_decisions,
@@ -1034,9 +1098,6 @@ pub fn run() {
             voices_call,
             voices_key_status,
             voices_key_set,
-            schedule_status,
-            tester_pause,
-            tester_resume,
             voices_key_clear,
             agent_call,
             agent_start,

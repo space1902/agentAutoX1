@@ -144,3 +144,82 @@ test('autoRate defaults to on per country and can be turned off', () => {
   assert.equal(off.countries.MX.rateToCop, 0, 'the manual rate is untouched');
   assert.equal(mergeConfig({ countries: { MX: { rateToCop: 200 } } }).countries.MX.autoRate, true);
 });
+
+// ---- portfolios and ad accounts
+
+const PF = () => [
+  { id: 'principal', name: 'Portafolio principal', accounts: [{ id: 'act_1962423981398837', name: 'X1 Pro Max', currency: 'COP', timezone: 'America/Bogota' }] },
+  { id: 'bm-dos', name: 'BM dos', accounts: [{ id: '2222222222', name: '', currency: 'usd' }] },
+];
+
+test('portfolios are validated, normalized and exposed with the legacy adAccountId of the principal portfolio', () => {
+  assert.deepEqual(DEFAULT_CONFIG.portfolios, []);
+  const c = mergeConfig({ portfolios: PF() });
+  assert.equal(c.portfolios.length, 2);
+  assert.equal(c.portfolios[1].accounts[0].id, 'act_2222222222', 'a bare number becomes act_<number>');
+  assert.equal(c.portfolios[1].accounts[0].currency, 'USD');
+  assert.equal(c.portfolios[1].accounts[0].name, 'act_2222222222', 'blank name falls back to the id');
+  assert.equal(c.adAccountId, 'act_1962423981398837');
+});
+
+test('portfolio ids must be slugs and unique; account ids unique across portfolios', () => {
+  assert.throws(() => mergeConfig({ portfolios: [{ id: 'Bad Slug', name: 'x', accounts: [] }] }), /identificador/i);
+  assert.throws(() => mergeConfig({ portfolios: [{ id: 'a', name: 'x', accounts: [] }, { id: 'a', name: 'y', accounts: [] }] }), /repetido|duplicado/i);
+  assert.throws(() => mergeConfig({ portfolios: [{ id: 'a', name: '', accounts: [] }] }), /nombre/i);
+  assert.throws(() => mergeConfig({ portfolios: [{ id: 'a', name: 'x', accounts: [{ id: 'abc' }] }] }), /cuenta/i);
+  assert.throws(
+    () => mergeConfig({ portfolios: [{ id: 'a', name: 'x', accounts: [{ id: 'act_12345' }] }, { id: 'b', name: 'y', accounts: [{ id: 'act_12345' }] }] }),
+    /otro portafolio|repetida/i,
+  );
+  assert.throws(() => mergeConfig({ portfolios: 'x' }), /portafolios/i);
+});
+
+test('nested keys that look like secrets are refused and unknown nested keys are dropped', () => {
+  assert.throws(() => mergeConfig({ portfolios: [{ id: 'a', name: 'x', accounts: [], accessToken: 'zzz' }] }), /token/i);
+  assert.throws(() => mergeConfig({ portfolios: [{ id: 'a', name: 'x', accounts: [{ id: 'act_12345', secret: 'q' }] }] }), /token/i);
+  const c = mergeConfig({ portfolios: [{ id: 'a', name: 'x', extra: 1, accounts: [{ id: 'act_12345', foo: 1 }] }] });
+  assert.equal('extra' in c.portfolios[0], false);
+  assert.equal('foo' in c.portfolios[0].accounts[0], false);
+});
+
+test('a legacy config with adAccountId and no portfolios migrates to the principal portfolio (idempotent)', () => {
+  const dir = tmp();
+  fs.mkdirSync(path.join(dir, 'ads'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'ads', 'config.json'), JSON.stringify({ adAccountId: 'act_555555', flowPrefix: 'Barf' }));
+  const first = loadConfig(dir);
+  assert.deepEqual(first.portfolios, [{ id: 'principal', name: 'Portafolio principal', accounts: [{ id: 'act_555555', name: 'act_555555', currency: '', timezone: '' }] }]);
+  assert.equal(first.adAccountId, 'act_555555');
+  assert.equal(first.flowPrefix, 'Barf');
+  const saved = saveConfig(dir, { flowPrefix: 'Barf2' });
+  assert.deepEqual(saved.portfolios, first.portfolios);
+  assert.deepEqual(loadConfig(dir).portfolios, first.portfolios, 'persisted on first save, same result on reload');
+  assert.deepEqual(saveConfig(dir, {}).portfolios, first.portfolios);
+});
+
+test('the migrated account takes its name, currency and timezone from the stored account info', async () => {
+  const dir = tmp();
+  fs.mkdirSync(path.join(dir, 'ads'), { recursive: true });
+  const { createStore } = await import('./store.js');
+  const store = createStore(path.join(dir, 'ads', 'ads.db'));
+  store.setKv('account', { name: 'X1 Pro Max', timezone: 'America/Bogota', currency: 'COP' });
+  store.close();
+  const c = loadConfig(dir);
+  assert.deepEqual(c.portfolios[0].accounts[0], { id: 'act_1962423981398837', name: 'X1 Pro Max', currency: 'COP', timezone: 'America/Bogota' });
+});
+
+test('a fresh data dir has no portfolios (first-run), and an explicit empty list is respected', () => {
+  const dir = tmp();
+  assert.deepEqual(loadConfig(dir).portfolios, []);
+  saveConfig(dir, { flowPrefix: 'Uno' });
+  assert.deepEqual(loadConfig(dir).portfolios, []);
+});
+
+test('saving portfolios replaces the list and keeps adAccountId in step', () => {
+  const dir = tmp();
+  const c = saveConfig(dir, { portfolios: PF() });
+  assert.equal(loadConfig(dir).portfolios[1].id, 'bm-dos');
+  assert.equal(c.adAccountId, 'act_1962423981398837');
+  const only = saveConfig(dir, { portfolios: [PF()[1]] });
+  assert.equal(only.adAccountId, 'act_2222222222', 'first account of the first portfolio when there is no principal');
+  assert.equal(/token/i.test(fs.readFileSync(path.join(dir, 'ads', 'config.json'), 'utf8')), false);
+});

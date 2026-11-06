@@ -4,6 +4,8 @@ import { loadConfig } from '../ads/config.js';
 import { computeChanges } from '../ads/budget.js';
 import { postBudgetVerdict } from '../ads/decisions.js';
 import { extractCt } from '../ads/parse.js';
+import { configuredAccountIds } from '../ads/portfolios.js';
+import { accountMetaOf, scopeInsights } from '../ads/scope.js';
 import { buildReport, isMonitored } from '../ads/report.js';
 import { openStoreReadOnly } from '../ads/store.js';
 import { DEFAULT_TIMEZONE } from '../ads/sync.js';
@@ -32,18 +34,20 @@ export function accountToday(dataDir, now = Date.now()) {
 export function loadDataset(dataDir, now = Date.now()) {
   const store = openStoreReadOnly(dataDir);
   try {
+    const config = loadConfig(dataDir);
     const timezone = store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
     const histories = store.budgetHistories();
     const events = store.budgetEvents();
     return {
       histories,
       events,
-      insights: store.insightsBetween('2000-01-01', '2999-12-31'),
+      // Spend in the base currency, only for configured accounts (an account without a known rate is left out).
+      insights: scopeInsights({ rows: store.insightsBetween('2000-01-01', '2999-12-31'), accounts: new Set(['', ...configuredAccountIds(config)]), accountMeta: accountMetaOf(config, store), config, fxRates: store.fxRates() }).rows,
       comprobantes: store.comprobantesBetween('2000-01-01', '2999-12-31'),
       identities: store.identities(),
       ads: store.adsWithFirstSpend(),
       changes: computeChanges({ histories, events }),
-      config: loadConfig(dataDir),
+      config,
       timezone,
       today: localParts(now, timezone).date,
       lastSync: store.getKv('lastSync'),

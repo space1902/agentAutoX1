@@ -90,9 +90,9 @@ test('status reports token presence, counts and last sync without leaking the to
   assert.equal((await runAdsCommand('status', {}, ctx({ env: {} }))).tokenPresent, false);
 });
 
-test('test-token verifies access to the ad account', async () => {
+test('test-token verifies the token of a portfolio (the principal one by default)', async () => {
   const out = await runAdsCommand('test-token', {}, ctx());
-  assert.deepEqual(out, { accountName: 'X1 Pro Max', currency: 'COP', timezone: 'America/Bogota' });
+  assert.deepEqual(out, { portfolio: 'principal', name: 'X1 Pro Max', id: '', accounts: [] });
   await assert.rejects(runAdsCommand('test-token', {}, ctx({ env: {} })), /token/i);
 });
 
@@ -134,9 +134,9 @@ test('alerts commands: config round trip, wa status and an empty alert list', as
   const got = await runAdsCommand('alerts-config-get', {}, c);
   assert.equal(got.config.allowActions, false);
   assert.equal(got.defaults.pollMinutes, 15);
-  const set = await runAdsCommand('alerts-config-set', { pollMinutes: 20, whatsapp: { alertTo: '316 758 5233' } }, c);
+  const set = await runAdsCommand('alerts-config-set', { pollMinutes: 20, whatsapp: { alertTo: '300 000 0002' } }, c);
   assert.equal(set.config.pollMinutes, 20);
-  assert.equal(set.config.whatsapp.alertTo, '573167585233');
+  assert.equal(set.config.whatsapp.alertTo, '573000000002');
   await assert.rejects(runAdsCommand('alerts-config-set', { thresholds: { targetCpa: 99999999 } }, c), AdsError);
   assert.deepEqual(await runAdsCommand('wa-status', {}, c), { linked: false, phoneMasked: '' });
   assert.deepEqual(await runAdsCommand('alerts-recent', {}, c), { alerts: [], pausedUntil: null });

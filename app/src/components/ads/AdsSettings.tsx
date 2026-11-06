@@ -1,16 +1,18 @@
-import { KeyRound, Save } from "lucide-react";
+import { Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import { errorText } from "../../lib/api";
 import { COUNTRY_NAMES, adsApi, countryName, type AdsConfig, type CountrySettings, type Lifecycle, type Thresholds } from "../../lib/adsApi";
-import { Notice, Pill } from "../ui";
+import { Notice } from "../ui";
+import AdsPortfolios from "./AdsPortfolios";
 
 interface Props {
   /** Countries that have data (before the enabled-countries scope). */
   detected: { country: string; gasto: number; ventas: number }[];
-  tokenPresent: boolean;
   config: AdsConfig;
   onTokenChange: () => void;
   onConfigSaved: (config: AdsConfig) => void;
+  /** Portfolios or accounts changed (already saved by the engine). */
+  onPortfoliosChanged: (config: AdsConfig) => void;
 }
 
 const THRESHOLD_LABELS: { key: keyof Thresholds; label: string; hint: string }[] = [
@@ -38,14 +40,14 @@ const LIFE_NUMBERS: { key: NumKey; label: string; hint: string }[] = [
   { key: "lateDays", label: "Días de gracia si la app estaba cerrada", hint: "Pasado ese plazo la decisión ya no se emite." },
 ];
 
-export default function AdsSettings({ detected, tokenPresent, config, onTokenChange, onConfigSaved }: Props) {
+export default function AdsSettings({ detected, config, onTokenChange, onConfigSaved, onPortfoliosChanged }: Props) {
   const [draft, setDraft] = useState<AdsConfig>(config);
-  const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  useEffect(() => setDraft(config), [config]);
+  // Portfolio edits are saved on their own; they must not wipe what is being typed in the rest of the form.
+  useEffect(() => setDraft((d) => ({ ...d, portfolios: config.portfolios, adAccountId: config.adAccountId })), [config.portfolios, config.adAccountId]);
 
   const run = async (work: () => Promise<string | void>) => {
     setBusy(true);
@@ -61,36 +63,11 @@ export default function AdsSettings({ detected, tokenPresent, config, onTokenCha
     }
   };
 
-  const test = async () => {
-    const info = await adsApi.tokenTest();
-    return `Conectado a «${info.accountName}» (${info.currency}, ${info.timezone}).`;
-  };
-
-  const importToken = () =>
-    run(async () => {
-      await adsApi.tokenImport();
-      onTokenChange();
-      return `Token importado. ${await test()}`;
-    });
-
-  const saveToken = () =>
-    run(async () => {
-      await adsApi.tokenSet(token);
-      setToken("");
-      onTokenChange();
-      return `Token guardado. ${await test()}`;
-    });
-
-  const clearToken = () =>
-    run(async () => {
-      await adsApi.tokenClear();
-      onTokenChange();
-      return "Token eliminado.";
-    });
-
   const saveConfig = () =>
     run(async () => {
-      const { config: saved } = await adsApi.configSet(draft);
+      // Portfolios and accounts are managed by their own section (and the legacy account follows them).
+      const { portfolios: _portfolios, adAccountId: _account, ...rest } = draft;
+      const { config: saved } = await adsApi.configSet(rest);
       onConfigSaved(saved);
       return "Configuración guardada.";
     });
@@ -120,37 +97,10 @@ export default function AdsSettings({ detected, tokenPresent, config, onTokenCha
       {error && <Notice>{error}</Notice>}
       {notice && <Notice kind="ok">{notice}</Notice>}
 
-      <h3 className="ia-sub"><KeyRound size={14} aria-hidden /> Token de Meta</h3>
-      <div className="ads-token">
-        <Pill tone={tokenPresent ? "green" : "red"}>{tokenPresent ? "Conectado" : "Falta"}</Pill>
-        <button className="btn secondary sm" disabled={busy} onClick={() => void importToken()}>Importar desde meta-ads-monitor</button>
-        {tokenPresent && (
-          <>
-            <button className="btn secondary sm" disabled={busy} onClick={() => void run(test)}>Probar conexión</button>
-            <button className="btn ghost sm" disabled={busy} onClick={() => void clearToken()}>Quitar token</button>
-          </>
-        )}
-      </div>
-      <div className="ia-inline" style={{ marginTop: 10 }}>
-        <input
-          className="input"
-          type="password"
-          autoComplete="off"
-          placeholder="O pega aquí un token nuevo"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          aria-label="Token de Meta"
-        />
-        <button className="btn sm" disabled={busy || token.trim().length === 0} onClick={() => void saveToken()}>Guardar y probar</button>
-      </div>
-      <small className="muted">El token se guarda en el Administrador de credenciales de Windows. Nunca se muestra ni se escribe en archivos.</small>
+      <AdsPortfolios config={config} onChanged={onPortfoliosChanged} onTokenChange={onTokenChange} />
 
       <h3 className="ia-sub" style={{ marginTop: 22 }}>Fuentes de datos</h3>
       <div className="ia-grid">
-        <div className="field">
-          <label htmlFor="ads-account">Cuenta publicitaria</label>
-          <input id="ads-account" className="input" value={draft.adAccountId} onChange={(e) => set("adAccountId", e.target.value)} />
-        </div>
         <div className="field">
           <label htmlFor="ads-prefix">Prefijo de campañas</label>
           <input id="ads-prefix" className="input" value={draft.campaignPrefix} onChange={(e) => set("campaignPrefix", e.target.value)} />

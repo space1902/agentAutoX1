@@ -3,7 +3,7 @@
 // the CT tag is derived in JS (extractCt) and is only informational: rows are keyed by the real Meta campaign (campaign_id) and the exchange rates live in the JSON config.
 import { extractCt } from './parse.js';
 
-export const VIEWS_VERSION = 5;
+export const VIEWS_VERSION = 6;
 
 // Views of earlier versions that no longer exist (dropped on upgrade).
 const LEGACY_VIEWS = ['v_ct_daily'];
@@ -18,6 +18,8 @@ CREATE VIEW IF NOT EXISTS ad_campaign AS
   SELECT i.ad_id, i.campaign_id, i.campaign_name FROM insights i
     JOIN (SELECT ad_id, MAX(date) AS date FROM insights GROUP BY ad_id) m ON i.ad_id = m.ad_id AND i.date = m.date
     WHERE i.ad_id NOT IN (SELECT ad_id FROM ads) GROUP BY i.ad_id;
+-- Accounts whose spend is not in the base currency: v_ads_daily leaves them out (the app converts them, SQL does not).
+CREATE TABLE IF NOT EXISTS excluded_accounts (account_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS spend_vat (id INTEGER PRIMARY KEY CHECK (id = 1), pct REAL NOT NULL);
 INSERT OR IGNORE INTO spend_vat (id, pct) VALUES (1, 19);
 CREATE TABLE IF NOT EXISTS country_rates (
@@ -36,7 +38,8 @@ export const VIEWS = {
     description: 'Gasto y resultados de Meta por día, país, campaña y anuncio (una fila por día+anuncio+país de entrega). El gasto (spend) ya incluye el IVA que cobra Meta: úsalo tal cual para ROAS, costo por venta y ganancia; no le sumes IVA otra vez.',
     sql: `SELECT i.date AS date, ${COUNTRY('i.country')} AS country, COALESCE(c.ct, 'Sin CT') AS ct, i.campaign_id AS campaign_id, i.campaign_name AS campaign,
       i.ad_id AS ad_id, i.ad_name AS ad_name, i.gasto * ${VAT_FACTOR} AS spend, i.gasto AS spend_net, i.gasto * ${VAT_PCT} / 100.0 AS vat, i.mensajes AS messages, i.impressions AS impressions, i.clicks AS clicks
-      FROM insights i LEFT JOIN ad_ct c ON c.ad_id = i.ad_id`,
+      FROM insights i LEFT JOIN ad_ct c ON c.ad_id = i.ad_id
+      WHERE i.account_id NOT IN (SELECT account_id FROM excluded_accounts)`,
     columns: [
       ['date', 'Día (AAAA-MM-DD, zona horaria de la cuenta).'],
       ['country', 'País donde Meta entregó el anuncio (CO, MX, VE...) o «Sin país».'],
@@ -211,6 +214,23 @@ export function refreshAdCt(db) {
 }
 
 // Mirrors the spend IVA % into ads.db so the views can add it to the spend.
+export function syncExcludedAccounts(db, ids) {
+  const wanted = [...new Set(ids ?? [])].sort();
+  const current = db.prepare('SELECT account_id FROM excluded_accounts ORDER BY account_id').all().map((r) => r.account_id);
+  if (JSON.stringify(wanted) === JSON.stringify(current)) return false;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.exec('DELETE FROM excluded_accounts');
+    const put = db.prepare('INSERT INTO excluded_accounts (account_id) VALUES (?)');
+    for (const id of wanted) put.run(id);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  return true;
+}
+
 export function syncSpendVat(db, pct) {
   const wanted = Math.max(0, Number(pct) || 0);
   const current = db.prepare('SELECT pct FROM spend_vat WHERE id = 1').get();

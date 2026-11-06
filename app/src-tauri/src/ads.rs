@@ -1,11 +1,12 @@
 //! "Anuncios" section backend. All the rules live in the Node engine (`engines/ads/ads-cli.js`); this module only
-//!  - keeps the Meta token in the Windows Credential Manager (never on disk, never returned to the UI),
+//!  - keeps one Meta token per portfolio (Business Manager) in the Windows Credential Manager (never on disk, never returned to the UI),
 //!  - runs the engine one-shot commands (the token goes into the child env only),
 //!  - imports the token from the standalone meta-ads-monitor project's `.env` (the value is never read back out).
 
 use crate::settings::Settings;
 use crate::util::hidden_command;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -19,7 +20,10 @@ const TOKEN_ENTRY: &str = "meta-token";
 /// Env var the engine reads the token from.
 pub const TOKEN_ENV: &str = "AGENTAUTO_META_TOKEN";
 
-const ALLOWED: &[&str] = &["sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "comprobante-accept", "activities-probe", "fx-refresh"];
+/// The portfolio whose token keeps the original keyring entry `meta-token` (the migrated single account lives there).
+pub const PRINCIPAL: &str = "principal";
+
+const ALLOWED: &[&str] = &["portfolio-add", "account-add", "sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "comprobante-accept", "activities-probe", "fx-refresh"];
 const DECISION_STATUSES: &[&str] = &["pending", "done", "ignored"];
 // "ct" is the legacy name of the campaign grouping; the engine treats it as "campaign".
 const GROUPS: &[&str] = &["campaign", "ct", "ad"];
@@ -68,6 +72,37 @@ pub struct AdsArgs<'a> {
     pub undo: bool,
     /// `activities-probe --since D`.
     pub since: Option<&'a str>,
+    /// `sync|report|vouchers --accounts all|act_1,act_2`: the ad accounts in scope (absent = all).
+    pub accounts: Option<&'a str>,
+    /// `report|vouchers --name ct,pzz`: ad-name prefixes (starts-with, case-insensitive).
+    pub name: Option<&'a str>,
+    /// `test-token --portfolio slug`.
+    pub portfolio: Option<&'a str>,
+}
+
+/// Portfolio ids are short slugs; anything else never reaches the keyring, the environment or the engine.
+pub fn valid_slug(slug: &str) -> bool {
+    !slug.is_empty() && slug.len() <= 40 && slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// `all` or a comma list of `act_<5-25 digits>` (at most 100).
+pub fn valid_accounts_arg(value: &str) -> bool {
+    if value == "all" {
+        return true;
+    }
+    let items: Vec<&str> = value.split(',').collect();
+    items.len() <= 100
+        && items.iter().all(|a| {
+            a.strip_prefix("act_").map(|d| (5..=25).contains(&d.len()) && d.chars().all(|c| c.is_ascii_digit())).unwrap_or(false)
+        })
+}
+
+/// Ad-name prefixes: letters, digits, spaces and a little punctuation; never a leading `--` (it would read as a flag).
+pub fn valid_name_filter(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= 400
+        && !value.starts_with("--")
+        && value.chars().all(|c| c.is_alphanumeric() || " _-.·#+&()[]/|:,".contains(c))
 }
 
 /// Node arguments for one engine command. Everything is validated here so nothing odd reaches the shell-less spawn.
@@ -122,6 +157,30 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
             out.push("--undo".to_string());
         }
     }
+    if let Some(accounts) = args.accounts {
+        if !matches!(command, "sync" | "report" | "vouchers") {
+            return Err("Las cuentas solo se pueden elegir al actualizar o consultar.".to_string());
+        }
+        if !valid_accounts_arg(accounts) {
+            return Err("Las cuentas publicitarias deben verse como act_1234567890.".to_string());
+        }
+        out.extend(["--accounts".to_string(), accounts.to_string()]);
+    }
+    if let Some(name) = args.name.filter(|n| !n.trim().is_empty()) {
+        if !matches!(command, "report" | "vouchers") {
+            return Err("El filtro de nombre solo aplica a los reportes.".to_string());
+        }
+        if !valid_name_filter(name) {
+            return Err("El filtro de nombre tiene caracteres no válidos.".to_string());
+        }
+        out.extend(["--name".to_string(), name.to_string()]);
+    }
+    if let Some(portfolio) = args.portfolio {
+        if command != "test-token" || !valid_slug(portfolio) {
+            return Err("Portafolio no válido.".to_string());
+        }
+        out.extend(["--portfolio".to_string(), portfolio.to_string()]);
+    }
     if let Some(since) = args.since {
         if !valid_date(since) {
             return Err("Las fechas deben tener el formato AAAA-MM-DD.".to_string());
@@ -165,14 +224,31 @@ pub fn parse_output(stdout: &str) -> Result<Value, String> {
     }
 }
 
-// ---------------------------------------------------------------- token
+// ---------------------------------------------------------------- tokens (one per portfolio)
 
-fn entry(service: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(service, TOKEN_ENTRY).map_err(|e| format!("No se pudo abrir el almacén de credenciales de Windows: {e}"))
+/// Keyring entry of a portfolio: the principal one keeps the original `meta-token`; the others use `meta-token:<slug>`.
+pub fn token_entry_name(slug: &str) -> String {
+    if slug == PRINCIPAL {
+        TOKEN_ENTRY.to_string()
+    } else {
+        format!("{TOKEN_ENTRY}:{slug}")
+    }
 }
 
-fn get_token_in(service: &str) -> Result<Option<String>, String> {
-    match entry(service)?.get_password() {
+/// Env var the engine reads a portfolio's token from: `AGENTAUTO_META_TOKEN__OTRO_BM` for `otro-bm`.
+pub fn token_env_name(slug: &str) -> String {
+    format!("{TOKEN_ENV}__{}", slug.to_ascii_uppercase().replace('-', "_"))
+}
+
+fn entry(service: &str, slug: &str) -> Result<keyring::Entry, String> {
+    if !valid_slug(slug) {
+        return Err("Portafolio no válido.".to_string());
+    }
+    keyring::Entry::new(service, &token_entry_name(slug)).map_err(|e| format!("No se pudo abrir el almacén de credenciales de Windows: {e}"))
+}
+
+fn get_token_in(service: &str, slug: &str) -> Result<Option<String>, String> {
+    match entry(service, slug)?.get_password() {
         Ok(token) if !token.trim().is_empty() => Ok(Some(token)),
         Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(format!("No se pudo leer el token guardado: {e}")),
@@ -185,32 +261,37 @@ pub fn valid_token(token: &str) -> bool {
     t.len() >= 20 && t.len() <= 1024 && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '|'))
 }
 
-fn set_token_in(service: &str, token: &str) -> Result<(), String> {
+fn set_token_in(service: &str, slug: &str, token: &str) -> Result<(), String> {
     let token = token.trim();
     if !valid_token(token) {
         return Err("El token no parece válido: debe ser una sola cadena larga sin espacios.".to_string());
     }
-    entry(service)?.set_password(token).map_err(|e| format!("No se pudo guardar el token: {e}"))
+    entry(service, slug)?.set_password(token).map_err(|e| format!("No se pudo guardar el token: {e}"))
 }
 
-fn clear_token_in(service: &str) -> Result<(), String> {
-    match entry(service)?.delete_credential() {
+fn clear_token_in(service: &str, slug: &str) -> Result<(), String> {
+    match entry(service, slug)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(format!("No se pudo borrar el token: {e}")),
     }
 }
 
 /// Only presence is ever reported to the UI.
-pub fn token_present() -> Result<bool, String> {
-    Ok(get_token_in(KEY_SERVICE)?.is_some())
+pub fn token_present(slug: &str) -> Result<bool, String> {
+    Ok(get_token_in(KEY_SERVICE, slug)?.is_some())
 }
 
-pub fn set_token(token: &str) -> Result<(), String> {
-    set_token_in(KEY_SERVICE, token)
+/// Presence of each requested portfolio's token, by slug.
+pub fn token_statuses(slugs: &[String]) -> Result<BTreeMap<String, bool>, String> {
+    slugs.iter().map(|slug| Ok((slug.clone(), token_present(slug)?))).collect()
 }
 
-pub fn clear_token() -> Result<(), String> {
-    clear_token_in(KEY_SERVICE)
+pub fn set_token(slug: &str, token: &str) -> Result<(), String> {
+    set_token_in(KEY_SERVICE, slug, token)
+}
+
+pub fn clear_token(slug: &str) -> Result<(), String> {
+    clear_token_in(KEY_SERVICE, slug)
 }
 
 /// `META_ACCESS_TOKEN=...` out of a dotenv file (optional `export`, quotes, trailing comment).
@@ -237,15 +318,15 @@ pub fn monitor_env_path(root: &Path) -> PathBuf {
     root.parent().unwrap_or(root).join("meta-ads-monitor").join(".env")
 }
 
-fn import_token_from(env_file: &Path, service: &str) -> Result<(), String> {
+fn import_token_from(env_file: &Path, service: &str, slug: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(env_file).map_err(|_| "No encuentro el archivo .env de meta-ads-monitor.".to_string())?;
     let token = parse_env_token(&text).ok_or("El .env de meta-ads-monitor no tiene META_ACCESS_TOKEN.")?;
-    set_token_in(service, &token)
+    set_token_in(service, slug, &token)
 }
 
-/// Copies the monitor's token into the Credential Manager. The value never leaves this function.
+/// Copies the monitor's token into the Credential Manager, for the principal portfolio. The value never leaves this function.
 pub fn import_from_monitor(root: &Path) -> Result<(), String> {
-    import_token_from(&monitor_env_path(root), KEY_SERVICE)
+    import_token_from(&monitor_env_path(root), KEY_SERVICE, PRINCIPAL)
 }
 
 // ---------------------------------------------------------------- running the engine
@@ -271,17 +352,31 @@ impl Drop for SyncGuard {
     }
 }
 
-fn run_engine(settings: &Settings, command: &str, args: &AdsArgs, payload: Option<&Value>, token: Option<&str>) -> Result<Value, String> {
+/// (portfolio slug, token) pairs for the child environment.
+pub type Tokens = Vec<(String, String)>;
+
+fn run_engine(settings: &Settings, command: &str, args: &AdsArgs, payload: Option<&Value>, tokens: &[(String, String)]) -> Result<Value, String> {
     let dir = ads_dir(settings);
     if !dir.join("ads-cli.js").is_file() {
         return Err(format!("No encuentro ads-cli.js en {}. Revisa Ajustes.", dir.display()));
     }
     let mut cmd = hidden_command(&settings.node_path);
     cmd.args(build_args(command, args)?).current_dir(&dir).env("AGENTAUTO_DATA_DIR", &settings.data_dir);
-    match token {
-        Some(t) => cmd.env(TOKEN_ENV, t),
-        None => cmd.env_remove(TOKEN_ENV),
-    };
+    // Whatever token variables the parent happens to carry are dropped; only the ones we pass reach the engine.
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with(TOKEN_ENV) {
+            cmd.env_remove(&name);
+        }
+    }
+    for (slug, token) in tokens {
+        if !valid_slug(slug) {
+            continue;
+        }
+        cmd.env(token_env_name(slug), token);
+        if slug == PRINCIPAL {
+            cmd.env(TOKEN_ENV, token);
+        }
+    }
     let mut child = cmd
         .stdin(if payload.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -300,76 +395,149 @@ fn run_engine(settings: &Settings, command: &str, args: &AdsArgs, payload: Optio
     parse_output(&stdout)
 }
 
+/// Principal portfolio's token (the alerts monitor and the importer use it).
 pub fn stored_token() -> Result<Option<String>, String> {
-    get_token_in(KEY_SERVICE)
+    get_token_in(KEY_SERVICE, PRINCIPAL)
 }
 
-pub fn sync(settings: &Settings, from: &str, to: &str) -> Result<Value, String> {
+/// Portfolio ids in `<data dir>/ads/config.json`. A pre-portfolio config (or none) only has the principal one.
+pub fn portfolio_slugs(settings: &Settings) -> Vec<String> {
+    let file = Path::new(&settings.data_dir).join("ads").join("config.json");
+    let parsed: Option<Value> = std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(t.trim_start_matches('\u{feff}')).ok());
+    let mut slugs: Vec<String> = parsed
+        .as_ref()
+        .and_then(|c| c.get("portfolios"))
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(|p| p.get("id").and_then(Value::as_str)).filter(|id| valid_slug(id)).map(str::to_string).collect())
+        .unwrap_or_default();
+    if !slugs.iter().any(|s| s == PRINCIPAL) && parsed.as_ref().map(|c| c.get("portfolios").is_none()).unwrap_or(true) {
+        slugs.insert(0, PRINCIPAL.to_string());
+    }
+    slugs
+}
+
+/// Reads every slug's token with `get`; one unreadable entry is skipped and reported, never fatal for the others.
+fn collect_tokens(slugs: &[String], get: impl Fn(&str) -> Result<Option<String>, String>) -> (Tokens, Vec<String>) {
+    let mut tokens = Vec::new();
+    let mut warnings = Vec::new();
+    for slug in slugs {
+        match get(slug) {
+            Ok(Some(token)) => tokens.push((slug.clone(), token)),
+            Ok(None) => {}
+            Err(_) => warnings.push(format!("No pude leer el token del portafolio «{slug}» en el Administrador de credenciales: se omitió y sus cuentas no se actualizaron.")),
+        }
+    }
+    (tokens, warnings)
+}
+
+/// Every stored portfolio token, ready for the child environment, plus a warning per unreadable entry.
+pub fn stored_tokens(settings: &Settings) -> (Tokens, Vec<String>) {
+    collect_tokens(&portfolio_slugs(settings), |slug| get_token_in(KEY_SERVICE, slug))
+}
+
+/// Adds `portfolioWarnings` to an engine answer (only when there is something to say).
+fn with_warnings(mut value: Value, warnings: Vec<String>) -> Value {
+    if !warnings.is_empty() {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("portfolioWarnings".to_string(), serde_json::json!(warnings));
+        }
+    }
+    value
+}
+
+/// Portfolio that owns the primary account (the one the alerts monitor watches): the principal one when it has accounts,
+/// else the first with accounts. A pre-portfolio config belongs to the principal one.
+pub fn primary_portfolio_slug(settings: &Settings) -> String {
+    let file = Path::new(&settings.data_dir).join("ads").join("config.json");
+    let parsed: Option<Value> = std::fs::read_to_string(file).ok().and_then(|t| serde_json::from_str(t.trim_start_matches('\u{feff}')).ok());
+    let Some(list) = parsed.as_ref().and_then(|c| c.get("portfolios")).and_then(Value::as_array) else {
+        return PRINCIPAL.to_string();
+    };
+    let with_accounts: Vec<&str> = list
+        .iter()
+        .filter(|p| p.get("accounts").and_then(Value::as_array).map(|a| !a.is_empty()).unwrap_or(false))
+        .filter_map(|p| p.get("id").and_then(Value::as_str))
+        .filter(|id| valid_slug(id))
+        .collect();
+    if with_accounts.contains(&PRINCIPAL) {
+        PRINCIPAL.to_string()
+    } else {
+        with_accounts.first().map(|s| s.to_string()).unwrap_or_else(|| PRINCIPAL.to_string())
+    }
+}
+
+/// Token for the alerts monitor: the one of the portfolio that owns the primary account, so a token is never paired with
+/// another portfolio's account.
+pub fn monitor_token(settings: &Settings) -> Result<Option<String>, String> {
+    get_token_in(KEY_SERVICE, &primary_portfolio_slug(settings))
+}
+
+pub fn sync(settings: &Settings, from: &str, to: &str, accounts: Option<&str>) -> Result<Value, String> {
     let _guard = SyncGuard::acquire()?;
-    let token = stored_token()?;
-    run_engine(settings, "sync", &AdsArgs { from: Some(from), to: Some(to), ..Default::default() }, None, token.as_deref())
+    let (tokens, warnings) = stored_tokens(settings);
+    run_engine(settings, "sync", &AdsArgs { from: Some(from), to: Some(to), accounts, ..Default::default() }, None, &tokens).map(|v| with_warnings(v, warnings))
 }
 
-/// Incremental sync; the very first run also backfills the whole history.
-pub fn sync_auto(settings: &Settings) -> Result<Value, String> {
+/// Incremental sync; the very first run of each account also backfills its whole history.
+pub fn sync_auto(settings: &Settings, accounts: Option<&str>) -> Result<Value, String> {
     let _guard = SyncGuard::acquire()?;
-    let token = stored_token()?;
-    run_engine(settings, "sync", &AdsArgs { auto: true, ..Default::default() }, None, token.as_deref())
+    let (tokens, warnings) = stored_tokens(settings);
+    run_engine(settings, "sync", &AdsArgs { auto: true, accounts, ..Default::default() }, None, &tokens).map(|v| with_warnings(v, warnings))
 }
 
-pub fn report(settings: &Settings, from: &str, to: &str, group: &str, country: Option<&str>, split: bool) -> Result<Value, String> {
-    run_engine(settings, "report", &AdsArgs { from: Some(from), to: Some(to), group: Some(group), country, split, ..Default::default() }, None, None)
+pub fn report(settings: &Settings, from: &str, to: &str, group: &str, country: Option<&str>, split: bool, accounts: Option<&str>, name: Option<&str>) -> Result<Value, String> {
+    run_engine(settings, "report", &AdsArgs { from: Some(from), to: Some(to), group: Some(group), country, split, accounts, name, ..Default::default() }, None, &[])
 }
 
 /// Live exchange rates to COP (free public sources, no key). Called on each data refresh; the engine saves one rate per day.
 pub fn fx_refresh(settings: &Settings) -> Result<Value, String> {
-    run_engine(settings, "fx-refresh", &AdsArgs::default(), None, None)
+    run_engine(settings, "fx-refresh", &AdsArgs::default(), None, &[])
 }
 
 pub fn tracking(settings: &Settings) -> Result<Value, String> {
-    run_engine(settings, "tracking", &AdsArgs::default(), None, None)
+    run_engine(settings, "tracking", &AdsArgs::default(), None, &[])
 }
 
-/// Payments of any range (the Comprobantes card has its own dates), optionally limited to one country.
-pub fn vouchers(settings: &Settings, from: &str, to: &str, country: Option<&str>) -> Result<Value, String> {
-    run_engine(settings, "vouchers", &AdsArgs { from: Some(from), to: Some(to), country, ..Default::default() }, None, None)
+/// Payments of any range (the Comprobantes card has its own dates), optionally limited to a country, accounts and ad names.
+pub fn vouchers(settings: &Settings, from: &str, to: &str, country: Option<&str>, accounts: Option<&str>, name: Option<&str>) -> Result<Value, String> {
+    run_engine(settings, "vouchers", &AdsArgs { from: Some(from), to: Some(to), country, accounts, name, ..Default::default() }, None, &[])
 }
 
 pub fn comprobante_country(settings: &Settings, key: &str, code: &str) -> Result<Value, String> {
-    run_engine(settings, "comprobante-country", &AdsArgs { key: Some(key), code: Some(code), ..Default::default() }, None, None)
+    run_engine(settings, "comprobante-country", &AdsArgs { key: Some(key), code: Some(code), ..Default::default() }, None, &[])
 }
 
 /// Accepts a payment by hand (or takes it back with `undo`). Only the local database changes; the sheet is never written.
 pub fn comprobante_accept(settings: &Settings, key: &str, undo: bool) -> Result<Value, String> {
-    run_engine(settings, "comprobante-accept", &AdsArgs { key: Some(key), undo, ..Default::default() }, None, None)
+    run_engine(settings, "comprobante-accept", &AdsArgs { key: Some(key), undo, ..Default::default() }, None, &[])
 }
 
 pub fn status(settings: &Settings) -> Result<Value, String> {
-    let token = stored_token()?;
-    run_engine(settings, "status", &AdsArgs::default(), None, token.as_deref())
+    let (tokens, warnings) = stored_tokens(settings);
+    run_engine(settings, "status", &AdsArgs::default(), None, &tokens).map(|v| with_warnings(v, warnings))
 }
 
 pub fn config_get(settings: &Settings) -> Result<Value, String> {
-    run_engine(settings, "config-get", &AdsArgs::default(), None, None)
+    run_engine(settings, "config-get", &AdsArgs::default(), None, &[])
 }
 
 pub fn config_set(settings: &Settings, partial: &Value) -> Result<Value, String> {
-    run_engine(settings, "config-set", &AdsArgs { stdin: true, ..Default::default() }, Some(partial), None)
+    run_engine(settings, "config-set", &AdsArgs { stdin: true, ..Default::default() }, Some(partial), &[])
 }
 
 /// One scheduler step (budget snapshot + due decisions). Shares the sync lock so it never overlaps a manual sync.
 pub fn tick(settings: &Settings, force: bool) -> Result<Value, String> {
     let _guard = SyncGuard::acquire()?;
-    let token = stored_token()?;
-    run_engine(settings, "tick", &AdsArgs { force, ..Default::default() }, None, token.as_deref())
+    let (tokens, warnings) = stored_tokens(settings);
+    run_engine(settings, "tick", &AdsArgs { force, ..Default::default() }, None, &tokens).map(|v| with_warnings(v, warnings))
 }
 
 pub fn decisions(settings: &Settings) -> Result<Value, String> {
-    run_engine(settings, "decisions", &AdsArgs::default(), None, None)
+    run_engine(settings, "decisions", &AdsArgs::default(), None, &[])
 }
 
 pub fn decision_status(settings: &Settings, id: u64, status: &str) -> Result<Value, String> {
-    run_engine(settings, "decision-status", &AdsArgs { id: Some(id), status: Some(status), ..Default::default() }, None, None)
+    run_engine(settings, "decision-status", &AdsArgs { id: Some(id), status: Some(status), ..Default::default() }, None, &[])
 }
 
 // ---------------------------------------------------------------- decision scheduler
@@ -436,24 +604,91 @@ pub fn spawn_scheduler(app: AppHandle, settings: Arc<Mutex<Settings>>, stop: Arc
 }
 
 pub fn alerts_config_get(settings: &Settings) -> Result<Value, String> {
-    run_engine(settings, "alerts-config-get", &AdsArgs::default(), None, None)
+    run_engine(settings, "alerts-config-get", &AdsArgs::default(), None, &[])
 }
 
 pub fn alerts_config_set(settings: &Settings, partial: &Value) -> Result<Value, String> {
-    run_engine(settings, "alerts-config-set", &AdsArgs { stdin: true, ..Default::default() }, Some(partial), None)
+    run_engine(settings, "alerts-config-set", &AdsArgs { stdin: true, ..Default::default() }, Some(partial), &[])
 }
 
 pub fn alerts_recent(settings: &Settings) -> Result<Value, String> {
-    run_engine(settings, "alerts-recent", &AdsArgs::default(), None, None)
+    run_engine(settings, "alerts-recent", &AdsArgs::default(), None, &[])
 }
 
 pub fn wa_status(settings: &Settings) -> Result<Value, String> {
-    run_engine(settings, "wa-status", &AdsArgs::default(), None, None)
+    run_engine(settings, "wa-status", &AdsArgs::default(), None, &[])
 }
 
-pub fn test_token(settings: &Settings) -> Result<Value, String> {
-    let token = stored_token()?.ok_or("Falta el token de Meta. Impórtalo o pégalo en la configuración de Anuncios.")?;
-    run_engine(settings, "test-token", &AdsArgs::default(), None, Some(&token))
+/// Checks one portfolio's token with Meta (who it is and which ad accounts it can see).
+pub fn test_token(settings: &Settings, slug: &str) -> Result<Value, String> {
+    let token = get_token_in(KEY_SERVICE, slug)?.ok_or("Falta el token de Meta de este portafolio. Pégalo en la configuración de Anuncios.")?;
+    run_engine(settings, "test-token", &AdsArgs { portfolio: Some(slug), ..Default::default() }, None, &[(slug.to_string(), token)])
+}
+
+/// Creates a portfolio and stores its token. The token shape is checked first; if saving it fails the portfolio is rolled back.
+pub fn portfolio_add(settings: &Settings, name: &str, token: &str) -> Result<Value, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 {
+        return Err("El portafolio necesita un nombre (hasta 80 caracteres).".to_string());
+    }
+    if !valid_token(token) {
+        return Err("El token no parece válido: debe ser una sola cadena larga sin espacios.".to_string());
+    }
+    let created = run_engine(settings, "portfolio-add", &AdsArgs { stdin: true, ..Default::default() }, Some(&serde_json::json!({ "name": name })), &[])?;
+    let slug = created.pointer("/portfolio/id").and_then(Value::as_str).filter(|s| valid_slug(s)).ok_or("El motor no devolvió el identificador del portafolio.")?.to_string();
+    if let Err(e) = set_token(&slug, token) {
+        let _ = remove_from_config(settings, &slug);
+        return Err(e);
+    }
+    Ok(created)
+}
+
+/// Adds an ad account to a portfolio. The engine asks Meta first (with that portfolio's token) and saves nothing on failure.
+pub fn account_add(settings: &Settings, portfolio: &str, account: &str, name: &str) -> Result<Value, String> {
+    if !valid_slug(portfolio) {
+        return Err("Portafolio no válido.".to_string());
+    }
+    let (tokens, _warnings) = stored_tokens(settings);
+    let payload = serde_json::json!({ "portfolio": portfolio, "account": account.trim(), "name": name.trim() });
+    run_engine(settings, "account-add", &AdsArgs { stdin: true, ..Default::default() }, Some(&payload), &tokens)
+}
+
+fn remove_from_config(settings: &Settings, slug: &str) -> Result<Value, String> {
+    let current = config_get(settings)?;
+    let kept: Vec<Value> = current
+        .pointer("/config/portfolios")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter(|p| p.get("id").and_then(Value::as_str) != Some(slug)).cloned().collect())
+        .unwrap_or_default();
+    config_set(settings, &serde_json::json!({ "portfolios": kept }))
+}
+
+const PRINCIPAL_WARNING: &str = "El portafolio principal lo usan el monitor de alertas y la cuenta principal: confirma explícitamente que quieres";
+
+/// The principal portfolio only goes away (or loses its token) with an explicit confirmation from the UI.
+fn guard_principal(slug: &str, confirmed: bool, action: &str) -> Result<(), String> {
+    if slug == PRINCIPAL && !confirmed {
+        return Err(format!("{PRINCIPAL_WARNING} {action} este portafolio."));
+    }
+    Ok(())
+}
+
+/// Deletes a portfolio's token. The principal one needs `confirm_principal`.
+pub fn clear_portfolio_token(slug: &str, confirm_principal: bool) -> Result<(), String> {
+    guard_principal(slug, confirm_principal, "quitar el token de")?;
+    clear_token(slug)
+}
+
+/// Removes a portfolio (and with it its accounts) from the configuration and deletes its token. The stored history in
+/// ads.db is NOT touched: it only stops syncing and drops out of the selectors.
+pub fn portfolio_remove(settings: &Settings, slug: &str, confirm_principal: bool) -> Result<Value, String> {
+    if !valid_slug(slug) {
+        return Err("Portafolio no válido.".to_string());
+    }
+    guard_principal(slug, confirm_principal, "eliminar")?;
+    let saved = remove_from_config(settings, slug)?;
+    clear_token(slug)?;
+    Ok(saved)
 }
 
 #[cfg(test)]
@@ -601,27 +836,133 @@ mod tests {
         let service = format!("agentAutoX1-test-import-{}", std::process::id());
         let dir = std::env::temp_dir().join(format!("agentautox1-ads-env-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let missing = import_token_from(&dir.join("nope.env"), &service).unwrap_err();
+        let missing = import_token_from(&dir.join("nope.env"), &service, PRINCIPAL).unwrap_err();
         assert!(missing.contains("No encuentro"));
         std::fs::write(dir.join("empty.env"), "OTHER=1\n").unwrap();
-        assert!(import_token_from(&dir.join("empty.env"), &service).unwrap_err().contains("META_ACCESS_TOKEN"));
+        assert!(import_token_from(&dir.join("empty.env"), &service, PRINCIPAL).unwrap_err().contains("META_ACCESS_TOKEN"));
         std::fs::write(dir.join("ok.env"), "META_ACCESS_TOKEN=fake-test-token-0123456789abcdef\n").unwrap();
-        import_token_from(&dir.join("ok.env"), &service).unwrap();
-        assert_eq!(get_token_in(&service).unwrap().as_deref(), Some("fake-test-token-0123456789abcdef"));
-        clear_token_in(&service).unwrap();
+        import_token_from(&dir.join("ok.env"), &service, PRINCIPAL).unwrap();
+        assert_eq!(get_token_in(&service, PRINCIPAL).unwrap().as_deref(), Some("fake-test-token-0123456789abcdef"));
+        clear_token_in(&service, PRINCIPAL).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Real Credential Manager round trip with a throw-away service name (removed at the end).
+    /// Real Credential Manager round trip with a throw-away service name (removed at the end): one entry per portfolio.
     #[test]
-    fn token_round_trips_through_the_credential_manager() {
+    fn token_round_trips_through_the_credential_manager_per_portfolio() {
         let service = format!("agentAutoX1-test-{}", std::process::id());
-        assert_eq!(get_token_in(&service).unwrap(), None);
-        set_token_in(&service, "fake-test-token-0123456789abcdef").unwrap();
-        assert_eq!(get_token_in(&service).unwrap().as_deref(), Some("fake-test-token-0123456789abcdef"));
-        assert!(set_token_in(&service, "  ").is_err());
-        clear_token_in(&service).unwrap();
-        assert_eq!(get_token_in(&service).unwrap(), None);
+        for slug in [PRINCIPAL, "otro-bm"] {
+            assert_eq!(get_token_in(&service, slug).unwrap(), None);
+        }
+        set_token_in(&service, PRINCIPAL, "fake-test-token-0123456789abcdef").unwrap();
+        set_token_in(&service, "otro-bm", "fake-test-token-second-9876543210").unwrap();
+        assert_eq!(get_token_in(&service, PRINCIPAL).unwrap().as_deref(), Some("fake-test-token-0123456789abcdef"));
+        assert_eq!(get_token_in(&service, "otro-bm").unwrap().as_deref(), Some("fake-test-token-second-9876543210"));
+        assert!(set_token_in(&service, PRINCIPAL, "  ").is_err());
+        assert!(set_token_in(&service, "../x", "fake-test-token-0123456789abcdef").is_err());
+        clear_token_in(&service, "otro-bm").unwrap();
+        assert_eq!(get_token_in(&service, "otro-bm").unwrap(), None);
+        assert!(get_token_in(&service, PRINCIPAL).unwrap().is_some(), "clearing one portfolio leaves the others");
+        clear_token_in(&service, PRINCIPAL).unwrap();
+        assert_eq!(get_token_in(&service, PRINCIPAL).unwrap(), None);
+    }
+
+    #[test]
+    fn keyring_entries_and_env_vars_derive_from_the_slug() {
+        assert_eq!(token_entry_name(PRINCIPAL), "meta-token");
+        assert_eq!(token_entry_name("otro-bm"), "meta-token:otro-bm");
+        assert_eq!(token_env_name(PRINCIPAL), "AGENTAUTO_META_TOKEN__PRINCIPAL");
+        assert_eq!(token_env_name("otro-bm"), "AGENTAUTO_META_TOKEN__OTRO_BM");
+        assert!(valid_slug("bm-2") && valid_slug("principal"));
+        for bad in ["", "Bm", "a b", "a_b", "../x", "a:b", &"x".repeat(41)] {
+            assert!(!valid_slug(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn builds_account_and_name_filter_arguments() {
+        let base = AdsArgs { from: Some("2026-10-01"), to: Some("2026-10-29"), group: Some("campaign"), ..Default::default() };
+        let r = build_args("report", &AdsArgs { accounts: Some("act_12345,act_67890"), name: Some("ct, PZZ"), ..base.clone() }).unwrap();
+        assert_eq!(&r[2..], ["report", "--from", "2026-10-01", "--to", "2026-10-29", "--group", "campaign", "--accounts", "act_12345,act_67890", "--name", "ct, PZZ"]);
+        let v = build_args("vouchers", &AdsArgs { from: Some("2026-10-01"), to: Some("2026-10-29"), accounts: Some("all"), ..Default::default() }).unwrap();
+        assert_eq!(&v[2..], ["vouchers", "--from", "2026-10-01", "--to", "2026-10-29", "--accounts", "all"]);
+        let sync = build_args("sync", &AdsArgs { auto: true, accounts: Some("act_12345"), ..Default::default() }).unwrap();
+        assert_eq!(&sync[2..], ["sync", "--accounts", "act_12345", "--auto"]);
+        // An empty name filter is simply not sent.
+        assert!(!build_args("report", &AdsArgs { name: Some("  "), ..base.clone() }).unwrap().contains(&"--name".to_string()));
+        for bad in ["act_1", "act_12345;calc", "12345", "act_12345,", "ALL", "act_12345,act_abc12", ""] {
+            assert!(build_args("report", &AdsArgs { accounts: Some(bad), ..base.clone() }).is_err(), "accounts {bad:?}");
+        }
+        for bad in ["x'; DROP TABLE ads;--", "<b>", "--accounts", "a\nb", &"a".repeat(401)] {
+            assert!(build_args("report", &AdsArgs { name: Some(bad), ..base.clone() }).is_err(), "name {bad:?}");
+        }
+        assert!(build_args("tick", &AdsArgs { accounts: Some("all"), ..Default::default() }).is_err(), "only sync/report/vouchers take accounts");
+        assert!(build_args("sync", &AdsArgs { name: Some("ct"), from: Some("2026-10-01"), to: Some("2026-10-02"), ..Default::default() }).is_err());
+        assert_eq!(&build_args("test-token", &AdsArgs { portfolio: Some("otro-bm"), ..Default::default() }).unwrap()[2..], ["test-token", "--portfolio", "otro-bm"]);
+        assert!(build_args("test-token", &AdsArgs { portfolio: Some("../x"), ..Default::default() }).is_err());
+        assert_eq!(build_args("account-add", &AdsArgs { stdin: true, ..Default::default() }).unwrap().last().unwrap(), "--stdin");
+        assert_eq!(&build_args("portfolio-add", &AdsArgs { stdin: true, ..Default::default() }).unwrap()[2..], ["portfolio-add", "--stdin"]);
+    }
+
+    #[test]
+    fn one_unreadable_token_does_not_stop_the_others() {
+        let slugs: Vec<String> = ["principal", "roto", "bm-dos", "vacio"].iter().map(|s| s.to_string()).collect();
+        let (tokens, warnings) = collect_tokens(&slugs, |slug| match slug {
+            "roto" => Err("keyring: acceso denegado".to_string()),
+            "vacio" => Ok(None),
+            other => Ok(Some(format!("token-{other}"))),
+        });
+        assert_eq!(tokens, [("principal".to_string(), "token-principal".to_string()), ("bm-dos".to_string(), "token-bm-dos".to_string())]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("roto") && !warnings[0].contains("denegado"), "{warnings:?}");
+        let answered = with_warnings(json!({"ok": true}), warnings);
+        assert_eq!(answered["portfolioWarnings"].as_array().unwrap().len(), 1);
+        assert!(with_warnings(json!({"ok": true}), vec![]).get("portfolioWarnings").is_none());
+    }
+
+    #[test]
+    fn the_principal_portfolio_needs_an_explicit_confirmation_to_lose_its_token_or_disappear() {
+        let settings = Settings::defaults(Path::new("C:/x"));
+        assert!(clear_portfolio_token(PRINCIPAL, false).unwrap_err().contains("confirma"));
+        assert!(portfolio_remove(&settings, PRINCIPAL, false).unwrap_err().contains("monitor de alertas"));
+        assert!(portfolio_remove(&settings, "../x", true).is_err());
+    }
+
+    #[test]
+    fn the_monitor_uses_the_portfolio_that_owns_the_primary_account() {
+        let dir = std::env::temp_dir().join(format!("agentautox1-ads-primary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut settings = Settings::defaults(Path::new("C:/x"));
+        settings.data_dir = dir.to_string_lossy().into_owned();
+        assert_eq!(primary_portfolio_slug(&settings), PRINCIPAL, "no config");
+        std::fs::create_dir_all(dir.join("ads")).unwrap();
+        let write = |text: &str| std::fs::write(dir.join("ads").join("config.json"), text).unwrap();
+        write(r#"{"adAccountId":"act_12345"}"#);
+        assert_eq!(primary_portfolio_slug(&settings), PRINCIPAL, "legacy config");
+        write(r#"{"portfolios":[{"id":"bm-dos","accounts":[{"id":"act_22222"}]},{"id":"principal","accounts":[{"id":"act_11111"}]}]}"#);
+        assert_eq!(primary_portfolio_slug(&settings), PRINCIPAL);
+        write(r#"{"portfolios":[{"id":"principal","accounts":[]},{"id":"bm-dos","accounts":[{"id":"act_22222"}]}]}"#);
+        assert_eq!(primary_portfolio_slug(&settings), "bm-dos", "the principal one has no accounts");
+        write(r#"{"portfolios":[{"id":"Bad Slug","accounts":[{"id":"act_1"}]},{"id":"bm-tres","accounts":[{"id":"act_33333"}]}]}"#);
+        assert_eq!(primary_portfolio_slug(&settings), "bm-tres");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn portfolio_ids_come_from_the_config_file() {
+        let dir = std::env::temp_dir().join(format!("agentautox1-ads-slugs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut settings = Settings::defaults(Path::new("C:/x"));
+        settings.data_dir = dir.to_string_lossy().into_owned();
+        assert_eq!(portfolio_slugs(&settings), [PRINCIPAL], "no config: only the principal one");
+        std::fs::create_dir_all(dir.join("ads")).unwrap();
+        std::fs::write(dir.join("ads").join("config.json"), r#"{"adAccountId":"act_12345"}"#).unwrap();
+        assert_eq!(portfolio_slugs(&settings), [PRINCIPAL], "legacy config migrates to the principal portfolio");
+        std::fs::write(dir.join("ads").join("config.json"), r#"{"portfolios":[{"id":"bm-dos","name":"x","accounts":[]},{"id":"Bad Slug"},{"id":"principal"}]}"#).unwrap();
+        assert_eq!(portfolio_slugs(&settings), ["bm-dos", PRINCIPAL]);
+        std::fs::write(dir.join("ads").join("config.json"), r#"{"portfolios":[]}"#).unwrap();
+        assert!(portfolio_slugs(&settings).is_empty(), "an explicit empty list means first-run");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -642,16 +983,46 @@ mod tests {
         settings.warmup_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("engines").join("warmup").to_string_lossy().into_owned();
         settings.data_dir = dir.to_string_lossy().into_owned();
 
-        let status = run_engine(&settings, "status", &AdsArgs::default(), None, None).unwrap();
+        let status = run_engine(&settings, "status", &AdsArgs::default(), None, &[]).unwrap();
         assert_eq!(status["tokenPresent"], false);
         let cfg = config_get(&settings).unwrap();
         assert_eq!(cfg["config"]["campaignPrefix"], "all");
         let saved = config_set(&settings, &json!({"flowPrefix": "Barf"})).unwrap();
         assert_eq!(saved["config"]["flowPrefix"], "Barf");
         assert!(config_set(&settings, &json!({"token": "x"})).is_err());
-        let report = report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false).unwrap();
+        let report = report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false, None, None).unwrap();
         assert_eq!(report["kpis"]["gasto"], 0);
         assert_eq!(report["daily"].as_array().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Real engine, throw-away data dir: a portfolio is created (first one = principal), its accounts are listed and the
+    /// filters reach the report. No network and no keyring: a missing token is reported before Meta is asked.
+    #[test]
+    fn talks_to_the_real_engine_about_portfolios_offline() {
+        let dir = std::env::temp_dir().join(format!("agentautox1-ads-pf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut settings = Settings::defaults(Path::new("C:/x"));
+        settings.warmup_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("engines").join("warmup").to_string_lossy().into_owned();
+        settings.data_dir = dir.to_string_lossy().into_owned();
+
+        assert_eq!(config_get(&settings).unwrap()["config"]["portfolios"], json!([]), "a fresh data dir starts in first-run");
+        let created = run_engine(&settings, "portfolio-add", &AdsArgs { stdin: true, ..Default::default() }, Some(&json!({"name": "Mi BM"})), &[]).unwrap();
+        assert_eq!(created["portfolio"]["id"], "principal");
+        assert_eq!(portfolio_slugs(&settings), [PRINCIPAL]);
+        let no_token = account_add(&settings, "principal", "act_12345", "").unwrap_err();
+        assert!(no_token.contains("token"), "{no_token}");
+        assert!(account_add(&settings, "../x", "act_12345", "").is_err());
+
+        let engine_tokens = vec![(PRINCIPAL.to_string(), "fake-test-token-0123456789abcdef".to_string())];
+        let status = run_engine(&settings, "status", &AdsArgs::default(), None, &engine_tokens).unwrap();
+        assert_eq!(status["portfolios"], json!([{"id": "principal", "tokenPresent": true}]));
+        assert!(!status.to_string().contains("fake-test-token"), "token values never come back");
+
+        let filtered = report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false, Some("all"), Some("ct,pzz")).unwrap();
+        assert_eq!(filtered["nameFilter"], json!(["ct", "pzz"]));
+        assert!(report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false, Some("act_99999"), None).is_err(), "unknown accounts are refused by the engine");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

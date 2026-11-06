@@ -177,3 +177,92 @@ export function fxLine(fx: FxInfo, now: number): string {
   const day = sameDay ? "" : `${two(at.getDate())}/${two(at.getMonth() + 1)} `;
   return `${head} · actualizada ${day}${two(at.getHours())}:${two(at.getMinutes())}${fx.source ? ` (${fx.source})` : ""}`;
 }
+
+// ---------------------------------------------------------------- ad account selector and ad-name filter
+
+export interface AccountOption {
+  id: string;
+  name: string;
+  portfolioId: string;
+  portfolioName: string;
+}
+
+const ACCOUNT_ID = /^act_\d{5,25}$/;
+const ACCOUNTS_KEY = "ads.accounts";
+const NAME_FILTER_KEY = "ads.nameFilter";
+
+/** The accounts of this viewer's last choice; [] = every account. Storage can be missing, blocked or hold junk. */
+export function readAccountsChoice(store: KeyValueStore | null = defaultStore()): string[] {
+  try {
+    const parsed: unknown = JSON.parse(store?.getItem(ACCOUNTS_KEY) ?? "[]");
+    return Array.isArray(parsed) ? [...new Set(parsed.filter((v): v is string => typeof v === "string" && ACCOUNT_ID.test(v)))] : [];
+  } catch {
+    return [];
+  }
+}
+
+export function writeAccountsChoice(ids: string[], store: KeyValueStore | null = defaultStore()): void {
+  try {
+    store?.setItem(ACCOUNTS_KEY, JSON.stringify(ids));
+  } catch {
+    // The choice just won't persist.
+  }
+}
+
+/** A stored choice limited to the accounts that exist now; nothing valid (or everything) = [] (all). No accounts known yet: keep it. */
+export function resolveAccountsChoice(choice: string[], accounts: AccountOption[]): string[] {
+  if (accounts.length === 0) return choice;
+  const valid = choice.filter((id) => accounts.some((a) => a.id === id));
+  return valid.length === 0 || valid.length === accounts.length ? [] : valid;
+}
+
+/** Tapping a chip selects only that account (with a single account there is nothing to narrow: all). */
+export function selectOnlyAccount(id: string, accounts: AccountOption[]): string[] {
+  return accounts.length <= 1 ? [] : [id];
+}
+
+/** The chip's checkbox: adds or removes one account relative to what is selected now ([] = all). Never leaves nothing selected. */
+export function toggleAccount(choice: string[], id: string, accounts: AccountOption[]): string[] {
+  const current = choice.length > 0 ? choice : accounts.map((a) => a.id);
+  const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
+  if (next.length === 0) return current;
+  return next.length === accounts.length ? [] : accounts.filter((a) => next.includes(a.id)).map((a) => a.id);
+}
+
+/** `--accounts` value for the engine: null = all (flag omitted). */
+export function accountsArg(choice: string[], accounts: AccountOption[]): string | null {
+  const resolved = resolveAccountsChoice(choice, accounts);
+  return resolved.length === 0 ? null : resolved.join(",");
+}
+
+/** Chips grouped by portfolio; the label is empty (no heading) when there is only one portfolio. */
+export function accountChipGroups(accounts: AccountOption[]): { portfolioId: string; label: string; accounts: AccountOption[] }[] {
+  const ids = [...new Set(accounts.map((a) => a.portfolioId))];
+  return ids.map((portfolioId) => {
+    const mine = accounts.filter((a) => a.portfolioId === portfolioId);
+    return { portfolioId, label: ids.length > 1 ? mine[0].portfolioName : "", accounts: mine };
+  });
+}
+
+export function readNameFilter(store: KeyValueStore | null = defaultStore()): string {
+  try {
+    return (store?.getItem(NAME_FILTER_KEY) ?? "").trim().slice(0, 400);
+  } catch {
+    return "";
+  }
+}
+
+export function writeNameFilter(value: string, store: KeyValueStore | null = defaultStore()): void {
+  try {
+    store?.setItem(NAME_FILTER_KEY, value.trim());
+  } catch {
+    // The filter just won't persist.
+  }
+}
+
+/** Same rules the engine enforces on `--name`, so a typo is explained before any request. null = fine. */
+export function nameFilterProblem(value: string): string | null {
+  if (value.length > 400) return "El filtro de nombre es demasiado largo.";
+  if (!/^[\p{L}\p{N} _\-.·#+&()[\]/|:,]*$/u.test(value) || value.trim().startsWith("--")) return "El filtro de nombre tiene caracteres no válidos.";
+  return null;
+}

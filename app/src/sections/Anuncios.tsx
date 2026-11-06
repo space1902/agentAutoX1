@@ -1,6 +1,8 @@
 import { Banknote, Bell, Coins, MessageCircle, Percent, RefreshCw, Target, TrendingUp, Wallet } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import AccountFilters from "../components/ads/AccountFilters";
 import AdsChart from "../components/ads/AdsChart";
+import AdsSetup from "../components/ads/AdsSetup";
 import AdsSettings from "../components/ads/AdsSettings";
 import AdsTable from "../components/ads/AdsTable";
 import AlertsPanel from "../components/ads/AlertsPanel";
@@ -11,17 +13,25 @@ import VouchersPanel, { type VoucherFilter } from "../components/ads/VouchersPan
 import { Banner, Card, Notice, Skeleton, StatCard } from "../components/ui";
 import { errorText } from "../lib/api";
 import {
+  accountsArg,
   countryChips,
   formatNative,
   fxLine,
   hiddenInactive,
+  nameFilterProblem,
   noDataNote,
+  readAccountsChoice,
   readCountryChoice,
+  readNameFilter,
   readShowInactive,
+  resolveAccountsChoice,
   resolveCountryChoice,
   visibleRows,
+  writeAccountsChoice,
   writeCountryChoice,
+  writeNameFilter,
   writeShowInactive,
+  type AccountOption,
 } from "../lib/adsView";
 import {
   adsApi,
@@ -58,9 +68,13 @@ type Tab = "resumen" | "decisiones" | "alertas" | "configuracion";
 const STALE_MS = 5 * 60_000;
 
 /** Friendly text for errors that come back inside a sync result. */
-function syncProblems(res: SyncResult): string[] {
+function syncProblems(res: SyncResult, names: Record<string, string> = {}): string[] {
   const out: string[] = [];
-  if (!res.meta.ok && res.meta.error) out.push(res.meta.error);
+  const failed = (res.accounts ?? res.meta.accounts ?? []).filter((a) => !a.ok && a.error);
+  // One line per failing account (the others still refreshed); a single-account setup keeps the plain message.
+  out.push(...(res.portfolioWarnings ?? []));
+  if (failed.length > 0 && (res.accounts ?? res.meta.accounts ?? []).length > 1) out.push(...failed.map((a) => `${names[a.accountId] ?? a.accountId}: ${a.error}`));
+  else if (!res.meta.ok && res.meta.error) out.push(res.meta.error);
   if (!res.sheet.ok && res.sheet.error) out.push(res.sheet.error);
   return out;
 }
@@ -97,6 +111,10 @@ export default function Anuncios() {
   const [vOwn, setVOwn] = useState<{ preset: Preset; custom: { from: string; to: string } } | null>(null);
   const [vData, setVData] = useState<VouchersData | null>(null);
   const [vFilter, setVFilter] = useState<VoucherFilter>("all");
+  // Ad accounts in scope ([] = all) and the ad-name filter; both are remembered on this device.
+  const [accountsChoice, setAccountsChoice] = useState<string[]>(() => readAccountsChoice());
+  const [nameInput, setNameInput] = useState(() => readNameFilter());
+  const [nameFilter, setNameFilter] = useState(() => (nameFilterProblem(readNameFilter()) ? "" : readNameFilter()));
 
   const range = preset === "custom" ? custom : presetRange(preset, today);
   const decRange = decPreset === "custom" ? decCustom : presetRange(decPreset, today);
@@ -107,17 +125,24 @@ export default function Anuncios() {
   const vRange = vOwn ? (vOwn.preset === "custom" ? vOwn.custom : presetRange(vOwn.preset, today)) : range;
   const vValid = vRange.from !== "" && vRange.to !== "" && vRange.from <= vRange.to;
 
-  const latest = useRef({ range, group, rangeValid, includesToday, tokenPresent, config, country, split, vOwn, vRange, vValid });
-  latest.current = { range, group, rangeValid, includesToday, tokenPresent, config, country, split, vOwn, vRange, vValid };
+  const accountOptions: AccountOption[] = (Array.isArray(config?.portfolios) ? config.portfolios : []).flatMap((p) => p.accounts.map((a) => ({ id: a.id, name: a.name, portfolioId: p.id, portfolioName: p.name })));
+  const accountsParam = accountsArg(accountsChoice, accountOptions);
+  const accountNames = Object.fromEntries(accountOptions.map((a) => [a.id, a.name]));
+  // The first-run wizard only when the configuration was read and truly has no portfolio with an account; a failed or
+  // malformed read shows its error instead.
+  const needsSetup = config !== null && Array.isArray(config.portfolios) && !config.portfolios.some((p) => p.accounts.length > 0);
+
+  const latest = useRef({ range, group, rangeValid, includesToday, tokenPresent, config, country, split, vOwn, vRange, vValid, accountsParam, nameFilter });
+  latest.current = { range, group, rangeValid, includesToday, tokenPresent, config, country, split, vOwn, vRange, vValid, accountsParam, nameFilter };
   const seq = useRef(0);
   const vSeq = useRef(0);
 
   const loadReport = useCallback(async () => {
-    const { range: r, group: g, rangeValid: ok, country: c, split: sp } = latest.current;
+    const { range: r, group: g, rangeValid: ok, country: c, split: sp, accountsParam: acc, nameFilter: nm } = latest.current;
     if (!ok) return;
     const mine = ++seq.current;
     try {
-      const data = await adsApi.report(r.from, r.to, g, c, sp);
+      const data = await adsApi.report(r.from, r.to, g, c, sp, acc, nm);
       if (mine === seq.current) setReport(data);
     } catch (e) {
       if (mine === seq.current) setProblems([errorText(e)]);
@@ -126,11 +151,11 @@ export default function Anuncios() {
 
   // Payments of the card's own range, from the local cache. Only when the card has its own dates.
   const loadVouchers = useCallback(async () => {
-    const { vOwn: own, vRange: r, vValid: ok, country: c } = latest.current;
+    const { vOwn: own, vRange: r, vValid: ok, country: c, accountsParam: acc, nameFilter: nm } = latest.current;
     if (!own || !ok) return;
     const mine = ++vSeq.current;
     try {
-      const data = await adsApi.vouchers(r.from, r.to, c);
+      const data = await adsApi.vouchers(r.from, r.to, c, acc, nm);
       if (mine === vSeq.current) setVData(data);
     } catch (e) {
       if (mine === vSeq.current) setProblems([errorText(e)]);
@@ -139,9 +164,10 @@ export default function Anuncios() {
 
   const loadStatus = useCallback(async () => {
     try {
-      const [s, t] = await Promise.all([adsApi.status(), adsApi.tokenStatus()]);
+      // tokenPresent = at least one portfolio has a token.
+      const s = await adsApi.status();
       setStatus(s);
-      setTokenPresent(t);
+      setTokenPresent(s.tokenPresent);
       return s;
     } catch (e) {
       setProblems([errorText(e)]);
@@ -163,6 +189,30 @@ export default function Anuncios() {
     writeCountryChoice(code);
   }, []);
 
+  const changeAccounts = useCallback((ids: string[]) => {
+    setAccountsChoice(ids);
+    writeAccountsChoice(ids);
+  }, []);
+
+  // A stored choice that points at accounts that no longer exist goes back to "Todas".
+  useEffect(() => {
+    if (accountOptions.length === 0) return;
+    const next = resolveAccountsChoice(accountsChoice, accountOptions);
+    if (next.join() !== accountsChoice.join()) changeAccounts(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config, accountsChoice]);
+
+  // The name filter is applied (and remembered) a moment after typing stops, and only when it is valid.
+  useEffect(() => {
+    const id = window.setTimeout(() => {
+      if (nameFilterProblem(nameInput) !== null) return;
+      const clean = nameInput.trim();
+      setNameFilter(clean);
+      writeNameFilter(clean);
+    }, 400);
+    return () => window.clearTimeout(id);
+  }, [nameInput]);
+
   // Live exchange rates (free public sources): fetched on each data refresh, never in the background. A failure keeps
   // the last saved rate and only shows a warning.
   const refreshFx = useCallback(async () => {
@@ -178,9 +228,10 @@ export default function Anuncios() {
     async () => {
       setSyncing(true);
       try {
-        const [res] = await Promise.all([adsApi.syncAuto(), refreshFx()]);
+        // Only the accounts selected on screen are queried in Meta.
+        const [res] = await Promise.all([adsApi.syncAuto(latest.current.accountsParam), refreshFx()]);
         if (res.backfilled && res.history) setBanner(`Historial cargado desde ${dmy(res.history.from)} (${res.history.days} días con datos).`);
-        setProblems(syncProblems(res));
+        setProblems(syncProblems(res, accountNames));
       } catch (e) {
         setProblems([errorText(e)]);
       } finally {
@@ -188,19 +239,31 @@ export default function Anuncios() {
         setSyncing(false);
       }
     },
-    [loadReport, loadStatus, loadVouchers, refreshFx],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [loadReport, loadStatus, loadVouchers, refreshFx, accountsParam],
   );
 
   // First load: cached report right away, then a sync when the data is stale.
   useEffect(() => {
     (async () => {
+      // Unknown until the configuration is read; if it cannot be read the dashboard loads as before and shows the error.
+      let configured = true;
       try {
         const cfg = await adsApi.configGet();
+        if (!Array.isArray(cfg.config?.portfolios)) throw new Error("La configuración de Anuncios no tiene el formato esperado.");
         setConfig(cfg.config);
+        const options = cfg.config.portfolios.flatMap((p) => p.accounts.map((a) => ({ id: a.id, name: a.name, portfolioId: p.id, portfolioName: p.name })));
+        configured = options.length > 0;
+        // The first report must already use the stored account choice checked against the real accounts.
+        latest.current.accountsParam = accountsArg(readAccountsChoice(), options);
       } catch (e) {
         setProblems([errorText(e)]);
       }
       const s = await loadStatus();
+      if (!configured) {
+        setLoaded(true);
+        return;
+      }
       void loadDecisions();
       await loadReport();
       setLoaded(true);
@@ -263,12 +326,12 @@ export default function Anuncios() {
   // Range or grouping changed: read the local cache (no network).
   useEffect(() => {
     if (loaded) void loadReport();
-  }, [preset, custom, group, country, split, loaded, loadReport]);
+  }, [preset, custom, group, country, split, accountsParam, nameFilter, loaded, loadReport]);
 
   // The card's own range or the country filter changed: read the local cache (no network).
   useEffect(() => {
     if (loaded) void loadVouchers();
-  }, [vOwn, country, loaded, loadVouchers]);
+  }, [vOwn, country, accountsParam, nameFilter, loaded, loadVouchers]);
 
   // "Actualizado hace X min" re-renders its text while the section is open; it never reloads data.
   // Data refreshes only on mount, on "Actualizar" and when the range/filters change (no polling, no scheduler events).
@@ -308,6 +371,13 @@ export default function Anuncios() {
   const chartSeries = chartOptions.find((c) => c.key === chartKey);
   const chartTitle = chartSeries ? `Gasto contra valor por día · ${chartSeries.campaign}` : "Gasto contra valor por día · Todas las campañas";
   const updated = report?.lastSync.meta ?? status?.lastSync.meta ?? null;
+  // Accounts in scope whose last refresh failed (the rest of the numbers are still shown).
+  const inScope = accountsParam ? accountsParam.split(",") : accountOptions.map((a) => a.id);
+  const accountIssues = inScope.flatMap((id) => {
+    const last = (report?.lastSync ?? status?.lastSync)?.accounts?.[id];
+    return last && !last.ok && last.error ? [`${accountNames[id] ?? id}: la última actualización falló. ${last.error}`] : [];
+  });
+  const reportNotes = [...(report?.warnings ?? []), ...(report?.notes ?? [])].map((n) => n.message);
   const ownReady = vOwn !== null && vData !== null && vData.range.from === vRange.from && vData.range.to === vRange.to;
   const vouchers = vOwn ? (ownReady ? vData : null) : report ? { comprobantes: report.comprobantes, reviewCount: report.reviewCount } : null;
   const rangeLabel = range.from === range.to ? range.from : `${range.from} → ${range.to}`;
@@ -326,13 +396,26 @@ export default function Anuncios() {
       {problems.map((p) => (
         <Notice key={p}>{p}</Notice>
       ))}
-      {!tokenPresent && tab !== "configuracion" && (
+      {!needsSetup && !tokenPresent && tab !== "configuracion" && (
         <Notice>
           Falta el token de Meta.{" "}
           <button className="btn ghost sm" onClick={() => setTab("configuracion")}>Ir a Configuración</button>
         </Notice>
       )}
 
+      {needsSetup && config ? (
+        <Card>
+          <AdsSetup
+            config={config}
+            onDone={(c) => {
+              setConfig(c);
+              void loadStatus().then(() => doSync());
+              void loadDecisions();
+            }}
+          />
+        </Card>
+      ) : (
+      <>
       <div className="ia-tabs ads-tabs" role="tablist" aria-label="Secciones de Anuncios">
         <button role="tab" aria-selected={tab === "resumen"} className={`ia-tab ${tab === "resumen" ? "active" : ""}`} onClick={() => setTab("resumen")}>Resumen</button>
         <button role="tab" aria-selected={tab === "decisiones"} className={`ia-tab ${tab === "decisiones" ? "active" : ""}`} onClick={() => setTab("decisiones")}>
@@ -370,9 +453,14 @@ export default function Anuncios() {
           </div>
           <AdsSettings
             detected={report?.detected ?? []}
-            tokenPresent={tokenPresent}
             config={config}
             onTokenChange={() => void loadStatus()}
+            onPortfoliosChanged={(c) => {
+              // Portfolios or accounts changed: the selector and the cached numbers follow (no network).
+              setConfig(c);
+              void loadStatus();
+              void Promise.all([loadReport(), loadVouchers()]);
+            }}
             onConfigSaved={(c) => {
               setConfig(c);
               // The rate mode or the enabled countries may have changed: refresh the live rates, then redraw.
@@ -385,6 +473,10 @@ export default function Anuncios() {
       {tab === "resumen" && (
       <>
       <Card>
+        <AccountFilters accounts={accountOptions} choice={accountsChoice} onChoice={changeAccounts} nameInput={nameInput} onNameInput={setNameInput} />
+        {accountIssues.map((m) => (
+          <p key={m} className="ads-warn" role="status">{m}</p>
+        ))}
         {enabledCountries.length > 0 && (
           <div className="ads-countries-bar" style={{ marginTop: 0, marginBottom: 12 }}>
             <div className="chips" role="group" aria-label="País">
@@ -475,6 +567,35 @@ export default function Anuncios() {
         </p>
       )}
 
+      {reportNotes.map((m) => (
+        <p key={m} className="muted ads-note ads-inactive-note" role="status">{m}</p>
+      ))}
+
+      {accountOptions.length > 1 && (report?.accounts?.length ?? 0) > 0 && (
+        <Card>
+          <div className="card-head">
+            <h2 className="card-title">Por cuenta</h2>
+            <span className="muted">Gasto (con IVA) y pagos atribuidos a cada cuenta; «Sin cuenta» son pagos que no se pueden ligar a un anuncio</span>
+          </div>
+          <table className="ads-table">
+            <thead>
+              <tr><th>Cuenta</th><th>Gasto</th><th>Ventas</th><th>Valor</th><th>ROAS</th></tr>
+            </thead>
+            <tbody>
+              {(report?.accounts ?? []).map((a) => (
+                <tr key={a.accountId || "none"}>
+                  <td>{a.name}{a.portfolioName ? <span className="muted"> · {a.portfolioName}</span> : null}</td>
+                  <td>{formatMoney(a.gasto)}</td>
+                  <td>{formatInt(a.ventas)}</td>
+                  <td>{formatMoney(a.valor)}</td>
+                  <td>{a.gasto > 0 ? formatRoas(a.roas) : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
       <Card>
         <div className="card-head">
           <h2 className="card-title">Por país</h2>
@@ -533,6 +654,8 @@ export default function Anuncios() {
         />
         {vouchers ? <VouchersPanel vouchers={vouchers.comprobantes} filter={vFilter} onFilter={setVFilter} onCountry={(key, code) => void setVoucherCountry(key, code)} onAccept={acceptVoucher} /> : <Skeleton height={120} />}
       </Card>
+      </>
+      )}
       </>
       )}
     </div>

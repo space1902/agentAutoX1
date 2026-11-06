@@ -6,44 +6,70 @@
 import { computeChanges } from './budget.js';
 import { decisionMessage, dueBudgetChanges, evaluateDue } from './decisions.js';
 import { MetaApi, friendlyMetaError } from './meta-api.js';
+import { redact } from './redact.js';
 import { syncActivities } from './activities.js';
 import { fetchAccount, fetchAds } from './meta-data.js';
-import { DEFAULT_TIMEZONE, redact, runSync } from './sync.js';
+import { targetsFor } from './portfolios.js';
+import { DEFAULT_TIMEZONE, runSync, timezoneFor, tokenOfTarget } from './sync.js';
+import { configuredAccountIds } from './portfolios.js';
+import { accountMetaOf, scopeInsights } from './scope.js';
 import { addDays, localParts } from './time.js';
 
 const SYNC_DAYS = 10;
 const ACTIVITY_DAYS = 14;
 
-async function snapshotBudgets({ store, config, token, fetchImpl, now, warnings }) {
+// Budget snapshot of one account (its own token). Returns true when it worked; a failure becomes a warning.
+async function snapshotAccount({ store, config, target, token, fetchImpl, now, warnings, label }) {
   const api = new MetaApi({ token, version: config.graphVersion, fetchImpl, now });
+  const id = target.accountId;
   try {
-    const account = await fetchAccount(api, config.adAccountId);
-    const timezone = account.timezone || store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
-    store.setKv('account', { name: account.name, timezone, currency: account.currency || config.currency });
+    const account = await fetchAccount(api, id);
+    const timezone = account.timezone || timezoneFor(store, target);
+    store.setAccountInfo(id, { name: account.name, timezone, currency: account.currency || target.currency || config.currency }, { primary: id === config.adAccountId });
     const today = localParts(now(), timezone).date;
 
-    const ads = await fetchAds(api, config.adAccountId);
-    store.upsertAds(ads, now());
-    store.recordBudgets(ads, today, now());
+    const ads = await fetchAds(api, id);
+    store.upsertAds(ads, now(), id);
+    store.recordBudgets(ads, today, now(), id);
     store.refreshFirstSpend();
-    store.setKv('lastSnapshot', now());
 
-    const synced = await syncActivities({ api, store, config, since: addDays(today, -ACTIVITY_DAYS), timezone, token });
+    const synced = await syncActivities({ api, store, config, since: addDays(today, -ACTIVITY_DAYS), timezone, token, accountId: id });
     if (!synced.ok) {
-      warnings.push(`No se pudo leer el registro de actividad de Meta (${synced.error}). Los cambios de presupuesto se detectan por comparación y se fechan en la siguiente lectura.`);
+      warnings.push(`${label}No se pudo leer el registro de actividad de Meta (${synced.error}). Los cambios de presupuesto se detectan por comparación y se fechan en la siguiente lectura.`);
     }
     return true;
   } catch (error) {
-    warnings.push(redact(friendlyMetaError(error), token));
+    warnings.push(`${label}${redact(friendlyMetaError(error), token)}`);
     return false;
   }
 }
 
+// Every account with a token gets a snapshot; the others are skipped quietly (the sync reports missing tokens).
+async function snapshotBudgets({ store, config, targets, tokens, token, fetchImpl, now, warnings }) {
+  let any = false;
+  for (const target of targets) {
+    const t = tokenOfTarget({ tokens, token }, target);
+    if (!t) continue;
+    const label = targets.length > 1 ? `${target.name || target.accountId}: ` : '';
+    if (await snapshotAccount({ store, config, target, token: t, fetchImpl, now, warnings, label })) any = true;
+  }
+  if (any) store.setKv('lastSnapshot', now());
+  return any;
+}
+
 const SYNC_GAP_MS = 10 * 60_000;
+
+// Every stored day in the base currency, for the accounts that are configured now (plus rows with no account). An account whose
+// currency has no known rate is left out of the decisions and reported in `warnings`.
+export function tickInsights(store, config) {
+  const allowed = new Set(['', ...configuredAccountIds(config)]);
+  const scoped = scopeInsights({ rows: store.insightsBetween('2000-01-01', '2999-12-31'), accounts: allowed, accountMeta: accountMetaOf(config, store), config, fxRates: store.fxRates() });
+  return { rows: scoped.rows, warnings: scoped.warnings.map((w) => w.message) };
+}
 
 function dataFor(store, config, clock) {
   return {
-    insights: store.insightsBetween('2000-01-01', '2999-12-31'),
+    insights: tickInsights(store, config).rows,
     comprobantes: store.comprobantesBetween('2000-01-01', '2999-12-31'),
     identities: store.identities(),
     ads: store.adsWithFirstSpend(),
@@ -54,23 +80,26 @@ function dataFor(store, config, clock) {
   };
 }
 
-export async function runTick({ store, config, token, fetchImpl = globalThis.fetch, now = Date.now, force = false }) {
+export async function runTick({ store, config, token, tokens, targets, fetchImpl = globalThis.fetch, now = Date.now, force = false }) {
   const life = config.lifecycle;
-  const timezone = store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
+  const list = targets ?? targetsFor(config, null);
+  const anyToken = list.some((t) => tokenOfTarget({ tokens, token }, t));
+  const timezone = (list[0] ? timezoneFor(store, list[0]) : null) || store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
   const parts = localParts(now(), timezone);
   const clock = { date: parts.date, minutes: parts.hour * 60 + parts.minute };
   const result = { snapshot: false, synced: false, created: [], clock, warnings: [], notifyDesktop: life.notifyDesktop };
 
   const last = store.getKv('lastSnapshot');
-  if (token && (force || !last || now() - last >= life.snapshotMinutes * 60_000)) {
-    result.snapshot = await snapshotBudgets({ store, config, token, fetchImpl, now, warnings: result.warnings });
+  if (anyToken && (force || !last || now() - last >= life.snapshotMinutes * 60_000)) {
+    result.snapshot = await snapshotBudgets({ store, config, targets: list, tokens, token, fetchImpl, now, warnings: result.warnings });
   }
 
+  for (const w of tickInsights(store, config).warnings) result.warnings.push(`Decisiones: ${w}`);
   let due = evaluateDue(dataFor(store, config, clock));
   const wantsData = due.length > 0 || dueBudgetChanges(dataFor(store, config, clock)).length > 0;
   const lastSync = store.getKv('lastSync')?.meta ?? 0;
-  if (wantsData && token && (force || now() - lastSync >= SYNC_GAP_MS)) {
-    const sync = await runSync({ store, config, token, from: addDays(clock.date, -SYNC_DAYS), to: clock.date, fetchImpl, now });
+  if (wantsData && anyToken && (force || now() - lastSync >= SYNC_GAP_MS)) {
+    const sync = await runSync({ store, config, token, tokens, targets: list, from: addDays(clock.date, -SYNC_DAYS), to: clock.date, fetchImpl, now });
     result.synced = sync.meta.ok;
     for (const part of [sync.meta, sync.sheet]) if (!part.ok && part.error) result.warnings.push(part.error);
     due = evaluateDue(dataFor(store, config, clock));

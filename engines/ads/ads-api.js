@@ -1,7 +1,9 @@
 // Command layer of the ads engine (used by ads-cli.js and the tests). The Meta token is read ONLY from the
 // AGENTAUTO_META_TOKEN environment variable; it is never stored, logged or returned.
-import { DEFAULT_CONFIG, ConfigError, adsDir, loadConfig, saveConfig } from './config.js';
+import { ACCOUNT_RE, SelectionError, accountsOf, allTokens, parseAccountsArg, redactAll, slugify, targetsFor, tokenFor } from './portfolios.js';
+import { DEFAULT_CONFIG, ConfigError, adsDir, ensureMigrated, loadConfig, saveConfig } from './config.js';
 import { MetaApi, friendlyMetaError } from './meta-api.js';
+import { ScopeError, accountMetaOf, foreignCurrencyAccounts, parseNamePrefixes } from './scope.js';
 import { fetchAccount } from './meta-data.js';
 import { fxSummary, refreshFxRates, resolveRate } from './fx.js';
 import { buildReport } from './report.js';
@@ -21,7 +23,7 @@ export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
 // 'ct' is the legacy name of the campaign grouping (the report never merges campaigns by CT code anymore).
 const GROUPS = ['campaign', 'ct', 'ad'];
-const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-accept', 'activities-probe', 'fx-refresh'];
+const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-accept', 'activities-probe', 'fx-refresh', 'portfolio-add', 'account-add'];
 const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
 export class AdsError extends Error {}
@@ -60,10 +62,39 @@ function effectiveCountries(config, fxRates) {
 
 const accountTimezone = (store) => store.getKv('account')?.timezone || DEFAULT_TIMEZONE;
 
+// Spanish text for a failed account lookup (never includes a token: MetaApi already scrubbed the message).
+function friendlyAccountError(error) {
+  const code = error?.code;
+  if (code === 100 || code === 803 || error?.status === 404) {
+    return 'No encuentro esa cuenta publicitaria en Meta, o este portafolio no tiene permiso para verla. Revisa el número y que la cuenta esté asignada al usuario del sistema de este portafolio.';
+  }
+  return friendlyMetaError(error);
+}
+
+// Selection / filter arguments of sync, report and vouchers; invalid values become AdsError (Spanish message).
+function scopeArgs(args, config) {
+  try {
+    return { selection: parseAccountsArg(args.accounts, config), names: parseNamePrefixes(args.name) };
+  } catch (error) {
+    if (error instanceof SelectionError || error instanceof ScopeError) throw new AdsError(error.message);
+    throw error;
+  }
+}
+
+function uniqueSlug(config, name) {
+  const taken = new Set(config.portfolios.map((p) => p.id));
+  if (taken.size === 0) return 'principal'; // the first portfolio keeps the original token entry
+  const base = slugify(name);
+  let slug = base;
+  for (let n = 2; taken.has(slug); n++) slug = `${base.slice(0, 37)}-${n}`;
+  return slug;
+}
+
 export async function runAdsCommand(command, args, { dataDir, env = process.env, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   if (!COMMANDS.includes(command)) throw new AdsError(`Comando de anuncios no permitido: ${command}.`);
   const token = String(env[TOKEN_ENV] ?? '').trim();
 
+  ensureMigrated(dataDir);
   if (command === 'config-get') return { config: loadConfig(dataDir), defaults: DEFAULT_CONFIG };
   if (command === 'config-set') {
     try {
@@ -95,21 +126,74 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
   }
 
   const config = loadConfig(dataDir);
+  const tokens = allTokens(env, config);
+  const everyToken = [...Object.values(tokens), token];
 
+  // Token check of one portfolio: who the token belongs to and which ad accounts it can see (to offer them as quick picks).
   if (command === 'test-token') {
-    if (!token) throw new AdsError('Falta el token de Meta. Impórtalo o pégalo en la configuración de Anuncios.');
-    const api = new MetaApi({ token, version: config.graphVersion, fetchImpl, now });
+    const slug = String(args.portfolio ?? '').trim() || (config.portfolios.some((p) => p.id === 'principal') ? 'principal' : (config.portfolios[0]?.id ?? 'principal'));
+    const portfolioToken = tokenFor(env, slug);
+    if (!portfolioToken) throw new AdsError('Falta el token de Meta de este portafolio. Pégalo en la configuración de Anuncios.');
+    const api = new MetaApi({ token: portfolioToken, version: config.graphVersion, fetchImpl, now });
     try {
-      const account = await fetchAccount(api, config.adAccountId);
+      const me = await api.get('/me', { fields: 'id,name' });
+      let accounts = [];
+      try {
+        const rows = await api.getAll('/me/adaccounts', { fields: 'id,name,currency,timezone_name,account_status', limit: 100 });
+        accounts = rows.filter((r) => ACCOUNT_RE.test(String(r.id ?? ''))).map((r) => ({ id: r.id, name: r.name ?? '', currency: r.currency ?? '', timezone: r.timezone_name ?? '', status: r.account_status ?? null }));
+      } catch {
+        /* listing is a nicety: a token that can read /me but not list accounts is still valid */
+      }
+      return { portfolio: slug, name: me.name ?? '', id: String(me.id ?? ''), accounts };
+    } catch (error) {
+      throw new AdsError(redactAll(friendlyMetaError(error), everyToken));
+    }
+  }
+
+  // Creates a portfolio (its token is stored by the app, never here). Returns the slug the token entry is derived from.
+  if (command === 'portfolio-add') {
+    const name = String(args.name ?? '').trim();
+    if (!name) throw new AdsError('El portafolio necesita un nombre.');
+    const id = uniqueSlug(config, name);
+    try {
+      const saved = saveConfig(dataDir, { portfolios: [...config.portfolios, { id, name, accounts: [] }] });
+      return { portfolio: { id, name: saved.portfolios.find((p) => p.id === id).name }, config: saved };
+    } catch (error) {
+      if (error instanceof ConfigError) throw new AdsError(error.message);
+      throw error;
+    }
+  }
+
+  // Adds an ad account to a portfolio ONLY after Meta confirms the portfolio's token can read it; nothing is saved otherwise.
+  if (command === 'account-add') {
+    const portfolio = config.portfolios.find((p) => p.id === String(args.portfolio ?? ''));
+    if (!portfolio) throw new AdsError('No encuentro ese portafolio.');
+    const raw = String(args.account ?? '').trim();
+    const id = /^\d+$/.test(raw) ? `act_${raw}` : raw;
+    if (!ACCOUNT_RE.test(id)) throw new AdsError('La cuenta publicitaria debe verse como act_1234567890.');
+    const owner = config.portfolios.find((p) => p.accounts.some((a) => a.id === id));
+    if (owner) throw new AdsError(`Esa cuenta ya está en tu configuración (portafolio «${owner.name}»).`);
+    const portfolioToken = tokenFor(env, portfolio.id);
+    if (!portfolioToken) throw new AdsError(`Falta el token de Meta del portafolio «${portfolio.name}». Pégalo antes de agregar cuentas.`);
+    let info;
+    try {
+      info = await fetchAccount(new MetaApi({ token: portfolioToken, version: config.graphVersion, fetchImpl, now }), id);
+    } catch (error) {
+      throw new AdsError(redactAll(friendlyAccountError(error), everyToken));
+    }
+    const account = { id, name: String(args.name ?? '').trim() || info.name || id, currency: info.currency || '', timezone: info.timezone || '' };
+    try {
+      const saved = saveConfig(dataDir, { portfolios: config.portfolios.map((p) => (p.id === portfolio.id ? { ...p, accounts: [...p.accounts, account] } : p)) });
       const store = openStoreAt(dataDir);
       try {
-        store.setKv('account', { name: account.name, timezone: account.timezone || DEFAULT_TIMEZONE, currency: account.currency || config.currency });
+        store.setAccountInfo(id, { name: info.name || account.name, timezone: account.timezone || DEFAULT_TIMEZONE, currency: account.currency || config.currency });
       } finally {
         store.close();
       }
-      return { accountName: account.name, currency: account.currency, timezone: account.timezone };
+      return { account: saved.portfolios.find((p) => p.id === portfolio.id).accounts.find((a) => a.id === id), accountStatus: info.status, config: saved };
     } catch (error) {
-      throw new AdsError(redact(friendlyMetaError(error), token));
+      if (error instanceof ConfigError) throw new AdsError(error.message);
+      throw error;
     }
   }
 
@@ -119,6 +203,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
     const fxRates = store.fxRates();
     store.setCountryRates(effectiveCountries(config, fxRates));
     store.setSpendVat(config.spendVatPct);
+    store.setExcludedAccounts(foreignCurrencyAccounts(config, store));
     // Live exchange rates: fetched on each data refresh (the app calls this; there is no background polling). Needs no
     // token; a failed fetch keeps the last saved rate and is reported in `errors`.
     if (command === 'fx-refresh') {
@@ -130,15 +215,15 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       return { ...result, today: date, fx: fxSummary(config, saved, date) };
     }
     if (command === 'sync' && (args.auto === true || args.auto === 'true')) {
-      return await runAutoSync({ store, config, token, fetchImpl, now });
+      return await runAutoSync({ store, config, token, tokens, targets: targetsFor(config, scopeArgs(args, config).selection), fetchImpl, now });
     }
     if (command === 'sync') {
       checkRange(args);
-      return await runSync({ store, config, token, from: args.from, to: args.to, fetchImpl, now });
+      return await runSync({ store, config, token, tokens, targets: targetsFor(config, scopeArgs(args, config).selection), from: args.from, to: args.to, fetchImpl, now });
     }
 
     if (command === 'tick') {
-      const result = await runTick({ store, config, token, fetchImpl, now, force: args.force === true || args.force === 'true' });
+      const result = await runTick({ store, config, token, tokens, fetchImpl, now, force: args.force === true || args.force === 'true' });
       // The Analista measures the real outcome of its recommendations once a day. It never blocks or breaks the tick.
       try {
         const { runDailyLearning } = await import('../agent/learning-daily.js');
@@ -190,7 +275,9 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
     }
     if (command === 'status') {
       return {
-        tokenPresent: Boolean(token),
+        // True when ANY portfolio has a token; the per-portfolio presence is listed apart (never the values).
+        tokenPresent: Boolean(token) || Object.keys(tokens).length > 0,
+        portfolios: config.portfolios.map((p) => ({ id: p.id, tokenPresent: Boolean(tokens[p.id]) })),
         lastSync: store.getKv('lastSync') ?? { meta: null, sheet: null, metaError: null, sheetError: null },
         counts: store.counts(),
         account: store.getKv('account'),
@@ -205,11 +292,15 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
     if (command === 'vouchers') {
       checkRange(args);
       if (args.country && args.country !== true && !/^(all|-|[A-Z]{2})$/.test(args.country)) throw new AdsError('El país debe ser un código de 2 letras o «all».');
-      const { comprobantes, reviewCount, range } = buildReport({
+      const scope = scopeArgs(args, config);
+      const { comprobantes, reviewCount, range, notes } = buildReport({
         insights: [],
         comprobantes: store.comprobantesBetween(args.from, args.to),
         identities: store.identities(),
-        ads: {},
+        ads: scope.selection.all && !scope.names.length ? {} : store.adsMap(),
+        accounts: scope.selection,
+        names: scope.names,
+        accountMeta: accountMetaOf(config, store),
         config,
         fxRates,
         from: args.from,
@@ -218,7 +309,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
         today,
         country: args.country === true ? '' : (args.country ?? ''),
       });
-      return { range, comprobantes, reviewCount };
+      return { range, comprobantes, reviewCount, notes };
     }
 
     // report
@@ -226,7 +317,12 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
     if (args.country && args.country !== true && !/^(all|-|[A-Z]{2})$/.test(args.country)) throw new AdsError('El país debe ser un código de 2 letras o «all».');
     const group = args.group ?? 'campaign';
     if (!GROUPS.includes(group)) throw new AdsError('La agrupación debe ser campaign o ad.');
+    const scope = scopeArgs(args, config);
+    // Insights and identities stay unfiltered here: the report needs every account to know which ad a payment belongs to.
     const report = buildReport({
+      accounts: scope.selection,
+      names: scope.names,
+      accountMeta: accountMetaOf(config, store),
       insights: store.insightsBetween(args.from, args.to),
       comprobantes: store.comprobantesBetween(args.from, args.to),
       identities: store.identities(),

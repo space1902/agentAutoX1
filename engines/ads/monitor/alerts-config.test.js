@@ -45,9 +45,9 @@ test('rejects out-of-range schedules, odd sources and secrets', () => {
 });
 
 test('phones are normalized to digits (Colombian mobiles get 57)', () => {
-  const c = mergeAlertsConfig({ whatsapp: { senderPhone: '300 123 4567', alertTo: '+57 316 758 5233' } });
+  const c = mergeAlertsConfig({ whatsapp: { senderPhone: '300 123 4567', alertTo: '+57 300 000 0002' } });
   assert.equal(c.whatsapp.senderPhone, '573001234567');
-  assert.equal(c.whatsapp.alertTo, '573167585233');
+  assert.equal(c.whatsapp.alertTo, '573000000002');
   assert.equal(mergeAlertsConfig({ whatsapp: { alertTo: '' } }).whatsapp.alertTo, '');
 });
 
@@ -60,10 +60,10 @@ test('save/load round trip with atomic write and a backup', () => {
   const dir = tmp();
   assert.deepEqual(loadAlertsConfig(dir), ALERTS_DEFAULTS);
   saveAlertsConfig(dir, { pollMinutes: 20 });
-  saveAlertsConfig(dir, { pollMinutes: 30, whatsapp: { alertTo: '573167585233' } }, { now: () => new Date('2026-10-29T12:00:00Z') });
+  saveAlertsConfig(dir, { pollMinutes: 30, whatsapp: { alertTo: '573000000002' } }, { now: () => new Date('2026-10-29T12:00:00Z') });
   const loaded = loadAlertsConfig(dir);
   assert.equal(loaded.pollMinutes, 30);
-  assert.equal(loaded.whatsapp.alertTo, '573167585233');
+  assert.equal(loaded.whatsapp.alertTo, '573000000002');
   assert.equal(fs.readdirSync(path.join(dir, 'ads', 'backups')).filter((f) => f.startsWith('alerts-config-')).length, 1);
   assert.equal(fs.readdirSync(path.join(dir, 'ads')).some((f) => f.endsWith('.tmp')), false);
 });

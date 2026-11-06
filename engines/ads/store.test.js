@@ -225,3 +225,114 @@ test('fx rates are stored once per currency and day, newest write wins, listed b
   ]);
   assert.equal(s.fxRates().USD.length, 1);
 });
+
+// ---- accounts
+
+test('rows remember the account that produced them and can be filtered by account', () => {
+  const s = createStore();
+  s.upsertInsights([row('2026-10-28', 'A', 100)], 1, 'act_11111');
+  s.upsertInsights([row('2026-10-28', 'B', 200)], 1, 'act_22222');
+  s.upsertAds([ad('A')], 1, 'act_11111');
+  s.upsertAds([ad('B')], 1, 'act_22222');
+  assert.deepEqual(s.insightsBetween('2026-10-01', '2026-10-31').map((r) => [r.adId, r.accountId]), [['A', 'act_11111'], ['B', 'act_22222']]);
+  assert.deepEqual(s.insightsBetween('2026-10-01', '2026-10-31', ['act_22222']).map((r) => r.adId), ['B']);
+  assert.deepEqual(s.insightsBetween('2026-10-01', '2026-10-31', []).map((r) => r.adId), [], 'an empty list selects nothing');
+  assert.equal(s.adsMap().B.accountId, 'act_22222');
+  assert.equal(s.identities().A.accountId, 'act_11111');
+  s.recordBudgets([{ ...ad('A'), adsetDailyBudget: 7, adsetLifetimeBudget: null }], '2026-10-28', 1, 'act_11111');
+  assert.equal(s.db.prepare('SELECT account_id FROM budget_history').get().account_id, 'act_11111');
+  s.upsertBudgetEvents([{ entityType: 'adset', entityId: 's1', time: 5, date: '2026-10-28', oldBudget: 1, newBudget: 2 }], 'act_11111');
+  assert.equal(s.db.prepare('SELECT account_id FROM budget_events').get().account_id, 'act_11111');
+});
+
+test('the account filter is a bound parameter: hostile text matches nothing and breaks nothing', () => {
+  const s = createStore();
+  s.upsertInsights([row('2026-10-28', 'A', 100)], 1, 'act_11111');
+  assert.deepEqual(s.insightsBetween('2026-10-01', '2026-10-31', ["x') OR 1=1 --"]), []);
+  assert.equal(s.counts().insights, 1);
+});
+
+test('per-account info with a fallback to the legacy single record', () => {
+  const s = createStore();
+  assert.equal(s.accountInfo('act_11111'), null);
+  s.setKv('account', { name: 'Vieja', timezone: 'America/Bogota', currency: 'COP' });
+  assert.equal(s.accountInfo('act_11111').timezone, 'America/Bogota', 'fallback');
+  s.setAccountInfo('act_11111', { name: 'Uno', timezone: 'America/Mexico_City', currency: 'MXN' });
+  assert.equal(s.accountInfo('act_11111').timezone, 'America/Mexico_City');
+  assert.equal(s.getKv('account').name, 'Vieja', 'the legacy record is only touched for the primary account');
+  s.setAccountInfo('act_22222', { name: 'Dos', timezone: 'UTC', currency: 'USD' }, { primary: true });
+  assert.equal(s.getKv('account').name, 'Dos');
+});
+
+// A database from before accounts existed (the four Meta tables without account_id).
+function preAccountDb(file) {
+  const raw = new DatabaseSync(file);
+  raw.exec(`CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE insights (date TEXT NOT NULL, ad_id TEXT NOT NULL, ad_name TEXT NOT NULL, campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL,
+      adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, gasto REAL NOT NULL, impressions INTEGER NOT NULL, clicks INTEGER NOT NULL,
+      mensajes INTEGER NOT NULL, synced_at INTEGER NOT NULL, country TEXT NOT NULL DEFAULT '', PRIMARY KEY (date, ad_id, country));
+    CREATE TABLE ads (ad_id TEXT PRIMARY KEY, name TEXT NOT NULL, created_time TEXT NOT NULL, effective_status TEXT NOT NULL,
+      campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL, adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, updated_at INTEGER NOT NULL, first_spend_date TEXT);
+    CREATE TABLE budget_history (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, date TEXT NOT NULL,
+      daily_budget REAL, lifetime_budget REAL, first_seen INTEGER NOT NULL);
+    CREATE TABLE budget_events (entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, time INTEGER NOT NULL, date TEXT NOT NULL,
+      old_budget REAL NOT NULL, new_budget REAL NOT NULL, PRIMARY KEY (entity_type, entity_id, time, new_budget));`);
+  raw.exec(`INSERT INTO insights VALUES ('2026-10-28','A','a','c','CT01','s','S',500,1,1,1,1,'');
+    INSERT INTO ads VALUES ('A','a','2026-10-25','ACTIVE','c','CT01','s','S',1,NULL);
+    INSERT INTO budget_history (entity_type, entity_id, date, daily_budget, lifetime_budget, first_seen) VALUES ('adset','s','2026-10-28',5,NULL,1);
+    INSERT INTO budget_events VALUES ('adset','s',5,'2026-10-28',1,2);
+    INSERT INTO kv VALUES ('account', '{"name":"X1","timezone":"America/Bogota","currency":"COP"}'), ('backfillDone', '{"from":"2026-08-01","at":1}');`);
+  raw.close();
+}
+
+test('an existing database gets account_id and is backfilled with the principal account, idempotently', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ads-acct-'));
+  const file = path.join(dir, 'ads.db');
+  preAccountDb(file);
+
+  const migrated = createStore(file, { defaultAccountId: 'act_11111' });
+  const count = (sql) => migrated.db.prepare(sql).get().n;
+  for (const t of ['insights', 'ads', 'budget_history', 'budget_events']) assert.equal(count(`SELECT COUNT(*) n FROM ${t} WHERE account_id = 'act_11111'`), 1, t);
+  assert.equal(migrated.accountInfo('act_11111').name, 'X1');
+  assert.deepEqual(migrated.getKv('backfillDone:act_11111'), { from: '2026-08-01', at: 1 });
+  assert.equal(migrated.getKv('backfillDone').from, '2026-08-01', 'the legacy keys stay');
+  migrated.upsertInsights([row('2026-10-29', 'C', 5)], 2, 'act_99999');
+  migrated.close();
+
+  const again = createStore(file, { defaultAccountId: 'act_11111' });
+  assert.equal(again.db.prepare("SELECT COUNT(*) n FROM insights WHERE account_id = 'act_11111'").get().n, 1);
+  assert.equal(again.db.prepare("SELECT COUNT(*) n FROM insights WHERE account_id = 'act_99999'").get().n, 1, 'later accounts are not overwritten');
+  assert.equal(again.counts().insights, 2);
+  again.close();
+});
+
+test('without a principal account the old rows keep an empty account until one is known', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ads-acct-none-'));
+  const file = path.join(dir, 'ads.db');
+  preAccountDb(file);
+  const s = createStore(file);
+  assert.equal(s.db.prepare("SELECT COUNT(*) n FROM insights WHERE account_id = ''").get().n, 1);
+  s.close();
+});
+
+test('a read-only handle on a pre-account database still reads insights', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ads-acct-ro-'));
+  const file = path.join(dir, 'ads.db');
+  preAccountDb(file);
+  const ro = createStore(file, { readOnly: true });
+  assert.equal(ro.insightsBetween('2026-10-01', '2026-10-31')[0].accountId, '');
+  assert.equal(ro.identities().A.accountId, '');
+  ro.close();
+});
+
+test('accounts excluded from the Analista views (other currency) do not appear in v_ads_daily', () => {
+  const s = createStore();
+  s.upsertInsights([row('2026-10-28', 'A', 100)], 1, 'act_11111');
+  s.upsertInsights([row('2026-10-28', 'B', 200)], 1, 'act_22222');
+  const spend = () => s.db.prepare('SELECT ad_id FROM v_ads_daily ORDER BY ad_id').all().map((r) => r.ad_id);
+  assert.deepEqual(spend(), ['A', 'B']);
+  s.setExcludedAccounts(['act_22222']);
+  assert.deepEqual(spend(), ['A']);
+  s.setExcludedAccounts([]);
+  assert.deepEqual(spend(), ['A', 'B']);
+});

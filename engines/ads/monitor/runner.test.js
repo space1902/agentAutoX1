@@ -9,7 +9,7 @@ import { createStore as createMonitorStore } from './store.js';
 import { authDirOf, flushOutbox, maskPhones, readWaStatus } from './runner.js';
 
 test('maskPhones hides long digit runs but keeps ordinary numbers', () => {
-  assert.equal(maskPhones('Enviado a 573167585233 ok'), 'Enviado a ••••5233 ok');
+  assert.equal(maskPhones('Enviado a 573000000002 ok'), 'Enviado a ••••0002 ok');
   assert.equal(maskPhones('+57 300 123 4567 y 573001234567@s.whatsapp.net'), '+57 300 123 4567 y ••••4567@s.whatsapp.net');
   assert.equal(maskPhones('gasto 15000 en 4 días, 12.500'), 'gasto 15000 en 4 días, 12.500');
 });

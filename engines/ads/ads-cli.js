@@ -1,6 +1,6 @@
 // JSON CLI over ads-api.js, used by the desktop app.
 //   node --disable-warning=ExperimentalWarning ads-cli.js <command> [--from D --to D --group ct|campaign|ad] [--json '<payload>' | --stdin]
-// Prints one JSON line { ok, data } / { ok: false, error }. The Meta token arrives only in AGENTAUTO_META_TOKEN.
+// Prints one JSON line { ok, data } / { ok: false, error }. Meta tokens arrive only in AGENTAUTO_META_TOKEN (principal) and AGENTAUTO_META_TOKEN__<SLUG> (one per portfolio).
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -15,8 +15,12 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8').replace(/^﻿/, '');
 }
 
-const secret = String(process.env.AGENTAUTO_META_TOKEN ?? '').trim();
-const scrub = (text) => (secret ? String(text ?? '').split(secret).join('***') : String(text ?? ''));
+// Every Meta token in the environment (the legacy one and one per portfolio) is scrubbed from anything printed.
+const secrets = Object.entries(process.env)
+  .filter(([name]) => name === 'AGENTAUTO_META_TOKEN' || name.startsWith('AGENTAUTO_META_TOKEN__'))
+  .map(([, value]) => String(value ?? '').trim())
+  .filter(Boolean);
+const scrub = (text) => secrets.reduce((out, secret) => out.split(secret).join('***'), String(text ?? ''));
 
 try {
   const [major, minor] = process.versions.node.split('.').map(Number);
