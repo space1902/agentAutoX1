@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence } from "framer-motion";
-import { Check, Eye, Loader2, MessageCircle, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, RotateCcw, Smartphone, Trash2 } from "lucide-react";
+import { Check, Eye, Loader2, MessageCircle, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, RotateCcw, Smartphone, Trash2, Wrench } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import EmbeddedView from "../components/EmbeddedView";
 import { KeepAliveCard, KeepAliveSwitch, useKeepAlive } from "../components/KeepAlive";
@@ -8,9 +8,10 @@ import { Modal, ProgressBar, Warning } from "../components/Modal";
 import { Banner, Card, Notice, Pill, SkeletonGrid, StatCard } from "../components/ui";
 import { api, errorText, type Pod, type RegistryRow } from "../lib/api";
 import { POD_STEP_LABELS, type PodCreationState } from "../lib/podCreation";
+import { parsePodError } from "../lib/podErrors";
 import { phoneConflict, podNameProblem, podPhone } from "../lib/phone";
 
-type Action = "prender" | "apagar" | "ver" | "abrir-wa";
+type Action = "prender" | "apagar" | "ver" | "abrir-wa" | "reinstalar-wa";
 
 /** The base BlueStacks instance hosts the Root.vhd shared by every pod: it can never be deleted. */
 const BASE_INSTANCE = "Rvc64";
@@ -32,6 +33,7 @@ export default function MultiWhatsApp({ creation }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null); // "<pod>:<action>"
+  const [waMissing, setWaMissing] = useState<string | null>(null); // pod whose WhatsApp was lost: offers "Reparar WhatsApp"
   const [dialog, setDialog] = useState<Dialog>(creation.state.running || creation.state.result ? { kind: "create" } : null);
 
   const load = useCallback(async () => {
@@ -84,14 +86,28 @@ export default function MultiWhatsApp({ creation }: Props) {
   };
 
   const run = async (action: Action, name: string) => {
+    if (busy !== null) return; // double-start guard (buttons are disabled too)
     setBusy(`${name}:${action}`);
     setError(null);
     setInfo(null);
+    if (action !== "abrir-wa") setWaMissing(null);
     try {
       setInfo((await api.podAction(action, name)) || `Listo: ${action} ${name}.`);
+      if (action === "reinstalar-wa") {
+        setWaMissing(null);
+        setPods(await api.listPods());
+        // Repaired: open WhatsApp right away (same action as the WhatsApp button). A failure here is not a repair failure.
+        try {
+          setInfo((await api.podAction("abrir-wa", name)) || `WhatsApp reparado en «${name}».`);
+        } catch (e) {
+          setInfo(`WhatsApp quedó reparado en «${name}». ${parsePodError(errorText(e)).message}`);
+        }
+      }
       setPods(await api.listPods());
     } catch (e) {
-      setError(errorText(e));
+      const parsed = parsePodError(errorText(e));
+      setError(parsed.message);
+      if (action === "abrir-wa" && parsed.waMissing) setWaMissing(name);
     } finally {
       setBusy(null);
     }
@@ -134,7 +150,11 @@ export default function MultiWhatsApp({ creation }: Props) {
       {resetting !== null && <Notice kind="ok">{resetting}</Notice>}
       {error && <Notice>{error}</Notice>}
       {info && <Notice kind="ok">{info}</Notice>}
-      {busy && <Notice kind="ok">Ejecutando «{busy.replace(":", " ")}». Prender puede tardar hasta unos 4 minutos mientras arranca Android.</Notice>}
+      {busy && busy.endsWith(":reinstalar-wa") ? (
+        <Notice kind="ok">Reparando WhatsApp en «{busy.split(":")[0]}»: instalar y compilar tarda hasta unos 30 minutos. No cierres la app ni apagues el pod; la cuenta no se toca.</Notice>
+      ) : (
+        busy && <Notice kind="ok">Ejecutando «{busy.replace(":", " ")}». Prender puede tardar hasta unos 4 minutos mientras arranca Android.</Notice>
+      )}
       {creating && <Notice kind="ok">Creando el pod «{creation.state.name}»: paso {creation.state.step} de {creation.state.total}. No cierres la app.</Notice>}
 
       {keepAlive.error && <Notice>{keepAlive.error}</Notice>}
@@ -177,6 +197,17 @@ export default function MultiWhatsApp({ creation }: Props) {
                   >
                     <MessageCircle size={14} aria-hidden /> WhatsApp
                   </button>
+                  {waMissing === pod.name && (
+                    <button
+                      className="btn sm"
+                      disabled={locked || !isOn}
+                      title="Reinstala WhatsApp Business sin borrar la cuenta (tarda hasta unos 30 minutos)"
+                      onClick={() => void run("reinstalar-wa", pod.name)}
+                    >
+                      {busy === `${pod.name}:reinstalar-wa` ? <Loader2 size={14} className="spin" aria-hidden /> : <Wrench size={14} aria-hidden />}{" "}
+                      {busy === `${pod.name}:reinstalar-wa` ? "Reparando…" : "Reparar WhatsApp"}
+                    </button>
+                  )}
                   <button className="btn sm ghost" disabled={locked} onClick={() => void run("ver", pod.name)}>
                     <Eye size={14} aria-hidden /> Ver
                   </button>

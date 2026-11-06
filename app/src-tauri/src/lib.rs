@@ -126,7 +126,13 @@ async fn pod_action(state: State<'_, AppState>, action: String, name: String) ->
     if let Some(job) = state.pod_job.current() {
         return Err(format!("Hay una operación de pods en curso ({job}); espera a que termine."));
     }
-    blocking(move || pods::run_action(&settings, &action, &name)).await
+    // Long repairs hold the pod-job lock for their whole run, like creating or deleting a pod.
+    let guard = if pods::holds_pod_job(&action) { Some(state.pod_job.begin(&format!("{action} {name}"))?) } else { None };
+    blocking(move || {
+        let _guard = guard;
+        pods::run_action(&settings, &action, &name)
+    })
+    .await
 }
 
 /// Creates a pod (long: ~12-15 min). Streams `pod-create-progress` events while it runs.

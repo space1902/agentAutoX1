@@ -376,6 +376,12 @@ function Obtener-Serial($pod) {
     $esperado = Obtener-ConfValor $texto "bst.instance.$($pod.Instancia).android_id"
     $candidatos = @("emulator-$($puerto - 1)", "127.0.0.1:$puerto")
     $lista = (Invoke-Adb $null @('devices') 10).Salida
+    # adb only auto-discovers emulators on ports 5555-5585; pods past that (5595+) need an explicit connect.
+    $visible = $candidatos | Where-Object { $lista -match ('(?m)^' + [regex]::Escape($_) + '\s+device') }
+    if (-not $visible) {
+        Invoke-Adb $null @('connect', "127.0.0.1:$puerto") 10 | Out-Null
+        $lista = (Invoke-Adb $null @('devices') 10).Salida
+    }
     foreach ($c in $candidatos) {
         if ($lista -notmatch ('(?m)^' + [regex]::Escape($c) + '\s+device')) { continue }
         $id = (Adb-Shell $c 'settings get secure android_id' 10).Salida
@@ -492,7 +498,14 @@ function Compilar-Wa([string] $serial) {
     Escribir '    Compilando WhatsApp (AOT, tarda ~5 minutos; es necesario)...'
     $r = Adb-Shell $serial "cmd package compile -m speed -f $Paquete" 1200
     if ($r.Agotado) { throw 'La compilación de WhatsApp superó los 20 minutos.' }
-    if ($r.Texto -notmatch 'Success') { throw "La compilación de WhatsApp falló: $($r.Texto)" }
+    if ($r.Texto -notmatch 'Success') {
+        # A first "could not be compiled" is known to succeed on retry: one more try after a short pause.
+        Escribir '    La compilación falló una vez; reintento en 10 segundos...' Yellow
+        Start-Sleep 10
+        $r = Adb-Shell $serial "cmd package compile -m speed -f $Paquete" 1200
+        if ($r.Agotado) { throw 'La compilación de WhatsApp superó los 20 minutos.' }
+        if ($r.Texto -notmatch 'Success') { throw "La compilación de WhatsApp falló: $($r.Texto)" }
+    }
 }
 
 function Deshabilitar-Apps([string] $serial) {
@@ -815,7 +828,7 @@ function Prender([string] $nombre) {
     Escribir "Pod '$nombre' prendido." Green
     # WhatsApp no tiene icono en el launcher de BlueStacks (se instala por adb): se abre solo para que no haya que buscarlo.
     try {
-        if (-not (Wa-Instalado $serial)) { Escribir "    WhatsApp Business no está instalado en '$nombre'. Usa 'reinstalar-wa $nombre'." Yellow }
+        if (-not (Wa-Instalado $serial)) { Escribir "    WhatsApp Business no está instalado en '$nombre' (el pod quedó prendido igual). Usa el botón «Reparar WhatsApp» de la app o 'reinstalar-wa $nombre'; la cuenta no se pierde." Yellow }
         elseif (-not (Abrir-Wa $serial)) { Escribir '    No pude confirmar que WhatsApp quedó en primer plano; usa el botón WhatsApp de la app o 'abrir-wa'.' Yellow }
     } catch { Escribir "    No pude abrir WhatsApp automáticamente: $($_.Exception.Message)" Yellow }
 }
@@ -825,7 +838,7 @@ function Abrir-WaPod([string] $nombre) {
     if (-not (Pod-Prendido $pod)) { throw "El pod '$nombre' está apagado. Prende el pod primero (acción 'prender')." }
     $serial = Obtener-Serial $pod
     if (-not $serial -or -not (Android-Listo $serial)) { $serial = Esperar-Android $pod 45 }
-    if (-not (Wa-Instalado $serial)) { throw "WhatsApp Business no está instalado en el pod '$nombre'. Usa 'reinstalar-wa $nombre' para instalarlo sin perder la cuenta." }
+    if (-not (Wa-Instalado $serial)) { throw "[WA_FALTA] WhatsApp Business no está instalado en el pod '$nombre'. Usa 'reinstalar-wa $nombre' para instalarlo sin perder la cuenta." }
     if (Abrir-Wa $serial) { Escribir "WhatsApp Business abierto en el pod '$nombre'." Green }
     else { throw "No pude confirmar que WhatsApp Business quedó abierto en '$nombre'. Revisa la ventana del pod o inténtalo de nuevo." }
 }

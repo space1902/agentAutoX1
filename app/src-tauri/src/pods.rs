@@ -84,6 +84,8 @@ pub fn timeout_for(action: &str) -> Duration {
         "listar-json" | "info-json" | "wsp" | "ver" | "abrir-wa" => Duration::from_secs(90),
         "apagar" => minutes(3),
         "prender" => minutes(8),
+        // worst case 10 min install + 20 min compile + 20 min retry (+ the Android boot): leave room for all of it.
+        "reinstalar-wa" => minutes(60),
         "renombrar" | "borrar" => minutes(10),
         "nuevo" => minutes(30),
         _ => minutes(5),
@@ -282,7 +284,48 @@ pub fn bluestacks_info(settings: &Settings) -> Result<BlueStacksInfo, String> {
 
 /// Actions the UI may trigger on a single pod.
 pub fn is_allowed_action(action: &str) -> bool {
-    matches!(action, "prender" | "apagar" | "ver" | "abrir-wa")
+    matches!(action, "prender" | "apagar" | "ver" | "abrir-wa" | "reinstalar-wa")
+}
+
+/// Long actions that must hold the pod-job lock for their whole run (so nothing else touches pods meanwhile).
+pub fn holds_pod_job(action: &str) -> bool {
+    action == "reinstalar-wa"
+}
+
+/// Stable marker `pods.ps1` puts in the error when WhatsApp Business is missing from a pod.
+pub const WA_MISSING_MARKER: &str = "[WA_FALTA]";
+
+const WA_MISSING_MESSAGE: &str = "WhatsApp se perdió en este pod, normalmente tras un apagado brusco. Tus datos siguen ahí. Repáralo para reinstalarlo sin borrar la cuenta.";
+
+/// Turns a failed script's output into what the user sees: the marked WhatsApp-missing line, or the last `n` lines
+/// without PowerShell position/stack noise.
+pub fn clean_script_error(detail: &str, n: usize) -> String {
+    if detail.contains(WA_MISSING_MARKER) {
+        return format!("{WA_MISSING_MARKER} {WA_MISSING_MESSAGE}");
+    }
+    let cleaned: Vec<String> = detail
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !is_ps_noise(l))
+        .map(strip_script_prefix)
+        .collect();
+    if cleaned.is_empty() {
+        return last_lines(detail, n);
+    }
+    cleaned[cleaned.len().saturating_sub(n)..].join("\n")
+}
+
+fn is_ps_noise(line: &str) -> bool {
+    let l = line.to_ascii_lowercase();
+    (l.starts_with("at ") && l.contains(" char:")) || l.starts_with('+') || l.starts_with("categoryinfo") || l.starts_with("fullyqualifiederrorid")
+}
+
+/// `C:\...\pods.ps1 : message` -> `message`.
+fn strip_script_prefix(line: &str) -> String {
+    match line.find(".ps1 : ") {
+        Some(i) if line[..i].contains(['\\', '/']) => line[i + 7..].to_string(),
+        _ => line.to_string(),
+    }
 }
 
 /// Starting two BlueStacks instances at the same time can leave the second one stuck while it boots (a window that
@@ -308,7 +351,7 @@ pub fn run_action(settings: &Settings, action: &str, name: &str) -> Result<Strin
         Ok(last_lines(&out.stdout, 3))
     } else {
         let detail = if out.stderr.trim().is_empty() { &out.stdout } else { &out.stderr };
-        Err(last_lines(detail, 4))
+        Err(clean_script_error(detail, 4))
     }
 }
 
@@ -625,6 +668,43 @@ mod tests {
     }
 
     #[test]
+    fn reinstalar_wa_is_allowed_and_holds_the_pod_job_but_stays_out_of_the_start_gate() {
+        assert!(is_allowed_action("reinstalar-wa"));
+        assert!(holds_pod_job("reinstalar-wa"));
+        assert!(!holds_pod_job("prender") && !holds_pod_job("abrir-wa") && !holds_pod_job("ver"));
+        assert!(!serializes_starts("reinstalar-wa"));
+    }
+
+    #[test]
+    fn a_missing_whatsapp_error_becomes_one_marked_line() {
+        let raw = [
+            r"C:\x\pods.ps1 : [WA_FALTA] WhatsApp Business no está instalado en el pod 'a'.",
+            r"At C:\x\pods.ps1:828 char:5",
+            "+ throw",
+            "    + CategoryInfo : OperationStopped",
+            "    + FullyQualifiedErrorId : [WA_FALTA] x",
+        ]
+        .join("\n");
+        let msg = clean_script_error(&raw, 4);
+        assert!(msg.starts_with("[WA_FALTA] WhatsApp se perdió"), "{msg}");
+        assert!(!msg.contains("At ") && !msg.contains("FullyQualifiedErrorId") && !msg.contains('\n'), "{msg}");
+    }
+
+    #[test]
+    fn other_script_errors_lose_the_powershell_noise() {
+        let raw = [
+            r"C:\x\pods.ps1 : El pod 'a' está apagado.",
+            r"At C:\x\pods.ps1:828 char:5",
+            "+ throw",
+            "    + CategoryInfo          : OperationStopped: (:) [], RuntimeException",
+            "    + FullyQualifiedErrorId : El pod 'a' está apagado.",
+        ]
+        .join("\n");
+        assert_eq!(clean_script_error(&raw, 4), "El pod 'a' está apagado.");
+        assert_eq!(clean_script_error("uno\ndos", 4), "uno\ndos");
+    }
+
+    #[test]
     fn only_whitelisted_actions() {
         assert!(is_allowed_action("prender") && is_allowed_action("apagar") && is_allowed_action("ver") && is_allowed_action("abrir-wa"));
         assert!(!is_allowed_action("borrar") && !is_allowed_action("nuevo"));
@@ -801,6 +881,8 @@ mod tests {
             assert!(t >= secs(30) && t <= secs(60 * 60), "{action}: {t:?}");
         }
         assert_eq!(timeout_for("abrir-wa"), secs(90));
+        // reinstalar-wa: worst case 10 min install + 20 min compile + 20 min retry, plus the Android boot and slack.
+        assert_eq!(timeout_for("reinstalar-wa"), secs(60 * 60));
         assert!(timeout_for("prender") > timeout_for("apagar"));
         assert!(timeout_for("nuevo") > timeout_for("prender"));
     }
