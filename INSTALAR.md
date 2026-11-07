@@ -50,7 +50,11 @@ copiada y abierta en dos lugares se desincroniza y WhatsApp puede cerrarla o sus
 
 ## 5. Recibir actualizaciones
 
-Cuando subas cambios a `main`, en la otra PC:
+**Desde la app:** en **Ajustes → Actualizaciones** toca **Buscar actualizaciones** y luego **Actualizar**. La app se
+recarga sola (si cambió la parte de Rust, se recompila y vuelve a abrir en 1 o 2 minutos). Si la actualización trae
+dependencias nuevas, la app te lo dice: en ese caso usa el script de abajo.
+
+**Con el script** (la primera vez, o cuando la app lo pida):
 
 1. Cierra la app (`Ctrl+C` en su terminal).
 2. En la carpeta `agentAutoX1`:
