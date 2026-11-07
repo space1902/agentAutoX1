@@ -3,7 +3,7 @@
 // the CT tag is derived in JS (extractCt) and is only informational: rows are keyed by the real Meta campaign (campaign_id) and the exchange rates live in the JSON config.
 import { extractCt } from './parse.js';
 
-export const VIEWS_VERSION = 6;
+export const VIEWS_VERSION = 7;
 
 // Views of earlier versions that no longer exist (dropped on upgrade).
 const LEGACY_VIEWS = ['v_ct_daily'];
@@ -59,11 +59,12 @@ export const VIEWS = {
   v_sales: {
     description: 'Pagos válidos (comprobantes) con su país y la campaña dueña del anuncio. Incluye el nombre del cliente. Incluye los de resultado «Pago válido» y los que el usuario aceptó a mano en la app (accepted_manually = 1); una fila = una venta.',
     sql: `SELECT c.date AS date, ${COUNTRY('COALESCE(o.country, c.country)')} AS country, COALESCE(t.ct, 'Sin CT') AS ct,
-      COALESCE(ac.campaign_id, '') AS campaign_id, CASE WHEN c.ad_id = '' THEN 'Sin anuncio' ELSE COALESCE(ac.campaign_name, 'Anuncio desconocido') END AS campaign, c.ad_id AS ad_id,
+      COALESCE(ac.campaign_id, '') AS campaign_id, CASE WHEN COALESCE(m.ad_id, c.ad_id) = '' THEN 'Sin anuncio' ELSE COALESCE(ac.campaign_name, 'Anuncio desconocido') END AS campaign, COALESCE(m.ad_id, c.ad_id) AS ad_id,
       c.valor AS value, c.valor * COALESCE(r.rate_to_cop, 1) AS value_cop, c.flow AS flow, c.result AS result, c.bank AS bank, c.client_name AS client_name,
       CASE WHEN a.key IS NOT NULL AND c.result NOT LIKE 'pago v_lido' THEN 1 ELSE 0 END AS accepted_manually
-      FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key LEFT JOIN comprobante_accepts a ON a.key = c.key LEFT JOIN ad_ct t ON t.ad_id = c.ad_id
-      LEFT JOIN ad_campaign ac ON ac.ad_id = c.ad_id
+      FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key LEFT JOIN comprobante_accepts a ON a.key = c.key
+      LEFT JOIN comprobante_ad_overrides m ON m.key = c.key LEFT JOIN ad_ct t ON t.ad_id = COALESCE(m.ad_id, c.ad_id)
+      LEFT JOIN ad_campaign ac ON ac.ad_id = COALESCE(m.ad_id, c.ad_id)
       LEFT JOIN country_rates r ON r.country = COALESCE(o.country, c.country)
       WHERE c.result LIKE 'pago v_lido' OR a.key IS NOT NULL`,
     columns: [

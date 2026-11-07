@@ -23,7 +23,7 @@ export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
 // 'ct' is the legacy name of the campaign grouping (the report never merges campaigns by CT code anymore).
 const GROUPS = ['campaign', 'ct', 'ad'];
-const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-accept', 'activities-probe', 'fx-refresh', 'portfolio-add', 'account-add'];
+const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-ad', 'comprobante-accept', 'activities-probe', 'fx-refresh', 'portfolio-add', 'account-add'];
 const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
 export class AdsError extends Error {}
@@ -249,6 +249,17 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       }
       store.setCountryOverride(args.key, args.code === true ? '' : (args.code ?? ''), now());
       return { key: args.key, country: args.code === true ? '' : (args.code ?? '') };
+    }
+    // Assign the ad of a payment whose sheet row did not capture it (--ad with no value removes it). Only the local
+    // database changes; the sheet is never written. The ad must be one Meta already reported, to catch typos.
+    if (command === 'comprobante-ad') {
+      const adId = args.ad === true ? '' : String(args.ad ?? '');
+      if (!/^[0-9a-f]{20}$/.test(String(args.key ?? '')) || !/^(\d{5,25})?$/.test(adId)) throw new AdsError('El comprobante o el anuncio no son válidos.');
+      if (adId && !store.db.prepare('SELECT 1 FROM ads WHERE ad_id = ? UNION SELECT 1 FROM insights WHERE ad_id = ? LIMIT 1').get(adId, adId)) {
+        throw new AdsError(`No encuentro el anuncio ${adId} en tus cuentas; sincroniza primero o revisa el ID.`);
+      }
+      if (!store.setAdOverride(args.key, adId, now())) throw new AdsError('Ese comprobante no está guardado.');
+      return { key: args.key, adId };
     }
     // Accept (or undo with --undo) a payment by hand. Only the local database changes; the sheet is never written.
     if (command === 'comprobante-accept') {

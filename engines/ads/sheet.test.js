@@ -41,6 +41,17 @@ test('date comes from Fecha comprobante and falls back to Registrado el', () => 
   assert.equal(rows[1].date, '2026-09-13');
 });
 
+test('a voucher date after Registrado el is a misread receipt: the registration day wins; earlier dates are kept', () => {
+  const { rows } = parseComprobantes(
+    csv(
+      row({ reg: '6/11/2026 19:34:43', date: '08/11/2026 17:45' }), // misread: payment cannot be after it was registered
+      row({ reg: '6/11/2026 18:27:53', date: '01/11/2026 10:00' }), // real: paid on the 1st, sent on the 6th
+      row({ reg: '', date: '08/11/2026 17:45' }), // nothing to compare with: keep the voucher date
+    ),
+  );
+  assert.deepEqual(rows.map((r) => r.date), ['2026-11-06', '2026-11-01', '2026-11-08']);
+});
+
 test('rows with PRUEBA in result, name, payer or flow are ignored and counted', () => {
   const out = parseComprobantes(
     csv(

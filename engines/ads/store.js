@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS comprobantes (
 CREATE INDEX IF NOT EXISTS comprobantes_date ON comprobantes (date);
 -- Manual country of a payment, kept apart so a re-sync never overwrites it.
 CREATE TABLE IF NOT EXISTS comprobante_overrides (key TEXT PRIMARY KEY, country TEXT NOT NULL, updated_at INTEGER NOT NULL);
+-- Manual ad of a payment (when the sheet did not capture it), kept apart so a re-sync never overwrites it.
+CREATE TABLE IF NOT EXISTS comprobante_ad_overrides (key TEXT PRIMARY KEY, ad_id TEXT NOT NULL, updated_at INTEGER NOT NULL);
 -- Payments the user accepted by hand although the sheet's result is not the valid one. Never written to the sheet;
 -- kept apart so a re-sync never overwrites it. Redundant (but harmless) once the sheet itself says "Pago válido".
 CREATE TABLE IF NOT EXISTS comprobante_accepts (key TEXT PRIMARY KEY, accepted_at INTEGER NOT NULL);
@@ -358,6 +360,13 @@ export function createStore(file = ':memory:', { readOnly = false, defaultAccoun
       if (!country) q('DELETE FROM comprobante_overrides WHERE key = ?').run(key);
       else q('INSERT INTO comprobante_overrides (key, country, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET country = excluded.country, updated_at = excluded.updated_at').run(key, country, now);
     },
+    // Assign (or with an empty id, remove) the ad of a payment by hand. Returns false when the payment is not stored.
+    setAdOverride(key, adId, now) {
+      if (!q('SELECT 1 FROM comprobantes WHERE key = ?').get(key)) return false;
+      if (!adId) q('DELETE FROM comprobante_ad_overrides WHERE key = ?').run(key);
+      else q('INSERT INTO comprobante_ad_overrides (key, ad_id, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET ad_id = excluded.ad_id, updated_at = excluded.updated_at').run(key, adId, now);
+      return true;
+    },
     // Accept (or undo) a payment by hand. Returns false when the payment is not stored.
     setAccepted(key, accepted, now) {
       if (!q('SELECT 1 FROM comprobantes WHERE key = ?').get(key)) return false;
@@ -367,11 +376,11 @@ export function createStore(file = ':memory:', { readOnly = false, defaultAccoun
     },
     acceptedKeys: () => new Set(q('SELECT key FROM comprobante_accepts').all().map((r) => r.key)),
     comprobantesBetween: (from, to) =>
-      q(`SELECT c.*, o.country AS override_country, a.key AS accepted_key FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key
-        LEFT JOIN comprobante_accepts a ON a.key = c.key
+      q(`SELECT c.*, o.country AS override_country, a.key AS accepted_key, m.ad_id AS override_ad FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key
+        LEFT JOIN comprobante_accepts a ON a.key = c.key LEFT JOIN comprobante_ad_overrides m ON m.key = c.key
         WHERE c.date >= ? AND c.date <= ? ORDER BY c.date, c.id`).all(from, to).map((r) => ({
         key: r.key, registered: r.registered, date: r.date, result: r.result, phone: r.phone, valor: r.valor, bank: r.bank, flow: r.flow,
-        adId: r.ad_id, adLossy: r.ad_lossy === 1, adUrl: r.ad_url, clientName: r.client_name, payerName: r.payer_name, gone: r.missing_since != null, accepted: r.accepted_key != null,
+        adId: r.override_ad ?? r.ad_id, adSource: r.override_ad ? 'manual' : 'hoja', adLossy: r.override_ad ? false : r.ad_lossy === 1, adUrl: r.ad_url, clientName: r.client_name, payerName: r.payer_name, gone: r.missing_since != null, accepted: r.accepted_key != null,
         country: r.override_country ?? r.country, countrySource: r.override_country ? 'manual' : r.country_source,
       })),
 

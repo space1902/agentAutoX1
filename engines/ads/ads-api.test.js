@@ -167,6 +167,19 @@ test('sync --auto, tracking, country filter and the manual country override work
     assert.equal(again.comprobantes.find((v) => v.key === key).countrySource, 'manual');
   }
   await assert.rejects(runAdsCommand('comprobante-country', { key: 'nope', code: 'MX' }, c), AdsError);
+
+  if (key) {
+    const knownAd = report.comprobantes.find((v) => v.adId)?.adId ?? report.rows?.[0]?.adId;
+    if (knownAd) {
+      const set = await runAdsCommand('comprobante-ad', { key, ad: knownAd }, c);
+      assert.deepEqual(set, { key, adId: knownAd });
+      const again = await runAdsCommand('report', { from: '2026-10-28', to: '2026-10-29', group: 'ct' }, c);
+      assert.equal(again.comprobantes.find((v) => v.key === key).adSource, 'manual');
+      await runAdsCommand('comprobante-ad', { key, ad: true }, c); // --ad with no value removes it
+    }
+    await assert.rejects(runAdsCommand('comprobante-ad', { key, ad: '99999999999999' }, c), /anuncio/i);
+  }
+  await assert.rejects(runAdsCommand('comprobante-ad', { key: 'nope', ad: '123456' }, c), AdsError);
 });
 
 test('vouchers returns the same list as the report for any range, from the cache and without Meta rows', async () => {

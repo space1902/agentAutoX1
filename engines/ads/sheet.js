@@ -69,7 +69,11 @@ export function parseComprobantes(csvText) {
       skippedTests++;
       continue;
     }
-    const date = parseDateToIso(cell(r, 'voucherDate')) ?? parseDateToIso(cell(r, 'registered'));
+    const voucherDay = parseDateToIso(cell(r, 'voucherDate'));
+    const registeredDay = parseDateToIso(cell(r, 'registered'));
+    // A payment cannot happen after it was registered: a later voucher date is a misread receipt, so the registration
+    // day wins. Earlier voucher dates are real (paid one day, sent another) and are kept.
+    const date = voucherDay && registeredDay && voucherDay > registeredDay ? registeredDay : (voucherDay ?? registeredDay);
     if (!date) {
       skippedNoDate++;
       continue;

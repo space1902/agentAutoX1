@@ -346,6 +346,7 @@ export function buildReport({
         flow: c.flow,
         adId: c.adId,
         adName: info.adName,
+        adSource: c.adSource ?? 'hoja',
         ct: info.ct,
         campaignId: info.known ? info.campaignId : '',
         campaign: campaign.label,

@@ -98,6 +98,20 @@ test('stored and manual countries: the override wins, survives a re-sync and can
   assert.equal(s.comprobantesBetween('2026-10-01', '2026-10-31')[0].countrySource, 'telefono');
 });
 
+test('manual ad of a payment: fills a payment without ad, survives a re-sync, shows in v_sales and can be removed', () => {
+  const s = createStore();
+  s.syncComprobantes([{ ...voucher('2026-10-28', 1000), adId: '' }], 1);
+  const [{ key }] = s.comprobantesBetween('2026-10-01', '2026-10-31');
+  assert.equal(s.setAdOverride(key, '52557632784137', 5), true);
+  s.syncComprobantes([{ ...voucher('2026-10-28', 1000), adId: '' }], 6);
+  const [c] = s.comprobantesBetween('2026-10-01', '2026-10-31');
+  assert.deepEqual([c.adId, c.adSource], ['52557632784137', 'manual']);
+  assert.equal(s.db.prepare('SELECT ad_id FROM v_sales').get().ad_id, '52557632784137');
+  s.setAdOverride(key, '', 7);
+  assert.equal(s.comprobantesBetween('2026-10-01', '2026-10-31')[0].adId, '');
+  assert.equal(s.setAdOverride('0000000000000000000a', '1', 8), false);
+});
+
 test('insights keep a country split, and a restated ad-day replaces its previous rows', () => {
   const s = createStore();
   s.upsertInsights([row('2026-10-28', 'A', 600, { country: 'CO' }), row('2026-10-28', 'A', 400, { country: 'MX' }), row('2026-10-28', 'B', 100)], 1);
