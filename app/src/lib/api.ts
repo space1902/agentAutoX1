@@ -289,7 +289,33 @@ export function errorText(error: unknown): string {
   return "Error desconocido";
 }
 
+export interface CommitInfo {
+  sha: string;
+  subject: string;
+}
+
+export interface UpdateStatus {
+  current: CommitInfo;
+  latest: CommitInfo;
+  behind: number;
+  ahead: number;
+  commits: CommitInfo[];
+  dirty: string[];
+  branch: string;
+  canApply: boolean;
+  blockedReason: string | null;
+}
+
+export interface ApplyReport {
+  commits: CommitInfo[];
+  current: CommitInfo;
+  depsChanged: boolean;
+  rustChanged: boolean;
+}
+
 export const api = {
+  updateCheck: () => invoke<UpdateStatus>("update_check"),
+  updateApply: () => invoke<ApplyReport>("update_apply"),
   getSettings: () => invoke<Settings>("get_settings"),
   getDefaultSettings: () => invoke<Settings>("get_default_settings"),
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),

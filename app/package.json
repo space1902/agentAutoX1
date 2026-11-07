@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --test src/lib/adsView.test.ts src/lib/keepAlive.test.ts",
+    "test": "node --test src/lib/adsView.test.ts src/lib/keepAlive.test.ts src/lib/updateView.test.ts",
     "preview": "vite preview",
     "tauri": "tauri"
   },

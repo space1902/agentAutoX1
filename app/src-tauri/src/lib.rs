@@ -14,6 +14,7 @@ mod pods;
 mod pods_reset;
 mod profiles;
 mod settings;
+mod updater;
 mod util;
 mod voices;
 mod pairing;
@@ -88,6 +89,21 @@ fn log_client_error(kind: String, message: String, stack: Option<String>) {
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     state.current()
+}
+
+#[tauri::command]
+async fn update_check(state: State<'_, AppState>) -> Result<updater::UpdateStatus, String> {
+    let root = state.root.clone();
+    blocking(move || updater::check(&root)).await
+}
+
+#[tauri::command]
+async fn update_apply(state: State<'_, AppState>) -> Result<updater::ApplyReport, String> {
+    if state.runner.status().running || state.pod_job.current().is_some() {
+        return Err("Hay un calentamiento o una operación de pods en marcha. Termínalos (o cierra la app y usa actualizar.ps1) antes de actualizar.".to_string());
+    }
+    let root = state.root.clone();
+    blocking(move || updater::apply(&root)).await
 }
 
 #[tauri::command]
@@ -1029,6 +1045,8 @@ pub fn run() {
             log_client_error,
             get_settings,
             get_default_settings,
+            update_check,
+            update_apply,
             save_settings,
             list_pods,
             pod_action,
