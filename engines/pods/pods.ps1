@@ -477,6 +477,16 @@ function Wa-Instalado([string] $serial) {
     return ($r.Salida -match 'package:')
 }
 
+# An unclean shutdown can make Android drop the AOT code at boot (status=extract, reason=boot): WhatsApp then hangs
+# on its splash. Only the states without compiled code count as "not compiled" (speed-profile after an update is
+# fine); unknown output counts as compiled so a dumpsys hiccup never blocks opening.
+function Wa-Compilado([string] $serial) {
+    $r = Adb-Shell $serial 'dumpsys package dexopt' 30
+    $m = [regex]::Match($r.Salida, '\[' + [regex]::Escape($Paquete) + '\][\s\S]*?status=([\w-]+)')
+    if (-not $m.Success) { return $true }
+    return ($m.Groups[1].Value -notin @('extract', 'run-from-apk', 'verify', 'quicken', 'error'))
+}
+
 # install-multiple -r conserva los datos (no desinstala). Con -PermitirDesinstalar (solo pods nuevos, sin cuenta) reintenta limpio.
 function Instalar-Wa([string] $serial, [switch] $PermitirDesinstalar) {
     $apks = Obtener-Apks
@@ -506,6 +516,8 @@ function Compilar-Wa([string] $serial) {
         if ($r.Agotado) { throw 'La compilación de WhatsApp superó los 20 minutos.' }
         if ($r.Texto -notmatch 'Success') { throw "La compilación de WhatsApp falló: $($r.Texto)" }
     }
+    # A process started before the compile keeps running the old code and can hang: next open starts clean.
+    Adb-Shell $serial "am force-stop $Paquete" 15 | Out-Null
 }
 
 function Deshabilitar-Apps([string] $serial) {
@@ -533,9 +545,27 @@ function Abrir-Wa([string] $serial) {
         Adb-Shell $serial "am start -n $Paquete/$ActividadWa" 20 | Out-Null
         Start-Sleep 6
         $foco = (Adb-Shell $serial 'dumpsys window | grep mCurrentFocus' 20).Salida
-        if ($foco -match 'com\.whatsapp') { return $true }
+        if ($foco -match 'com\.whatsapp') { break }
     }
-    return $false
+    # A hung WhatsApp process (e.g. one started before a compile) keeps showing the splash (com.whatsapp.Main):
+    # bringing it forward again does nothing, so stop it and start it clean once. A slow but healthy cold start
+    # also sits on the splash for a while, so wait up to ~24 s for it to move on before calling it hung.
+    $enSplash = $true
+    for ($i = 0; $i -lt 6 -and $enSplash; $i++) {
+        Start-Sleep 4
+        $enSplash = (Wa-ActividadActual $serial) -match 'com\.whatsapp\.Main\b'
+    }
+    if ($enSplash) {
+        Adb-Shell $serial "am force-stop $Paquete" 15 | Out-Null
+        Start-Sleep 2
+        Adb-Shell $serial "am start -W -n $Paquete/$ActividadWa" 30 | Out-Null
+        Start-Sleep 5
+    }
+    return ((Adb-Shell $serial 'dumpsys window | grep mCurrentFocus' 20).Salida -match 'com\.whatsapp')
+}
+
+function Wa-ActividadActual([string] $serial) {
+    return (Adb-Shell $serial 'dumpsys activity activities | grep mResumedActivity' 20).Salida
 }
 
 # ---------- ventana ----------
@@ -839,6 +869,7 @@ function Abrir-WaPod([string] $nombre) {
     $serial = Obtener-Serial $pod
     if (-not $serial -or -not (Android-Listo $serial)) { $serial = Esperar-Android $pod 45 }
     if (-not (Wa-Instalado $serial)) { throw "[WA_FALTA] WhatsApp Business no está instalado en el pod '$nombre'. Usa 'reinstalar-wa $nombre' para instalarlo sin perder la cuenta." }
+    if (-not (Wa-Compilado $serial)) { throw "[WA_FALTA] WhatsApp Business quedó sin compilar en el pod '$nombre' (pasa después de un cierre brusco) y se queda en la pantalla de inicio. Usa 'Reparar WhatsApp': lo reinstala y lo compila sin tocar la cuenta." }
     if (Abrir-Wa $serial) { Escribir "WhatsApp Business abierto en el pod '$nombre'." Green }
     else { throw "No pude confirmar que WhatsApp Business quedó abierto en '$nombre'. Revisa la ventana del pod o inténtalo de nuevo." }
 }

@@ -81,7 +81,8 @@ fn run_pods(settings: &Settings, args: &[&str]) -> Result<PsOutput, String> {
 pub fn timeout_for(action: &str) -> Duration {
     let minutes = |m: u64| Duration::from_secs(m * 60);
     match action {
-        "listar-json" | "info-json" | "wsp" | "ver" | "abrir-wa" => Duration::from_secs(90),
+        "listar-json" | "info-json" | "wsp" | "ver" => Duration::from_secs(90),
+        "abrir-wa" => Duration::from_secs(150),
         "apagar" => minutes(3),
         "prender" => minutes(8),
         // worst case 10 min install + 20 min compile + 20 min retry (+ the Android boot): leave room for all of it.
@@ -880,7 +881,8 @@ mod tests {
             let t = timeout_for(action);
             assert!(t >= secs(30) && t <= secs(60 * 60), "{action}: {t:?}");
         }
-        assert_eq!(timeout_for("abrir-wa"), secs(90));
+        // abrir-wa: worst case three launch attempts, ~24 s splash wait and one clean relaunch (am start -W up to 30 s).
+        assert_eq!(timeout_for("abrir-wa"), secs(150));
         // reinstalar-wa: worst case 10 min install + 20 min compile + 20 min retry, plus the Android boot and slack.
         assert_eq!(timeout_for("reinstalar-wa"), secs(60 * 60));
         assert!(timeout_for("prender") > timeout_for("apagar"));
