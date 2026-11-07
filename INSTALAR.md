@@ -14,7 +14,15 @@ Opcionales según lo que vayas a usar en esa PC: BlueStacks 5 (pods), Ollama (IA
 
 ## 2. Descargar el proyecto
 
-El repositorio es privado: primero inicia sesión con tu cuenta de GitHub (`gh auth login`). Luego, en PowerShell:
+El repositorio es privado: primero inicia sesión con tu cuenta de GitHub y deja que git use esa sesión (así el botón
+de actualizar funciona sin pedir contraseña):
+
+```powershell
+gh auth login
+gh auth setup-git
+```
+
+Luego, en PowerShell:
 
 ```powershell
 mkdir "$HOME\Proyectos\ventas automaticas"
