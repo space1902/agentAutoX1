@@ -100,6 +100,7 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Setti
     let mut merged = Settings::merge_saved(&state.root, &serde_json::to_value(&settings).map_err(|e| e.to_string())?);
     // The Ajustes form does not own this switch: it has its own command.
     merged.keep_alive = state.current().keep_alive;
+    merged.keep_alive_hours = state.current().keep_alive_hours;
     merged.embed_view = state.current().embed_view;
     merged.save(&state.settings_file)?;
     *crate::util::lock(&state.settings) = merged.clone();
@@ -222,6 +223,20 @@ fn set_keep_alive(state: State<'_, AppState>, enabled: bool) -> Result<keepalive
     next.save(&state.settings_file)?;
     *crate::util::lock(&state.settings) = next;
     state.keepalive.set_enabled(enabled);
+    Ok(state.keepalive.status())
+}
+
+/// Hours a pod may stay off before the auto review cycles it (4, 6, 8, 12 or 24).
+#[tauri::command]
+fn set_keep_alive_hours(state: State<'_, AppState>, hours: u32) -> Result<keepalive::KeepAliveStatus, String> {
+    if !settings::KEEP_ALIVE_HOURS.contains(&hours) {
+        return Err("Elige 4, 6, 8, 12 o 24 horas.".into());
+    }
+    let mut next = state.current();
+    next.keep_alive_hours = hours;
+    next.save(&state.settings_file)?;
+    *crate::util::lock(&state.settings) = next;
+    state.keepalive.set_interval_hours(hours);
     Ok(state.keepalive.status())
 }
 
@@ -933,6 +948,7 @@ pub fn run() {
                 }),
             ));
             keepalive.set_enabled(settings.keep_alive);
+            keepalive.set_interval_hours(settings.keep_alive_hours);
             let settings = Arc::new(Mutex::new(settings));
             let pod_job = pods::PodJob::default();
             let keep_stop = Arc::new(AtomicBool::new(false));
@@ -1036,6 +1052,7 @@ pub fn run() {
             cancel_pod_links,
             keepalive_status,
             set_keep_alive,
+            set_keep_alive_hours,
             set_embed_view,
             embed_attach,
             embed_state,

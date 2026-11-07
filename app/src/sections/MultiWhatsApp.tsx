@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence } from "framer-motion";
-import { Check, Eye, Loader2, MessageCircle, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, RotateCcw, Smartphone, Trash2, Wrench } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Eye, Loader2, MessageCircle, Pencil, Phone, Plus, Power, PowerOff, RefreshCw, RotateCcw, Search, Smartphone, Trash2, Wrench } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import EmbeddedView from "../components/EmbeddedView";
 import { KeepAliveCard, KeepAliveSwitch, useKeepAlive } from "../components/KeepAlive";
@@ -15,6 +15,7 @@ type Action = "prender" | "apagar" | "ver" | "abrir-wa" | "reinstalar-wa";
 
 /** The base BlueStacks instance hosts the Root.vhd shared by every pod: it can never be deleted. */
 const BASE_INSTANCE = "Rvc64";
+const PODS_PER_PAGE = 3;
 
 interface Props {
   creation: {
@@ -113,6 +114,17 @@ export default function MultiWhatsApp({ creation }: Props) {
     }
   };
 
+  const [page, setPage] = useState(0);
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  // Search by pod name (and phone, handy when you only remember the number).
+  const shown = (pods ?? []).filter((p) => !needle || p.name.toLowerCase().includes(needle) || (p.phone ?? "").includes(needle));
+  const pageCount = Math.max(1, Math.ceil(shown.length / PODS_PER_PAGE));
+  // Keep the page valid when pods are deleted or the list shrinks.
+  useEffect(() => {
+    if (page > pageCount - 1) setPage(pageCount - 1);
+  }, [page, pageCount]);
+
   const running = pods?.filter((p) => p.state === "running").length ?? 0;
   const withPhone = pods?.filter((p) => p.phone).length ?? 0;
 
@@ -122,7 +134,7 @@ export default function MultiWhatsApp({ creation }: Props) {
         title="MultiWhatsApp"
         subtitle="Tus pods de WhatsApp Business sobre BlueStacks: crea, edita, enciende, apaga o trae al frente cada uno."
       >
-        <KeepAliveSwitch enabled={keepAlive.status?.enabled ?? false} onChange={(v) => void keepAlive.toggle(v)} />
+        <KeepAliveSwitch enabled={keepAlive.status?.enabled ?? false} hours={keepAlive.status?.intervalHours} onChange={(v) => void keepAlive.toggle(v)} />
         <button className="btn secondary" onClick={() => void load()} disabled={loading || locked}>
           <RefreshCw size={15} aria-hidden /> Actualizar lista
         </button>
@@ -158,30 +170,43 @@ export default function MultiWhatsApp({ creation }: Props) {
       {creating && <Notice kind="ok">Creando el pod «{creation.state.name}»: paso {creation.state.step} de {creation.state.total}. No cierres la app.</Notice>}
 
       {keepAlive.error && <Notice>{keepAlive.error}</Notice>}
-      {keepAlive.status && <KeepAliveCard status={keepAlive.status} />}
+      {keepAlive.status && <KeepAliveCard status={keepAlive.status} onHoursChange={(h) => void keepAlive.setHours(h)} />}
 
       {loading && !pods ? (
         <SkeletonGrid />
       ) : (
-        <div className="grid">
-          {(pods ?? []).map((pod) => {
+        <>
+        {(pods?.length ?? 0) > 0 && (
+          <div className="pods-search">
+            <Search size={15} aria-hidden />
+            <input
+              type="search"
+              className="input"
+              value={query}
+              placeholder="Buscar pod por nombre o teléfono"
+              aria-label="Buscar pod"
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setPage(0);
+              }}
+            />
+          </div>
+        )}
+        <div className="grid pods-grid">
+          {needle && shown.length === 0 && <Card>Ningún pod coincide con «{query.trim()}».</Card>}
+          {shown.slice(page * PODS_PER_PAGE, page * PODS_PER_PAGE + PODS_PER_PAGE).map((pod) => {
             const isOn = pod.state === "running";
             return (
               <Card key={pod.instanceId}>
                 <div className="card-head">
-                  <h2 className="card-title">{pod.name}</h2>
+                  <h2 className="card-title" title={`Instancia ${pod.instanceId} · puerto adb ${pod.adbPort}${pod.serial ? ` · ${pod.serial}` : ""}`}>
+                    {pod.name}
+                  </h2>
                   <Pill tone={isOn ? "green" : "gray"}>{isOn ? "Activo" : "Apagado"}</Pill>
                 </div>
-                <dl className="meta">
-                  <dt>Teléfono</dt>
-                  <dd>{pod.phone ?? "Sin asignar"}</dd>
-                  <dt>Puerto adb</dt>
-                  <dd>{pod.adbPort}</dd>
-                  <dt>Serial</dt>
-                  <dd>{pod.serial ?? "–"}</dd>
-                  <dt>Instancia</dt>
-                  <dd>{pod.instanceId}</dd>
-                </dl>
+                <p className="pod-line muted">
+                  <Phone size={13} aria-hidden /> {pod.phone ?? "Sin asignar"} · adb {pod.adbPort}
+                </p>
                 <div className="row-actions">
                   <button className="btn sm" disabled={locked || isOn} onClick={() => void run("prender", pod.name)}>
                     <Power size={14} aria-hidden /> Prender
@@ -208,19 +233,20 @@ export default function MultiWhatsApp({ creation }: Props) {
                       {busy === `${pod.name}:reinstalar-wa` ? "Reparando…" : "Reparar WhatsApp"}
                     </button>
                   )}
-                  <button className="btn sm ghost" disabled={locked} onClick={() => void run("ver", pod.name)}>
-                    <Eye size={14} aria-hidden /> Ver
+                  <button className="btn sm ghost icon-only" disabled={locked} title="Ver: traer la ventana del pod al frente" aria-label={`Ver ${pod.name}`} onClick={() => void run("ver", pod.name)}>
+                    <Eye size={14} aria-hidden />
                   </button>
-                  <button className="btn sm ghost" disabled={locked} onClick={() => setDialog({ kind: "edit", pod })}>
-                    <Pencil size={14} aria-hidden /> Editar
+                  <button className="btn sm ghost icon-only" disabled={locked} title="Editar nombre o teléfono" aria-label={`Editar ${pod.name}`} onClick={() => setDialog({ kind: "edit", pod })}>
+                    <Pencil size={14} aria-hidden />
                   </button>
                   <button
-                    className="btn sm ghost"
+                    className="btn sm ghost icon-only"
                     disabled={locked || pod.instanceId === BASE_INSTANCE}
                     title={pod.instanceId === BASE_INSTANCE ? "Instancia base: aloja el disco compartido de todos los pods" : "Borrar el pod"}
+                    aria-label={`Borrar ${pod.name}`}
                     onClick={() => setDialog({ kind: "delete", pod })}
                   >
-                    <Trash2 size={14} aria-hidden /> Borrar
+                    <Trash2 size={14} aria-hidden />
                   </button>
                 </div>
               </Card>
@@ -228,6 +254,20 @@ export default function MultiWhatsApp({ creation }: Props) {
           })}
           {pods && pods.length === 0 && !error && <Card>No hay pods todavía. Crea el primero con «Nuevo pod».</Card>}
         </div>
+        {pageCount > 1 && (
+          <nav className="pods-pager" aria-label="Páginas de pods">
+            <button className="btn sm ghost" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
+              <ChevronLeft size={14} aria-hidden /> Anterior
+            </button>
+            <span className="muted">
+              Página {page + 1} de {pageCount} · {shown.length} pods
+            </span>
+            <button className="btn sm ghost" disabled={page >= pageCount - 1} onClick={() => setPage((p) => p + 1)}>
+              Siguiente <ChevronRight size={14} aria-hidden />
+            </button>
+          </nav>
+        )}
+        </>
       )}
 
       <EmbeddedView key={embedKey} pods={pods ?? []} suspended={dialog !== null} />

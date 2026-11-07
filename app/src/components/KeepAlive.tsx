@@ -2,11 +2,9 @@ import { listen } from "@tauri-apps/api/event";
 import { Clock, Info, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, errorText, type KeepAliveStatus } from "../lib/api";
+import { DEFAULT_KEEP_ALIVE_HOURS, KEEP_ALIVE_HOURS, intervalLabel, keepAliveHelp } from "../lib/keepAlive";
 import { Tooltip } from "./Tooltip";
 import { Card, Pill, type PillTone } from "./ui";
-
-export const KEEP_ALIVE_HELP =
-  "Evita que WhatsApp desvincule los dispositivos de los pods apagados: enciende, uno por uno, cada pod que lleve más de 24 horas apagado durante 15 minutos y luego lo apaga.";
 
 /** Live status of the keep-alive scheduler (event stream + initial fetch). */
 export function useKeepAlive() {
@@ -37,15 +35,24 @@ export function useKeepAlive() {
     }
   };
 
-  return { status, error, toggle, refresh };
+  const setHours = async (hours: number) => {
+    setError(null);
+    try {
+      setStatus(await api.setKeepAliveHours(hours));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  };
+
+  return { status, error, toggle, refresh, setHours };
 }
 
 /** Sí/No switch with an info icon; the explanation shows on hover or keyboard focus. */
-export function KeepAliveSwitch({ enabled, onChange }: { enabled: boolean; onChange: (value: boolean) => void }) {
+export function KeepAliveSwitch({ enabled, hours = DEFAULT_KEEP_ALIVE_HOURS, onChange }: { enabled: boolean; hours?: number; onChange: (value: boolean) => void }) {
   return (
     <div className="keepalive-switch">
       <span id="keepalive-label">Auto revisión de números en los pods</span>
-      <Tooltip className="info" content={<p className="info-text">{KEEP_ALIVE_HELP}</p>} label="Qué hace la auto revisión" placement="bottom-end" width={280}>
+      <Tooltip className="info" content={<p className="info-text">{keepAliveHelp(hours)}</p>} label="Qué hace la auto revisión" placement="bottom-end" width={280}>
         <Info size={15} aria-hidden />
       </Tooltip>
       <div className="seg yesno" role="switch" aria-checked={enabled} aria-labelledby="keepalive-label">
@@ -95,7 +102,7 @@ const minutes = (secs: number) => {
 const when = (unix: number) => new Date(unix * 1000).toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
 
 /** "Revisando wa-pod2: 7 min restantes", the queue and the last run. */
-export function KeepAliveCard({ status }: { status: KeepAliveStatus }) {
+export function KeepAliveCard({ status, onHoursChange }: { status: KeepAliveStatus; onHoursChange?: (hours: number) => void }) {
   const now = useNow(status.holdUntil !== null);
   const remaining = status.holdUntil !== null ? status.holdUntil - now : null;
   if (!status.enabled && !status.lastRun) return null;
@@ -135,6 +142,22 @@ export function KeepAliveCard({ status }: { status: KeepAliveStatus }) {
           ) : (
             "–"
           )}
+        </dd>
+        <dt>Prender cada</dt>
+        <dd>
+          <select
+            className="input"
+            aria-label="Prender cada"
+            value={status.intervalHours}
+            onChange={(e) => onHoursChange?.(Number(e.target.value))}
+            disabled={!onHoursChange}
+          >
+            {KEEP_ALIVE_HOURS.map((h) => (
+              <option key={h} value={h}>
+                {intervalLabel(h)}
+              </option>
+            ))}
+          </select>
         </dd>
         <dt>Último escaneo</dt>
         <dd>{status.lastScanAt ? when(status.lastScanAt) : "–"}</dd>

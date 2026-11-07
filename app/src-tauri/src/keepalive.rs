@@ -1,5 +1,5 @@
 //! "Auto revisión de números en los pods": WhatsApp unlinks devices that stay off too long, so when this is ON every
-//! pod that has been off for more than 24 h is turned on for ~15 minutes, then off again, ONE pod at a time.
+//! pod that has been off for longer than the chosen interval (4/6/8/12/24 h, default 6) is turned on for ~15 minutes, then off again, ONE pod at a time.
 //!
 //! The decisions live here and run against `KeepOps` + `Clock` (fake clock in the tests):
 //!   - `observe_running` / `due_pods`: the per-pod "last time it was on" bookkeeping and the queue.
@@ -15,7 +15,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const HOLD_SECS: i64 = 15 * 60;
-pub const THRESHOLD_SECS: i64 = 24 * 3600;
+/// How often WhatsApp is brought to the foreground while a pod is on.
+pub const WA_CHECK_SECS: i64 = 5 * 60;
 pub const SCAN_SECS: i64 = 30 * 60;
 
 /// Last moment each pod was seen on (unix seconds), keyed by BlueStacks instance id so renames do not lose it.
@@ -82,6 +83,8 @@ pub struct KeepAliveStatus {
     pub enabled: bool,
     pub phase: Phase,
     pub current: Option<String>,
+    /// Hours a pod may stay off before it is cycled (mirror of the setting).
+    pub interval_hours: u32,
     /// Unix second when the current pod will be turned off (only while holding).
     pub hold_until: Option<i64>,
     pub queue: Vec<String>,
@@ -102,6 +105,10 @@ pub trait KeepOps {
     fn list(&self) -> Result<Vec<Pod>, String>;
     fn power_on(&self, name: &str) -> Result<(), String>;
     fn power_off(&self, name: &str) -> Result<(), String>;
+    /// Brings WhatsApp to the foreground in the pod (pods.ps1 `abrir-wa`).
+    fn ensure_whatsapp(&self, name: &str) -> Result<(), String>;
+    /// Hours a pod may stay off before it is cycled; read at every scan.
+    fn interval_hours(&self) -> u32;
     /// Takes the global pod-job slot (create/rename/delete/phone/link). None when something else is running.
     fn try_begin_job(&self, what: &str) -> Option<Box<dyn Any>>;
     fn available_memory_mb(&self) -> Option<u64>;
@@ -112,7 +119,6 @@ pub trait KeepOps {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub hold_secs: i64,
-    pub threshold_secs: i64,
     /// How long to wait for the BlueStacks process to disappear and memory to come back after turning a pod off.
     pub exit_timeout_secs: i64,
     /// Memory may stay this far below the level measured before the pod was turned on.
@@ -121,7 +127,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { hold_secs: HOLD_SECS, threshold_secs: THRESHOLD_SECS, exit_timeout_secs: 120, memory_tolerance_mb: 400 }
+        Config { hold_secs: HOLD_SECS, exit_timeout_secs: 120, memory_tolerance_mb: 400 }
     }
 }
 
@@ -189,6 +195,10 @@ impl Scheduler {
         (self.notify)(&snapshot);
     }
 
+    pub fn set_interval_hours(&self, hours: u32) {
+        self.update(|s| s.interval_hours = hours);
+    }
+
     pub fn set_enabled(&self, enabled: bool) {
         self.update(|s| {
             s.enabled = enabled;
@@ -202,9 +212,11 @@ impl Scheduler {
     /// One pass: record the running pods, build the queue of due pods and process it, one pod at a time.
     pub fn scan(&self, ops: &dyn KeepOps, clock: &dyn Clock) {
         let started = self.epoch.load(Ordering::SeqCst);
+        let hours = ops.interval_hours();
         self.update(|s| {
             s.phase = Phase::Scanning;
-            s.message = "Revisando qué pods llevan más de 24 horas apagados…".into();
+            s.interval_hours = hours;
+            s.message = format!("Revisando qué pods llevan más de {hours} horas apagados…");
         });
         let pods = match ops.list() {
             Ok(p) => p,
@@ -225,7 +237,7 @@ impl Scheduler {
         if observe_running(&mut state, &pods, now) {
             ops.save_state(&state);
         }
-        let due = due_pods(&state, &pods, now, self.config.threshold_secs);
+        let due = due_pods(&state, &pods, now, hours as i64 * 3600);
         let names: Vec<String> = due.iter().map(|p| p.name.clone()).collect();
         if self.aborted(started) {
             return;
@@ -309,6 +321,7 @@ impl Scheduler {
         }
         let mut failure = powered.err().map(|e| format!("No se pudo encender: {e}"));
         let mut interrupted = false;
+        let mut wa_issue: Option<String> = None;
 
         if failure.is_none() {
             let until = clock.now() + self.config.hold_secs;
@@ -317,6 +330,7 @@ impl Scheduler {
                 s.hold_until = Some(until);
                 s.message = format!("Revisando {name}: se mantiene encendido unos minutos.");
             });
+            let mut next_wa_check = clock.now();
             while clock.now() < until {
                 if !ops.enabled() || ops.should_stop() {
                     interrupted = true;
@@ -324,6 +338,19 @@ impl Scheduler {
                 }
                 if self.aborted(started) {
                     return self.run_record(clock, pod, "interrupted", "Se reinició a mano durante la revisión.");
+                }
+                if clock.now() >= next_wa_check {
+                    // A failed check never aborts the cycle: it is recorded and the pod is still powered off at the end.
+                    match ops.ensure_whatsapp(name) {
+                        Ok(()) => wa_issue = None,
+                        Err(_) => {
+                            let issue = format!("WhatsApp no abrió en {name}");
+                            wa_issue = Some(issue.clone());
+                            self.update(|s| s.message = format!("{issue}; se reintentará en unos minutos."));
+                        }
+                    }
+                    next_wa_check = clock.now() + WA_CHECK_SECS;
+                    continue;
                 }
                 clock.sleep(1);
             }
@@ -351,6 +378,10 @@ impl Scheduler {
             (Some(note), _) => ("failed", note),
             (None, true) => ("interrupted", format!("Se apagó antes de tiempo. {waited}")),
             (None, false) => ("ok", format!("Revisado: estuvo encendido {} min. {waited}", self.config.hold_secs / 60)),
+        };
+        let note = match wa_issue {
+            Some(issue) => format!("{} {issue}.", note.trim()),
+            None => note,
         };
         self.run_record(clock, pod, outcome, note.trim().to_string())
     }
@@ -481,6 +512,8 @@ mod tests {
         sched: RefCell<Option<Rc<Scheduler>>>,
         reset_after: Cell<Option<i64>>,
         reset_on_power_on: Cell<bool>,
+        wa_error: RefCell<Option<String>>,
+        interval: Cell<u32>,
     }
 
     impl<'a> FakeHost<'a> {
@@ -512,6 +545,8 @@ mod tests {
                 sched: RefCell::new(None),
                 reset_after: Cell::new(None),
                 reset_on_power_on: Cell::new(false),
+                wa_error: RefCell::new(None),
+                interval: Cell::new(24),
             }
         }
         fn log(&self) -> Vec<String> {
@@ -569,6 +604,13 @@ mod tests {
             }
             Ok(())
         }
+        fn ensure_whatsapp(&self, name: &str) -> Result<(), String> {
+            self.log.borrow_mut().push(format!("wa:{name}@{}", self.clock.now()));
+            self.wa_error.borrow().clone().map_or(Ok(()), Err)
+        }
+        fn interval_hours(&self) -> u32 {
+            self.interval.get()
+        }
         fn try_begin_job(&self, what: &str) -> Option<Box<dyn Any>> {
             if self.busy.get() {
                 return None;
@@ -589,7 +631,7 @@ mod tests {
     }
 
     fn scheduler() -> Scheduler {
-        Scheduler::new(Config { hold_secs: 15 * 60, threshold_secs: 24 * H, exit_timeout_secs: 60, memory_tolerance_mb: 300 }, Box::new(|_| {}))
+        Scheduler::new(Config { hold_secs: 15 * 60, exit_timeout_secs: 60, memory_tolerance_mb: 300 }, Box::new(|_| {}))
     }
 
     #[test]
@@ -606,7 +648,7 @@ mod tests {
         let on = 100 * H;
         assert_eq!(log[1], format!("on:a@{on}"));
         // Booting took 30 s, then 15 minutes hold.
-        assert_eq!(log[2], format!("off:a@{}", on + 30 + 15 * 60));
+        assert_eq!(log.last().unwrap(), &format!("off:a@{}", on + 30 + 15 * 60));
         assert_eq!(host.state.borrow().last_on["Rvc64_a"], on + 30 + 15 * 60, "last on = when it was turned off");
     }
 
@@ -763,7 +805,7 @@ mod tests {
         let host = FakeHost::new(&clock, vec![pod("a", false, Some("1"))]);
         let seen = Arc::new(Mutex::new(Vec::<KeepAliveStatus>::new()));
         let sink = seen.clone();
-        let s = Scheduler::new(Config { hold_secs: 600, threshold_secs: 24 * H, exit_timeout_secs: 10, memory_tolerance_mb: 300 }, Box::new(move |st| sink.lock().unwrap().push(st.clone())));
+        let s = Scheduler::new(Config { hold_secs: 600, exit_timeout_secs: 10, memory_tolerance_mb: 300 }, Box::new(move |st| sink.lock().unwrap().push(st.clone())));
         s.scan(&host, &clock);
         let seen = seen.lock().unwrap();
         let holding = seen.iter().find(|st| st.phase == Phase::Holding).expect("a holding status was emitted");
@@ -874,5 +916,56 @@ mod tests {
         assert_eq!(st.phase, Phase::Idle);
         assert!(st.current.is_none() && st.queue.is_empty() && st.hold_until.is_none());
         assert!(st.message.contains("error"), "{}", st.message);
+    }
+
+    // ----- WhatsApp foreground checks and the interval setting -----
+
+    #[test]
+    fn whatsapp_is_checked_about_three_times_during_a_15_minute_hold() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("1"))]);
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        assert_eq!(run.outcome, "ok");
+        let checks: Vec<String> = host.log().into_iter().filter(|l| l.starts_with("wa:")).collect();
+        let first = 100 * H + 30;
+        assert_eq!(checks, vec![format!("wa:a@{first}"), format!("wa:a@{}", first + 300), format!("wa:a@{}", first + 600)]);
+        assert!(!run.note.contains("no abrió"));
+    }
+
+    #[test]
+    fn a_failing_whatsapp_check_is_reported_but_the_pod_is_still_powered_off() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("1"))]);
+        *host.wa_error.borrow_mut() = Some("timeout".into());
+        let candidate = host.pods.borrow()[0].clone();
+        let run = scheduler().check_pod(&host, &clock, &candidate);
+        let log = host.log();
+        assert_eq!(log.iter().filter(|l| l.starts_with("wa:")).count(), 3, "keeps retrying: {log:?}");
+        assert!(log.iter().any(|l| l.starts_with("off:a@")), "{log:?}");
+        assert_eq!(run.outcome, "ok");
+        assert!(run.note.contains("WhatsApp no abrió en a"), "{}", run.note);
+        assert!(host.state.borrow().last_on.contains_key("Rvc64_a"));
+    }
+
+    #[test]
+    fn the_scan_uses_the_interval_read_from_the_host_each_time() {
+        let clock = FakeClock(Cell::new(100 * H));
+        let host = FakeHost::new(&clock, vec![pod("a", false, Some("1"))]);
+        host.state.borrow_mut().last_on.insert("Rvc64_a".into(), 100 * H - 7 * H);
+        host.interval.set(8);
+        let s = scheduler();
+        s.scan(&host, &clock);
+        assert!(host.log().is_empty(), "7 h off is within 8 h: {:?}", host.log());
+        assert_eq!(s.status().interval_hours, 8);
+
+        host.interval.set(6);
+        s.scan(&host, &clock);
+        assert!(host.log().iter().any(|l| l.starts_with("off:a@")), "7 h off exceeds 6 h: {:?}", host.log());
+    }
+
+    #[test]
+    fn scan_cadence_is_small_compared_to_the_shortest_interval() {
+        assert!(SCAN_SECS * 4 <= 4 * 3600, "scans must be well inside the shortest (4 h) interval");
     }
 }

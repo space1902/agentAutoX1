@@ -196,6 +196,8 @@ export interface KeepAliveStatus {
   current: string | null;
   /** Unix second when the pod being checked will be turned off. */
   holdUntil: number | null;
+  /** Hours a pod may stay off before it is cycled. */
+  intervalHours: number;
   queue: string[];
   lastRun: { pod: string; at: number; outcome: "ok" | "skipped" | "failed" | "interrupted"; note: string } | null;
   lastScanAt: number | null;
@@ -322,6 +324,7 @@ export const api = {
   embedDetach: (name: string) => invoke<EmbedState>("embed_detach", { name }),
   keepAliveStatus: () => invoke<KeepAliveStatus>("keepalive_status"),
   setKeepAlive: (enabled: boolean) => invoke<KeepAliveStatus>("set_keep_alive", { enabled }),
+  setKeepAliveHours: (hours: number) => invoke<KeepAliveStatus>("set_keep_alive_hours", { hours }),
   lineHealth: () => invoke<LineHealthData>("line_health"),
   scheduleStatus: () => invoke<ScheduleStatus>("schedule_status"),
   testerPause: (id: string, hours: number | null = null) => invoke<unknown>("tester_pause", { id, hours }),

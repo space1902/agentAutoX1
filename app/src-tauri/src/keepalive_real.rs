@@ -118,6 +118,12 @@ impl KeepOps for RealHost {
     fn power_off(&self, name: &str) -> Result<(), String> {
         pods::run_action(&self.current(), "apagar", name).map(|_| ())
     }
+    fn ensure_whatsapp(&self, name: &str) -> Result<(), String> {
+        pods::run_action(&self.current(), "abrir-wa", name).map(|_| ())
+    }
+    fn interval_hours(&self) -> u32 {
+        crate::util::lock(&self.settings).keep_alive_hours
+    }
     fn try_begin_job(&self, what: &str) -> Option<Box<dyn Any>> {
         self.pod_job.begin(what).ok().map(|guard| Box::new(guard) as Box<dyn Any>)
     }

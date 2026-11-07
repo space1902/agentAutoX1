@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub const KEEP_ALIVE_HOURS: [u32; 5] = [4, 6, 8, 12, 24];
+pub const DEFAULT_KEEP_ALIVE_HOURS: u32 = 6;
+
+fn default_keep_alive_hours() -> u32 {
+    DEFAULT_KEEP_ALIVE_HOURS
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -22,6 +29,9 @@ pub struct Settings {
     /// "Auto revisión de números en los pods": keeps WhatsApp from unlinking pods that stay off. OFF by default.
     #[serde(default)]
     pub keep_alive: bool,
+    /// Hours a pod may stay off before the auto review cycles it (one of KEEP_ALIVE_HOURS; default 6).
+    #[serde(default = "default_keep_alive_hours")]
+    pub keep_alive_hours: u32,
     /// Experimental: show each running pod's BlueStacks window inside the app (feature flag, OFF by default).
     #[serde(default)]
     pub embed_view: bool,
@@ -62,6 +72,7 @@ impl Settings {
             pods_wsp_file: s(sibling.join("whatsapp-pods").join("pods-wsp.json")),
             node_path: "node".to_string(),
             keep_alive: false,
+            keep_alive_hours: DEFAULT_KEEP_ALIVE_HOURS,
             embed_view: false,
         }
     }
@@ -83,6 +94,12 @@ impl Settings {
         pick("podsWspFile", &mut out.pods_wsp_file);
         pick("nodePath", &mut out.node_path);
         out.keep_alive = saved.get("keepAlive").and_then(|v| v.as_bool()).unwrap_or(false);
+        out.keep_alive_hours = saved
+            .get("keepAliveHours")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|h| KEEP_ALIVE_HOURS.contains(h))
+            .unwrap_or(DEFAULT_KEEP_ALIVE_HOURS);
         out.embed_view = saved.get("embedView").and_then(|v| v.as_bool()).unwrap_or(false);
         out
     }
@@ -146,6 +163,21 @@ mod tests {
         s.save(&file).unwrap();
         assert!(Settings::load(&file, root).keep_alive);
         let _ = fs::remove_file(file);
+    }
+
+    #[test]
+    fn keep_alive_hours_defaults_to_6_accepts_only_allowed_values_and_persists() {
+        let root = Path::new("C:/p/agentAutoX1");
+        assert_eq!(Settings::defaults(root).keep_alive_hours, 6);
+        assert_eq!(Settings::merge_saved(root, &serde_json::json!({})).keep_alive_hours, 6);
+        assert_eq!(Settings::merge_saved(root, &serde_json::json!({ "keepAliveHours": 7 })).keep_alive_hours, 6);
+        assert_eq!(Settings::merge_saved(root, &serde_json::json!({ "keepAliveHours": "8" })).keep_alive_hours, 6);
+        for h in [4u32, 6, 8, 12, 24] {
+            assert_eq!(Settings::merge_saved(root, &serde_json::json!({ "keepAliveHours": h })).keep_alive_hours, h);
+        }
+        let old: Settings =
+            serde_json::from_str(r#"{"dataDir":"a","warmupDir":"b","podsDir":"c","apkDir":"d","podsWspFile":"e","nodePath":"n"}"#).unwrap();
+        assert_eq!(old.keep_alive_hours, 6, "old settings files without the field");
     }
 
     #[test]

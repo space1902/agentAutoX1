@@ -291,3 +291,13 @@
 .sched-detail { flex: 1; min-width: 120px; }
 .sched-note { font-size: 12px; margin: 0 0 6px; }
 .sched-note.error { color: var(--red); }
+
+/* MultiWhatsApp: compact pod cards, search and 3-per-page pager. */
+.pods-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.pods-grid .card-head { margin-bottom: 4px; }
+.pods-grid .row-actions { gap: 6px; }
+.pod-line { display: flex; align-items: center; gap: 6px; font-size: 13px; margin: 0 0 10px; }
+.btn.icon-only { padding-left: 8px; padding-right: 8px; }
+.pods-search { display: flex; align-items: center; gap: 8px; max-width: 360px; margin-bottom: 12px; color: var(--muted); }
+.pods-search .input { flex: 1; }
+.pods-pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 12px; font-size: 13px; flex-wrap: wrap; }
