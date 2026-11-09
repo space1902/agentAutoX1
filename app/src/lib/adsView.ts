@@ -266,3 +266,10 @@ export function nameFilterProblem(value: string): string | null {
   if (!/^[\p{L}\p{N} _\-.·#+&()[\]/|:,]*$/u.test(value) || value.trim().startsWith("--")) return "El filtro de nombre tiene caracteres no válidos.";
   return null;
 }
+
+/** Why a payment is listed but not counted ("" when it counts normally). Discarding by hand wins over leaving the sheet. */
+export function voucherNote(v: { rejected: boolean; gone: boolean }): string {
+  if (v.rejected) return "Descartado — no se cuenta";
+  if (v.gone) return "Eliminado de la hoja — no se cuenta";
+  return "";
+}

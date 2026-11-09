@@ -51,6 +51,20 @@ CREATE TABLE IF NOT EXISTS comprobante_ad_overrides (key TEXT PRIMARY KEY, ad_id
 -- Payments the user accepted by hand although the sheet's result is not the valid one. Never written to the sheet;
 -- kept apart so a re-sync never overwrites it. Redundant (but harmless) once the sheet itself says "Pago válido".
 CREATE TABLE IF NOT EXISTS comprobante_accepts (key TEXT PRIMARY KEY, accepted_at INTEGER NOT NULL);
+-- Payments the user discarded by hand. Never counted anywhere (wins over comprobante_accepts). Never written to the
+-- sheet; kept apart so a re-sync never overwrites it.
+CREATE TABLE IF NOT EXISTS comprobante_rejects (key TEXT PRIMARY KEY, rejected_at INTEGER NOT NULL);
+-- Corrected amount of a payment (same unit as the sheet value), kept apart so a re-sync never overwrites it.
+CREATE TABLE IF NOT EXISTS comprobante_value_overrides (key TEXT PRIMARY KEY, valor INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+-- Hourly spend per ad (Meta, WITHOUT IVA). date/hour are Bogota time (the report timezone); src_date/src_hour are the
+-- advertiser-timezone values Meta returned and make the key, so a re-sync replaces the same rows.
+CREATE TABLE IF NOT EXISTS hourly_insights (
+  account_id TEXT NOT NULL, ad_id TEXT NOT NULL, src_date TEXT NOT NULL, src_hour INTEGER NOT NULL,
+  date TEXT NOT NULL, hour INTEGER NOT NULL, ad_name TEXT NOT NULL, campaign_id TEXT NOT NULL, campaign_name TEXT NOT NULL,
+  adset_id TEXT NOT NULL, adset_name TEXT NOT NULL, gasto REAL NOT NULL, synced_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, ad_id, src_date, src_hour)
+);
+CREATE INDEX IF NOT EXISTS hourly_insights_date ON hourly_insights (date, account_id);
 -- Exact budget changes read from the account activity log (when Meta exposes it).
 CREATE TABLE IF NOT EXISTS budget_events (
   entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, time INTEGER NOT NULL, date TEXT NOT NULL,
@@ -233,6 +247,26 @@ export function createStore(file = ':memory:', { readOnly = false, defaultAccoun
       });
       refreshAdCt(db);
     },
+    // Replaces every hour of each (account, ad, source day) in the batch; days Meta does not return are left untouched.
+    upsertHourlyInsights(rows, now, accountId = '') {
+      const remove = q('DELETE FROM hourly_insights WHERE account_id = ? AND ad_id = ? AND src_date = ?');
+      const insert = q(`INSERT INTO hourly_insights (account_id, ad_id, src_date, src_hour, date, hour, ad_name, campaign_id, campaign_name, adset_id, adset_name, gasto, synced_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, ad_id, src_date, src_hour) DO UPDATE SET date = excluded.date, hour = excluded.hour, ad_name = excluded.ad_name,
+          campaign_id = excluded.campaign_id, campaign_name = excluded.campaign_name, adset_id = excluded.adset_id, adset_name = excluded.adset_name,
+          gasto = gasto + excluded.gasto, synced_at = excluded.synced_at`);
+      tx(() => {
+        const groups = new Set(rows.map((r) => `${r.adId}|${r.srcDate}`));
+        for (const g of groups) remove.run(accountId, ...g.split('|'));
+        for (const r of rows) insert.run(r.accountId ?? accountId, r.adId, r.srcDate, r.srcHour, r.date, r.hour, r.adName, r.campaignId, r.campaignName, r.adsetId, r.adsetName, r.gasto, now);
+      });
+    },
+    // Hourly spend rows whose Bogota day is in the range: { date, hour, adId, ..., gasto, accountId } (same shape as insights).
+    hourlyBetween: (from, to) =>
+      q('SELECT * FROM hourly_insights WHERE date >= ? AND date <= ? ORDER BY date, hour, ad_id').all(from, to).map((r) => ({
+        date: r.date, hour: r.hour, adId: r.ad_id, adName: r.ad_name, campaignId: r.campaign_id, campaignName: r.campaign_name,
+        adsetId: r.adset_id, adsetName: r.adset_name, gasto: r.gasto, accountId: r.account_id,
+      })),
     saveFxRate: ({ currency, date, rate, fetchedAt, source }) => {
       q(`INSERT INTO fx_rates (currency, date, rate_to_cop, fetched_at, source) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(currency, date) DO UPDATE SET rate_to_cop = excluded.rate_to_cop, fetched_at = excluded.fetched_at, source = excluded.source`).run(currency, date, rate, fetchedAt, source);
@@ -268,7 +302,7 @@ export function createStore(file = ':memory:', { readOnly = false, defaultAccoun
     identities() {
       const rows = q(`SELECT i.* FROM insights i
         JOIN (SELECT ad_id, MAX(date) AS date FROM insights GROUP BY ad_id) m ON i.ad_id = m.ad_id AND i.date = m.date`).all();
-      return Object.fromEntries(rows.map((r) => [r.ad_id, { adName: r.ad_name, campaignId: r.campaign_id, campaignName: r.campaign_name, accountId: r.account_id ?? '' }]));
+      return Object.fromEntries(rows.map((r) => [r.ad_id, { adName: r.ad_name, adsetName: r.adset_name, campaignId: r.campaign_id, campaignName: r.campaign_name, accountId: r.account_id ?? '' }]));
     },
 
     upsertAds(ads, now, accountId = '') {
@@ -298,7 +332,7 @@ export function createStore(file = ':memory:', { readOnly = false, defaultAccoun
     adsMap() {
       const rows = q('SELECT * FROM ads').all();
       return Object.fromEntries(
-        rows.map((r) => [r.ad_id, { name: r.name, createdTime: r.created_time, effectiveStatus: r.effective_status, campaignId: r.campaign_id, campaignName: r.campaign_name, adsetId: r.adset_id, firstSpendDate: r.first_spend_date, accountId: r.account_id ?? '' }]),
+        rows.map((r) => [r.ad_id, { name: r.name, createdTime: r.created_time, effectiveStatus: r.effective_status, campaignId: r.campaign_id, campaignName: r.campaign_name, adsetId: r.adset_id, adsetName: r.adset_name, firstSpendDate: r.first_spend_date, accountId: r.account_id ?? '' }]),
       );
     },
 
@@ -349,7 +383,8 @@ export function createStore(file = ':memory:', { readOnly = false, defaultAccoun
           if (find.get(key)) update.run(...args, key);
           else insert.run(key, ...args, now);
         }
-        markGone.run(now, JSON.stringify(keys));
+        // An empty read (blank tab, header-only CSV, transient glitch) must never flag the whole history as gone.
+        if (keys.length > 0) markGone.run(now, JSON.stringify(keys));
       });
     },
     setComprobanteCountries(list) {
@@ -375,12 +410,31 @@ export function createStore(file = ':memory:', { readOnly = false, defaultAccoun
       return true;
     },
     acceptedKeys: () => new Set(q('SELECT key FROM comprobante_accepts').all().map((r) => r.key)),
+    // Discard (or restore) a payment by hand. Returns false when the payment is not stored. A rejected payment never
+    // counts; an existing acceptance is kept untouched but loses to the rejection.
+    setRejected(key, rejected, now) {
+      if (!q('SELECT 1 FROM comprobantes WHERE key = ?').get(key)) return false;
+      if (rejected) q('INSERT INTO comprobante_rejects (key, rejected_at) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, now);
+      else q('DELETE FROM comprobante_rejects WHERE key = ?').run(key);
+      return true;
+    },
+    // Correct (or with null remove the correction of) the amount of a payment. Returns false when the payment is not
+    // stored. Only the local database changes; the sheet is never written.
+    setValueOverride(key, valor, now) {
+      if (!q('SELECT 1 FROM comprobantes WHERE key = ?').get(key)) return false;
+      if (valor === null || valor === undefined) q('DELETE FROM comprobante_value_overrides WHERE key = ?').run(key);
+      else q('INSERT INTO comprobante_value_overrides (key, valor, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET valor = excluded.valor, updated_at = excluded.updated_at').run(key, valor, now);
+      return true;
+    },
+    rejectedKeys: () => new Set(q('SELECT key FROM comprobante_rejects').all().map((r) => r.key)),
+    isRejected: (key) => Boolean(q('SELECT 1 FROM comprobante_rejects WHERE key = ?').get(key)),
     comprobantesBetween: (from, to) =>
-      q(`SELECT c.*, o.country AS override_country, a.key AS accepted_key, m.ad_id AS override_ad FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key
-        LEFT JOIN comprobante_accepts a ON a.key = c.key LEFT JOIN comprobante_ad_overrides m ON m.key = c.key
+      q(`SELECT c.*, o.country AS override_country, a.key AS accepted_key, j.key AS rejected_key, m.ad_id AS override_ad, vo.valor AS override_valor FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key
+        LEFT JOIN comprobante_accepts a ON a.key = c.key LEFT JOIN comprobante_rejects j ON j.key = c.key LEFT JOIN comprobante_ad_overrides m ON m.key = c.key
+        LEFT JOIN comprobante_value_overrides vo ON vo.key = c.key
         WHERE c.date >= ? AND c.date <= ? ORDER BY c.date, c.id`).all(from, to).map((r) => ({
-        key: r.key, registered: r.registered, date: r.date, result: r.result, phone: r.phone, valor: r.valor, bank: r.bank, flow: r.flow,
-        adId: r.override_ad ?? r.ad_id, adSource: r.override_ad ? 'manual' : 'hoja', adLossy: r.override_ad ? false : r.ad_lossy === 1, adUrl: r.ad_url, clientName: r.client_name, payerName: r.payer_name, gone: r.missing_since != null, accepted: r.accepted_key != null,
+        key: r.key, registered: r.registered, date: r.date, result: r.result, phone: r.phone, valor: r.override_valor ?? r.valor, valorSheet: r.valor, valueOverridden: r.override_valor != null, bank: r.bank, flow: r.flow,
+        adId: r.override_ad ?? r.ad_id, adSource: r.override_ad ? 'manual' : 'hoja', adLossy: r.override_ad ? false : r.ad_lossy === 1, adUrl: r.ad_url, clientName: r.client_name, payerName: r.payer_name, gone: r.missing_since != null, accepted: r.accepted_key != null, rejected: r.rejected_key != null,
         country: r.override_country ?? r.country, countrySource: r.override_country ? 'manual' : r.country_source,
       })),
 

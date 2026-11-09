@@ -17,11 +17,11 @@ interface Props {
 
 const THRESHOLD_LABELS: { key: keyof Thresholds; label: string; hint: string }[] = [
   { key: "minSpend", label: "Gasto mínimo para decidir", hint: "Por debajo de esto la acción es «Esperar»." },
-  { key: "duplicateRoas", label: "ROAS para escalar y duplicar", hint: "Junto con las ventas mínimas." },
+  { key: "duplicateRoas", label: "ROAS para escalar y duplicar", hint: "Valor / gasto sin IVA. Junto con las ventas mínimas." },
   { key: "duplicateSales", label: "Ventas mínimas para duplicar", hint: "Pagos válidos en el rango." },
-  { key: "scaleRoas", label: "ROAS para escalar", hint: "" },
-  { key: "keepRoas", label: "ROAS para mantener", hint: "" },
-  { key: "watchRoas", label: "ROAS para vigilar", hint: "Por debajo de esto: «Apagar»." },
+  { key: "scaleRoas", label: "ROAS para escalar", hint: "Valor / gasto sin IVA." },
+  { key: "keepRoas", label: "ROAS para mantener", hint: "Valor / gasto sin IVA." },
+  { key: "watchRoas", label: "ROAS para vigilar", hint: "Valor / gasto sin IVA. Por debajo de esto: «Apagar»." },
 ];
 
 type NumKey = Exclude<keyof Lifecycle, "testEnabled" | "budgetEnabled" | "notifyDesktop" | "notifyWhatsapp" | "testNotifyAt" | "postBudgetNotifyAt">;
@@ -31,7 +31,7 @@ const LIFE_NUMBERS: { key: NumKey; label: string; hint: string }[] = [
   { key: "testDays", label: "Duración de la prueba (días)", hint: "Solo informativa: cuántos días dura la prueba de un anuncio." },
   { key: "postBudgetNotifyDay", label: "Día de revisión tras subir presupuesto", hint: "El día de la subida cuenta como día 1. La revisión llega sola ese día, a la hora de abajo." },
   { key: "windowDays", label: "Días de comparación antes de la subida", hint: "Con cuántos días anteriores a la subida se compara el resultado." },
-  { key: "minRoasToScale", label: "ROAS mínimo para «Subir más»", hint: "" },
+  { key: "minRoasToScale", label: "ROAS mínimo para «Subir más»", hint: "Valor / gasto sin IVA." },
   { key: "minSales", label: "Ventas mínimas para decidir", hint: "Con menos ventas que esto no se baja ni se sube por costo por venta." },
   { key: "maxCpaWorsenPct", label: "Costo por venta: máximo que puede empeorar (%)", hint: "Para «Subir más»." },
   { key: "lowerCpaWorsenPct", label: "Costo por venta: empeora más de (%) = «Bajar»", hint: "" },
@@ -207,7 +207,7 @@ export default function AdsSettings({ detected, config, onTokenChange, onConfigS
         <div className="field">
           <label htmlFor="spend-vat">IVA sobre el gasto en Meta (%)</label>
           <input id="spend-vat" className="input" type="number" min={0} max={100} step="any" value={draft.spendVatPct} onChange={(e) => set("spendVatPct", e.target.value === "" ? 0 : Number(e.target.value))} />
-          <small>Meta cobra este IVA además de lo que reporta su API. Se suma al gasto en toda la app y el ROAS, el costo por venta y las decisiones lo usan. Es distinto del impuesto por país de arriba, que va sobre el valor de las ventas.</small>
+          <small>Meta cobra este IVA además de lo que reporta su API. Se suma al gasto en toda la app: el costo por venta, el margen y el resultado lo usan. El ROAS, en cambio, se calcula con el gasto sin IVA (valor / gasto sin IVA). Es distinto del impuesto por país de arriba, que va sobre el valor de las ventas.</small>
         </div>
       </div>
 

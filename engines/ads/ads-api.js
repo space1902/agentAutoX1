@@ -6,6 +6,7 @@ import { MetaApi, friendlyMetaError } from './meta-api.js';
 import { ScopeError, accountMetaOf, foreignCurrencyAccounts, parseNamePrefixes } from './scope.js';
 import { fetchAccount } from './meta-data.js';
 import { fxSummary, refreshFxRates, resolveRate } from './fx.js';
+import { HoursError, parseHoursArg } from './hours.js';
 import { buildReport } from './report.js';
 import { existsSync } from 'node:fs';
 import { AlertsConfigError, ALERTS_DEFAULTS, loadAlertsConfig, saveAlertsConfig } from './monitor/alerts-config.js';
@@ -13,6 +14,7 @@ import { monitorDbPath, readWaStatus } from './monitor/runner.js';
 import { createStore as createMonitorStore } from './monitor/store.js';
 import { runTick } from './tick.js';
 import { computeChanges } from './budget.js';
+import { buildBudgetPlan, collectChanges, planDataStart } from './budget-plan.js';
 import { probeActivities } from './activities.js';
 import { buildTracking, raisesByAd } from './tracking.js';
 import { openStoreAt } from './store.js';
@@ -23,7 +25,8 @@ export const TOKEN_ENV = 'AGENTAUTO_META_TOKEN';
 const MAX_RANGE_DAYS = 370;
 // 'ct' is the legacy name of the campaign grouping (the report never merges campaigns by CT code anymore).
 const GROUPS = ['campaign', 'ct', 'ad'];
-const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-ad', 'comprobante-accept', 'activities-probe', 'fx-refresh', 'portfolio-add', 'account-add'];
+const COMMANDS = ['sync', 'report', 'vouchers', 'status', 'test-token', 'config-get', 'config-set', 'tick', 'decisions', 'decision-status', 'alerts-config-get', 'alerts-config-set', 'alerts-recent', 'wa-status', 'tracking', 'comprobante-country', 'comprobante-ad', 'comprobante-value', 'comprobante-accept', 'comprobante-reject', 'budget-plan', 'activities-probe', 'fx-refresh', 'portfolio-add', 'account-add'];
+const MAX_VALUE_OVERRIDE = 100_000_000;
 const DECISION_STATUSES = ['pending', 'done', 'ignored'];
 
 export class AdsError extends Error {}
@@ -261,12 +264,34 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       if (!store.setAdOverride(args.key, adId, now())) throw new AdsError('Ese comprobante no está guardado.');
       return { key: args.key, adId };
     }
+    // Correct the amount of a payment (--valor with no value removes the correction). A positive whole number up to
+    // 100,000,000, in the same unit as the sheet. Only the local database changes; the sheet is never written.
+    if (command === 'comprobante-value') {
+      if (!/^[0-9a-f]{20}$/.test(String(args.key ?? ''))) throw new AdsError('El comprobante no es válido.');
+      const raw = args.valor === undefined || args.valor === true ? '' : String(args.valor).trim();
+      let valor = null;
+      if (raw !== '') {
+        valor = /^\d{1,9}$/.test(raw) ? Number(raw) : NaN;
+        if (!Number.isInteger(valor) || valor < 1 || valor > MAX_VALUE_OVERRIDE) throw new AdsError('El monto debe ser un número entero positivo de hasta 100.000.000.');
+      }
+      if (!store.setValueOverride(args.key, valor, now())) throw new AdsError('No encuentro ese comprobante.');
+      return { key: args.key, valor };
+    }
     // Accept (or undo with --undo) a payment by hand. Only the local database changes; the sheet is never written.
     if (command === 'comprobante-accept') {
       if (!/^[0-9a-f]{20}$/.test(String(args.key ?? ''))) throw new AdsError('El comprobante no es válido.');
       const accepted = !(args.undo === true || args.undo === 'true');
+      // A discarded payment must be restored first (comprobante-reject --undo): accepting never silently overrides it.
+      if (accepted && store.isRejected(args.key)) throw new AdsError('Ese comprobante está descartado. Restáuralo antes de validarlo.');
       if (!store.setAccepted(args.key, accepted, now())) throw new AdsError('No encuentro ese comprobante.');
       return { key: args.key, accepted };
+    }
+    // Discard (or restore with --undo) a payment by hand: it stops counting everywhere. Local database only.
+    if (command === 'comprobante-reject') {
+      if (!/^[0-9a-f]{20}$/.test(String(args.key ?? ''))) throw new AdsError('El comprobante no es válido.');
+      const rejected = !(args.undo === true || args.undo === 'true');
+      if (!store.setRejected(args.key, rejected, now())) throw new AdsError('No encuentro ese comprobante.');
+      return { key: args.key, rejected };
     }
     if (command === 'activities-probe') {
       if (!token) throw new AdsError('Falta el token de Meta.');
@@ -283,6 +308,32 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
     const budgetChanges = () => computeChanges({ histories: store.budgetHistories(), events: store.budgetEvents() });
     if (command === 'tracking') {
       return buildTracking({ insights: store.insightsBetween(addDays(today, -60), today), ads: store.adsWithFirstSpend(), changes: budgetChanges(), config, today });
+    }
+    // Budget timeline + suggested next budget per campaign. Reads stored data only (no Meta request, nothing is changed).
+    if (command === 'budget-plan') {
+      checkRange(args);
+      if (args.country && args.country !== true && !/^(all|-|[A-Z]{2})$/.test(args.country)) throw new AdsError('El país debe ser un código de 2 letras o «all».');
+      const scope = scopeArgs(args, config);
+      const events = store.budgetEvents();
+      const histories = store.budgetHistories();
+      const start = planDataStart({ changes: collectChanges({ events, histories }), from: args.from, today, life: config.lifecycle });
+      return buildBudgetPlan({
+        insights: store.insightsBetween(start, today),
+        comprobantes: store.comprobantesBetween(start, today),
+        identities: store.identities(),
+        ads: store.adsWithFirstSpend(),
+        config,
+        fxRates,
+        accountMeta: accountMetaOf(config, store),
+        accounts: scope.selection,
+        names: scope.names,
+        country: args.country === true ? '' : (args.country ?? ''),
+        events,
+        histories,
+        today,
+        from: args.from,
+        to: args.to,
+      });
     }
     if (command === 'status') {
       return {
@@ -329,12 +380,20 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
     const group = args.group ?? 'campaign';
     if (!GROUPS.includes(group)) throw new AdsError('La agrupación debe ser campaign o ad.');
     const scope = scopeArgs(args, config);
+    let hours;
+    try {
+      hours = parseHoursArg(args.hours);
+    } catch (error) {
+      if (error instanceof HoursError) throw new AdsError(error.message);
+      throw error;
+    }
     // Insights and identities stay unfiltered here: the report needs every account to know which ad a payment belongs to.
     const report = buildReport({
       accounts: scope.selection,
       names: scope.names,
       accountMeta: accountMetaOf(config, store),
       insights: store.insightsBetween(args.from, args.to),
+      hourlyInsights: store.hourlyBetween(args.from, args.to),
       comprobantes: store.comprobantesBetween(args.from, args.to),
       identities: store.identities(),
       ads: store.adsWithFirstSpend(),
@@ -344,6 +403,7 @@ export async function runAdsCommand(command, args, { dataDir, env = process.env,
       to: args.to,
       group,
       today,
+      hours,
       country: args.country === true ? '' : (args.country ?? ''),
       splitCountry: args.split === true || args.split === 'true',
       raises: raisesByAd({ insights: store.insightsBetween(addDays(today, -60), today), changes: budgetChanges(), today }),

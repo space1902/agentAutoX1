@@ -212,16 +212,17 @@ test('no post-budget verdict (Subir/Bajar) for an ad set whose ads are all pause
   assert.equal(run('PAUSED').filter((d) => d.kind === 'budget').length, 0);
 });
 
-test('decisions use the spend WITH IVA, so the same data gives a stricter verdict', () => {
+test('decisions: ROAS uses the spend WITHOUT IVA (verdict unchanged), cost per sale keeps the IVA', () => {
   const s = testScenario();
   const sales = ['2026-10-26', '2026-10-27', '2026-10-28'].map((d) => pay(d, 'A', 40000)); // 120000 over 40000 net spend = ROAS 3.0
   const run = (config) => evaluateDue({ ...s, comprobantes: sales, config, existing: new Set(), now: clock('2026-10-28', 20) }).find((d) => d.kind === 'test');
   assert.equal(run(NO_VAT).verdict.label, 'Escalar y duplicar');
   const withVat = run({ ...NO_VAT, spendVatPct: 19 });
-  assert.equal(withVat.verdict.label, 'Escalar'); // 120000 / 47600 = 2.52
+  assert.equal(withVat.verdict.label, 'Escalar y duplicar'); // 120000 / 40000 net = 3.0, the IVA does not lower it
   assert.equal(withVat.metrics.gasto, 40000 * 1.19);
   assert.equal(withVat.metrics.spendNet, 40000);
-  assert.match(withVat.reason, /ROAS 2,5 /);
+  assert.match(withVat.reason, /ROAS 3,0 /);
+  assert.ok(Math.abs(withVat.metrics.costoVenta - (40000 * 1.19) / 3) < 1e-6); // cost per sale keeps the IVA
 });
 
 test('two campaigns that share a CT code get their own verdict each, keyed by campaign id', () => {

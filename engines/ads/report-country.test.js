@@ -84,9 +84,10 @@ test('a country with no settings at all is flagged until a rate is set (only Col
   assert.equal(co.countries.find((c) => c.country === 'CO').rateMissing, false);
 });
 
-test('rows that left the sheet are still counted and flagged', () => {
+test('rows that left the sheet are flagged, listed and no longer counted', () => {
   const r = run({ comprobantes: [pay('A', '573001234567', 1000, { gone: true })] });
-  assert.equal(r.kpis.ventas, 1);
+  assert.equal(r.kpis.ventas, 0);
+  assert.equal(r.comprobantes.length, 1);
   assert.equal(r.comprobantes[0].gone, true);
 });
 

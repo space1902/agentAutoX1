@@ -20,7 +20,7 @@ export function registeredParts(text) {
 function validSales(rows, { flowPrefix, validResult }) {
   const out = [];
   for (const r of rows) {
-    if (!(r.accepted || isValidResult(r.result, validResult)) || !matchesFlow(r.flow, flowPrefix)) continue;
+    if (r.rejected || !(r.accepted || isValidResult(r.result, validResult)) || !matchesFlow(r.flow, flowPrefix)) continue;
     const when = registeredParts(r.registered);
     if (when) out.push({ ...when, adId: r.adId || UNATTRIBUTED });
   }

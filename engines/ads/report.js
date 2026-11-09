@@ -8,6 +8,7 @@ import { maskPhone, normalizeText, parseCt } from './parse.js';
 import { fxSummary, resolveRate } from './fx.js';
 import { isValidResult, matchesFlow } from './sheet.js';
 import { matchesName, scopeInsights } from './scope.js';
+import { hourOfRegistered, inHours } from './hours.js';
 import { daysBetween, eachDate } from './time.js';
 
 export const NO_AD = 'Sin anuncio';
@@ -70,10 +71,15 @@ export function joinByDateAndAd({ insights, sales, vatPct = 0, convert = (s) => 
 }
 
 // A payment counts as a sale when the sheet says so or when the user accepted it by hand (the sheet is never changed).
-const countsAsSale = (c, validResult) => Boolean(c.accepted) || isValidResult(c.result, validResult);
+// A payment that is gone from the sheet (`gone`) or was discarded by hand (`rejected`) never counts (rejection wins
+// over acceptance); both stay in the vouchers list.
+const isLive = (c) => !c.gone && !c.rejected;
+const countsAsSale = (c, validResult) => isLive(c) && (Boolean(c.accepted) || isValidResult(c.result, validResult));
 
-// valid = sheet says valid; accepted = not valid in the sheet but accepted by hand; invalid / review = pending.
+// rejected = discarded by hand; valid = sheet says valid; accepted = not valid in the sheet but accepted by hand;
+// invalid / review = pending.
 function resultStatus(c, validResult) {
+  if (c.rejected) return 'rejected';
   if (isValidResult(c.result, validResult)) return 'valid';
   if (c.accepted) return 'accepted';
   return normalizeText(c.result).includes('invalido') ? 'invalid' : 'review';
@@ -101,6 +107,11 @@ export function buildReport({
   insights, comprobantes, identities = {}, ads = {}, config, from, to, group = 'campaign', today, country = '', splitCountry = false, raises = {}, fxRates = {},
   // Scope: `accounts` = { all, ids } (null/all = every account), `names` = lowercase ad-name prefixes, `accountMeta` = { act_id: { name, currency, portfolioName } }.
   accounts = null, names = [], accountMeta = {},
+  // Hour-of-day window ({ start, end } or null = whole day): sales are filtered by the hour their payment was registered
+  // and spend by the hour Meta delivered it (days without hourly spend fall back to the whole day and are noted).
+  hours = null,
+  // Hourly spend rows (Meta, WITHOUT IVA, hour in Bogota time): { date, hour, adId, accountId, gasto, ...names }.
+  hourlyInsights = [],
 }) {
   // "ct" is the legacy name of the grouping that merged campaigns by code: it is now the campaign grouping.
   if (group === 'ct') group = 'campaign';
@@ -110,6 +121,11 @@ export function buildReport({
   // "-" selects the data without a country; any other value is a country code.
   const matches = (code) => !wanted || (wanted === '-' ? code === '' : code === wanted);
   const inRange = (d) => d >= from && d <= to;
+  // Messages are not split by hour: with an hour window they (and cost per message / conversion) are null = N/D.
+  const metricsOf = (t) => {
+    const m = withMetrics(t);
+    return hours ? { ...m, mensajes: null, costoMensaje: null, conversion: null } : m;
+  };
 
   const accountSel = accounts && !accounts.all ? new Set(accounts.ids) : null;
   const filtering = Boolean(accountSel) || names.length > 0;
@@ -122,11 +138,11 @@ export function buildReport({
   });
   const monitoredInsights = scoped.rows;
   const seen = {};
-  for (const r of insights) seen[r.adId] = { adName: r.adName, campaignId: r.campaignId, campaignName: r.campaignName, accountId: r.accountId ?? '' };
+  for (const r of insights) seen[r.adId] = { adName: r.adName, adsetName: r.adsetName ?? '', campaignId: r.campaignId, campaignName: r.campaignName, accountId: r.accountId ?? '' };
   // Ads known from Meta's ad list (even without spend in the loaded insights) still tell which campaign owns them.
   const fromAds = (adId) => {
     const ad = ads[adId];
-    return ad && (ad.campaignId || ad.campaignName) ? { adName: ad.name ?? '', campaignId: ad.campaignId ?? '', campaignName: ad.campaignName ?? '' } : null;
+    return ad && (ad.campaignId || ad.campaignName) ? { adName: ad.name ?? '', adsetName: ad.adsetName ?? '', campaignId: ad.campaignId ?? '', campaignName: ad.campaignName ?? '' } : null;
   };
   const identityOf = (adId) => (adId ? (identities[adId] ?? seen[adId] ?? fromAds(adId)) : null);
 
@@ -145,17 +161,58 @@ export function buildReport({
   const attributable = !filtering ? monitoredRows.filter((c) => !configured || configured.has(accountOfAd(c.adId))) : monitoredRows.filter((c) => {
     const id = identityOf(c.adId);
     if (!id || (accountSel && !accountOfAd(c.adId))) {
-      unattributed += 1;
+      if (isLive(c)) unattributed += 1;
       return false;
     }
-    return (!accountSel || accountSel.has(accountOfAd(c.adId))) && matchesName(id.adName, names);
+    return (!accountSel || accountSel.has(accountOfAd(c.adId))) && matchesName({ adName: id.adName, adsetName: id.adsetName ?? seen[c.adId]?.adsetName ?? ads[c.adId]?.adsetName, campaignName: id.campaignName }, names);
   });
   const notes = unattributed
     ? [{ code: 'unattributed_sales', count: unattributed, message: `${unattributed} ${unattributed === 1 ? 'pago sin anuncio identificable no se cuenta' : 'pagos sin anuncio identificable no se cuentan'} porque hay un filtro de cuenta o nombre. Quita el filtro para verlos.` }]
     : [];
   const withCountry = new Map(attributable.map((c) => [c, saleCountry(c)]));
-  const sales = attributable.filter((c) => countsAsSale(c, config.validResult)).map((c) => ({ ...c, country: withCountry.get(c) }));
-  const joinedAll = joinByDateAndAd({ insights: monitoredInsights, sales, vatPct: Math.max(0, Number(config.spendVatPct ?? 0)), convert: (s) => economics(s, config, s.country, fxRates) });
+  const allSales = attributable.filter((c) => countsAsSale(c, config.validResult)).map((c) => ({ ...c, country: withCountry.get(c), hour: hourOfRegistered(c.registered) }));
+  const sales = hours ? allSales.filter((s) => inHours(s.hour, hours)) : allSales;
+  if (hours) {
+    const unreadable = allSales.filter((s) => s.hour === null).length;
+    if (unreadable) notes.push({ code: 'hours_unreadable', count: unreadable, message: `${unreadable} ${unreadable === 1 ? 'pago no tiene hora legible y no se cuenta' : 'pagos no tienen hora legible y no se cuentan'} mientras hay un horario.` });
+  }
+  const vatPct = Math.max(0, Number(config.spendVatPct ?? 0));
+
+  // ---- hourly spend (Meta hours already shifted to Bogota when stored)
+  const hourlyInRange = hourlyInsights.filter((r) => inRange(r.date) && isMonitored(r.campaignName, prefix));
+  const hourlyScoped = scopeInsights({ rows: hourlyInRange, accounts: accountSel ?? configured, names, accountMeta, config, fxRates }).rows;
+  const dayKey = (r) => `${r.accountId ?? ''}|${r.date}`;
+  const covered = new Set(hourlyInRange.map(dayKey));
+  // Days with daily spend but no hourly rows for that account.
+  const missingDays = new Set(monitoredInsights.filter((r) => r.gasto > 0 && !covered.has(dayKey(r))).map(dayKey));
+  const adDay = (r) => `${r.date}|${r.adId}`;
+  const dailyByAdDay = new Map();
+  for (const r of monitoredInsights) {
+    if (!dailyByAdDay.has(adDay(r))) dailyByAdDay.set(adDay(r), []);
+    dailyByAdDay.get(adDay(r)).push(r);
+  }
+  // Country share of an ad's day (daily spend by country), used to split hourly spend, which has no country.
+  const sharesOf = (r) => {
+    const parts = dailyByAdDay.get(adDay(r)) ?? [{ country: '', gasto: 1 }];
+    const total = parts.reduce((n, p) => n + p.gasto, 0);
+    return parts.map((p) => ({ country: p.country ?? '', share: total > 0 ? p.gasto / total : 1 / parts.length }));
+  };
+  // With an hour window the spend is the one delivered inside it; messages are not split by hour, so they are dropped.
+  let spendRows = monitoredInsights;
+  if (hours) {
+    const inWindow = new Map();
+    for (const h of hourlyScoped) if (inHours(h.hour, hours)) inWindow.set(adDay(h), (inWindow.get(adDay(h)) ?? 0) + h.gasto);
+    spendRows = monitoredInsights.map((r) => {
+      if (!covered.has(dayKey(r))) return { ...r, mensajes: 0 };
+      const share = sharesOf(r).find((p) => p.country === (r.country ?? ''))?.share ?? 0;
+      return { ...r, gasto: (inWindow.get(adDay(r)) ?? 0) * share, mensajes: 0 };
+    });
+    if (missingDays.size) {
+      const n = missingDays.size;
+      notes.push({ code: 'hourly_spend_missing', count: n, message: `${n} ${n === 1 ? 'día no tiene' : 'días no tienen'} gasto por hora guardado: en ${n === 1 ? 'ese día' : 'esos días'} el gasto es el del día completo y el ROAS con horario es aproximado.` });
+    }
+  }
+  const joinedAll = joinByDateAndAd({ insights: spendRows, sales, vatPct, convert: (s) => economics(s, config, s.country, fxRates) });
 
   // Countries that have data at all (before the enabled-countries scope), so the settings can offer them.
   const detectedMap = new Map();
@@ -243,7 +300,7 @@ export function buildReport({
       const s = countrySettings(config, code, to, fxRates);
       return {
         country: code, name: code ? (COUNTRY_NAMES[code] ?? code) : NO_COUNTRY, currency: s.currency, rateToCop: s.rate, rateMissing: totals.valor > 0 && !s.rateSet,
-        ...withMetrics(totals),
+        ...metricsOf(totals),
       };
     })
     .sort((a, b) => b.gasto - a.gasto || b.valor - a.valor);
@@ -259,7 +316,7 @@ export function buildReport({
     .filter(([, totals]) => totals.gasto > 0 || totals.ventas > 0 || totals.valor > 0)
     .map(([id, totals]) => ({
       accountId: id, name: id ? (accountMeta[id]?.name || id) : 'Sin cuenta', portfolioName: accountMeta[id]?.portfolioName ?? '',
-      currency: accountMeta[id]?.currency || config.currency, ...withMetrics(totals),
+      currency: accountMeta[id]?.currency || config.currency, ...metricsOf(totals),
     }))
     .sort((a, b) => b.gasto - a.gasto || b.valor - a.valor);
 
@@ -296,7 +353,7 @@ export function buildReport({
     }
     addTotals(total, e);
   }
-  const dailyPoint = ({ date, gasto, spendNet, vat, valor, ventas, mensajes }) => ({ date, gasto, spendNet, vat, valor, ventas, mensajes, roas: gasto ? valor / gasto : 0 });
+  const dailyPoint = ({ date, gasto, spendNet, vat, valor, ventas, mensajes }) => ({ date, gasto, spendNet, vat, valor, ventas, mensajes: hours ? null : mensajes, roas: spendNet ? valor / spendNet : 0 });
   const campaignDaily = [...campaignDays.values()]
     .map((c) => ({
       campaignId: c.campaignId, campaign: c.campaign, key: c.key, paused: isPaused(campaignDelivery.get(c.key), c.adIds, c.known),
@@ -305,13 +362,51 @@ export function buildReport({
     .filter((c) => c.daily.some((d) => d.gasto > 0 || d.valor > 0))
     .sort((a, b) => a.campaign.localeCompare(b.campaign, 'es', { numeric: true }));
 
+  // Sales per hour of registration for the same scope (range, accounts, country, filters), whatever the window: the
+  // chart shows the whole day and only highlights the window.
+  // Spend per hour comes from Meta (IVA added here, ROAS on the net spend). The same series is kept per real campaign so
+  // the chart's campaign selector can focus on one.
+  const newHours = () => Array.from({ length: 24 }, (_, hour) => ({ hour, ventas: 0, valor: 0, gasto: 0, spendNet: 0, vat: 0, roas: 0 }));
+  const hourly = newHours();
+  const hourlyByCampaign = new Map();
+  const bump = (adId, hour, field, amount) => {
+    hourly[hour][field] += amount;
+    const c = campaignGroupOf(describe(adId));
+    if (!hourlyByCampaign.has(c.key)) hourlyByCampaign.set(c.key, newHours());
+    hourlyByCampaign.get(c.key)[hour][field] += amount;
+  };
+  for (const h of hourlyScoped) {
+    for (const p of sharesOf(h)) {
+      const code = scopeCountry(p.country, config);
+      if (code === null || !matches(code)) continue;
+      bump(h.adId, h.hour, 'spendNet', h.gasto * p.share);
+    }
+  }
+  for (const s of allSales) {
+    const code = scopeCountry(s.country, config);
+    if (code === null || !matches(code) || s.hour === null) continue;
+    bump(s.adId, s.hour, 'ventas', 1);
+    bump(s.adId, s.hour, 'valor', economics(s, config, s.country, fxRates).valor);
+  }
+  const finishHours = (hours) => {
+    for (const h of hours) {
+      h.vat = (h.spendNet * vatPct) / 100;
+      h.gasto = h.spendNet + h.vat;
+      h.roas = h.spendNet ? h.valor / h.spendNet : 0;
+    }
+    return hours;
+  };
+  finishHours(hourly);
+  const campaignHourly = [...hourlyByCampaign.entries()].map(([key, hours]) => ({ key, hourly: finishHours(hours) }));
+
   const rows = [...groups.values()]
     .map(({ adIds, hasAction, baseKey, ...row }) => {
-      const metrics = withMetrics(row);
+      const metrics = metricsOf(row);
       const d = delivery.get(baseKey);
       // Paused: every known ad of the group is off in Meta and so is each ad that spent in the range.
       const paused = isPaused(d, adIds, hasAction);
-      const suggested = hasAction ? suggestAction(metrics, config.thresholds) : null;
+      // With an hour window only sales are filtered while spend stays whole-day, so ROAS-based actions would mislead: none.
+      const suggested = hasAction && !hours ? suggestAction(metrics, config.thresholds) : null;
       const ages = [...adIds].map((id) => dayOf(ads[id], today)).filter((n) => n !== null);
       const single = group === 'ad' ? ads[row.adId] : null;
       return {
@@ -341,10 +436,13 @@ export function buildReport({
         date: c.date,
         registered: c.registered,
         valor: c.valor,
+        valorSheet: c.valorSheet ?? c.valor,
+        valueOverridden: Boolean(c.valueOverridden),
         valorCop: c.valor * countrySettings(config, code, c.date, fxRates).rate,
         bank: c.bank,
         flow: c.flow,
         adId: c.adId,
+        accountId: accountOfAd(c.adId),
         adName: info.adName,
         adSource: c.adSource ?? 'hoja',
         ct: info.ct,
@@ -360,6 +458,7 @@ export function buildReport({
         country: code,
         countrySource: c.country ? (c.countrySource || 'telefono') : deriveCountry({ phone: c.phone, campaignName: identityOf(c.adId)?.campaignName, flow: c.flow }, words).source,
         gone: Boolean(c.gone),
+        rejected: Boolean(c.rejected),
       };
     })
     .sort((a, b) => (a.date === b.date ? 0 : a.date < b.date ? 1 : -1));
@@ -386,7 +485,12 @@ export function buildReport({
     splitCountry,
     currency: config.currency,
     spendVatPct: config.spendVatPct ?? 0,
-    kpis: withMetrics(total),
+    kpis: metricsOf(total),
+    hours: hours ? { start: hours.start, end: hours.end, restricted: true } : { start: 0, end: 24, restricted: false },
+    hourly,
+    // Hourly spend comes from Meta at ad level (one row per ad and hour), so campaign and name filters apply to it.
+    campaignHourly,
+    hourlySpend: { level: 'ad', available: hourlyInRange.length > 0, daysMissing: missingDays.size },
     rows,
     countries,
     detected,
@@ -396,7 +500,7 @@ export function buildReport({
     inactive: { gasto: rows.filter((r) => r.paused).reduce((n, r) => n + r.gasto, 0), count: rows.filter((r) => r.paused).length },
     comprobantes: list,
     // Pending: not valid in the sheet and not accepted by hand (within the range and the enabled countries).
-    reviewCount: list.filter((c) => c.status === 'review' || c.status === 'invalid').length,
+    reviewCount: list.filter((c) => !c.gone && (c.status === 'review' || c.status === 'invalid')).length,
   };
 }
 

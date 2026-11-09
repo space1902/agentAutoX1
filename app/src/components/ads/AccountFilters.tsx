@@ -50,16 +50,16 @@ export default function AccountFilters({ accounts, choice, onChoice, nameInput, 
         </div>
       )}
       <label className="ads-name-filter">
-        <span className="muted">Filtrar por nombre</span>
+        <span className="muted">Buscar</span>
         <input
           className="input"
           value={nameInput}
-          placeholder="Filtrar por nombre (ej.: ct, pzz)"
-          aria-label="Filtrar por nombre del anuncio"
+          placeholder="Buscar anuncio, conjunto o campaña (ej.: pcol, ct 07)"
+          aria-label="Buscar anuncio, conjunto o campaña"
           aria-invalid={problem !== null}
           onChange={(e) => onNameInput(e.target.value)}
         />
-        {problem ? <small className="ads-warn" style={{ margin: 0 }}>{problem}</small> : <small className="muted">Anuncios cuyo nombre empieza por alguno de estos textos, separados por coma.</small>}
+        {problem ? <small className="ads-warn" style={{ margin: 0 }}>{problem}</small> : <small className="muted">Anuncios cuyo nombre, conjunto o campaña contiene alguno de estos textos (sin importar mayúsculas ni tildes), separados por coma.</small>}
       </label>
     </div>
   );

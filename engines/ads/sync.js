@@ -3,7 +3,7 @@
 import { MetaApi, friendlyMetaError } from './meta-api.js';
 import { syncActivities } from './activities.js';
 import { deriveCountry } from './country.js';
-import { fetchAccount, fetchAds, fetchFirstSpendDate, fetchInsights } from './meta-data.js';
+import { fetchAccount, fetchAds, fetchFirstSpendDate, fetchHourlyInsights, fetchInsights } from './meta-data.js';
 import { PRINCIPAL_ID, redactAll, targetsFor } from './portfolios.js';
 import { redact } from './redact.js';
 import { fetchSheetCsv, parseComprobantes } from './sheet.js';
@@ -14,6 +14,9 @@ import { addDays, daysBetween, localParts } from './time.js';
 export const DEFAULT_TIMEZONE = 'America/Bogota';
 
 const MAX_LOOKBACK_DAYS = 120;
+// Hourly spend is only refreshed for the most recent days of the range the sync already covers (the incremental window is
+// 4 days; a manual or backfill range is capped here), so it costs one request per account per sync.
+export const HOURLY_MAX_DAYS = 7;
 
 // Ads already seen before `from` whose first spending day is still unknown: look back to their creation date
 // (once per ad) so "day 1" (first day with spend > 0) is reliable.
@@ -60,6 +63,18 @@ async function syncAccount({ store, config, target, token, from, to, fetchImpl, 
     const insights = await fetchInsights(api, id, from, to);
     store.upsertInsights(insights, now(), id);
 
+    // Hourly spend: same cycle, same days, one extra request. A failure never fails the account (daily data is already saved).
+    let hourlyRows = 0;
+    let hourlyError = null;
+    try {
+      const hourlyFrom = addDays(to, -(HOURLY_MAX_DAYS - 1));
+      const hourly = await fetchHourlyInsights(api, id, from > hourlyFrom ? from : hourlyFrom, to, { accountTz: timezone, reportTz: DEFAULT_TIMEZONE });
+      store.upsertHourlyInsights(hourly, now(), id);
+      hourlyRows = hourly.length;
+    } catch (error) {
+      hourlyError = redact(friendlyMetaError(error), token);
+    }
+
     const ads = await fetchAds(api, id);
     store.upsertAds(ads, now(), id);
     const today = localParts(now(), timezone).date;
@@ -72,7 +87,7 @@ async function syncAccount({ store, config, target, token, from, to, fetchImpl, 
       store.refreshFirstSpend();
     }
     if (plan) store.setKv('lookbackChecked', [...new Set([...(store.getKv('lookbackChecked') ?? []), ...plan.ids])].slice(-2000));
-    return { ...base, ok: true, insightRows: insights.length, ads: ads.length };
+    return { ...base, ok: true, insightRows: insights.length, ads: ads.length, hourlyRows, ...(hourlyError ? { hourlyError } : {}) };
   } catch (error) {
     return { ...base, ok: false, code: error?.code ?? 'META', error: redact(friendlyMetaError(error), token) };
   }
@@ -105,7 +120,8 @@ async function syncSheet({ store, config, fetchImpl, now }) {
     const csv = await fetchSheetCsv({ sheetId: config.sheetId, tab: config.sheetTab, fetchImpl });
     const parsed = parseComprobantes(csv);
     store.syncComprobantes(parsed.rows, now());
-    return { ok: true, rows: parsed.rows.length, skippedTests: parsed.skippedTests, skippedNoDate: parsed.skippedNoDate };
+    const warning = parsed.rows.length === 0 ? 'La hoja llegó vacía; no se marcó nada como eliminado.' : undefined;
+    return { ok: true, rows: parsed.rows.length, skippedTests: parsed.skippedTests, skippedNoDate: parsed.skippedNoDate, ...(warning ? { warning } : {}) };
   } catch (error) {
     return { ok: false, code: error?.code ?? 'SHEET', error: String(error?.message ?? error) };
   }

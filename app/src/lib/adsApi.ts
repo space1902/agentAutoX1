@@ -18,16 +18,18 @@ export interface Totals {
   /** Raw spend as the Meta API reports it (without IVA) and the IVA amount (gasto = spendNet + vat). Absent in decisions stored before the IVA setting. */
   spendNet?: number;
   vat?: number;
-  mensajes: number;
+  /** null = N/D: with an hour window messages are not split by hour. */
+  mensajes: number | null;
   valor: number;
   /** Value in the countries' own currency (meaningful when a single country is shown). Absent in older payloads. */
   valorNative?: number;
   ventas: number;
   resultado: number;
+  /** Value / spend WITHOUT IVA (spendNet). Cost per sale, margin and result use the spend with IVA. */
   roas: number;
-  costoMensaje: number;
+  costoMensaje: number | null;
   ticket: number;
-  conversion: number;
+  conversion: number | null;
   costoVenta: number;
   /** Fees, per-sale costs and taxes in COP, and the gross margin: value - spend - fees - costs - taxes. */
   comisiones: number;
@@ -76,17 +78,22 @@ export interface DayPoint {
   vat?: number;
   valor: number;
   ventas: number;
-  mensajes: number;
+  mensajes: number | null;
   roas: number;
 }
 
 /** valid = valid in the sheet; accepted = accepted by hand in the app; review / invalid = pending. */
-export type VoucherStatus = "valid" | "accepted" | "invalid" | "review";
+export type VoucherStatus = "valid" | "accepted" | "invalid" | "review" | "rejected";
 
 export interface Voucher {
   date: string;
   registered: string;
+  /** Amount that counts: the corrected one when the user edited it, else the sheet value. */
   valor: number;
+  /** Amount written in the sheet. */
+  valorSheet: number;
+  /** The amount was corrected by hand in the app (the sheet is never changed). */
+  valueOverridden: boolean;
   bank: string;
   flow: string;
   adId: string;
@@ -100,6 +107,8 @@ export interface Voucher {
   result: string;
   status: VoucherStatus;
   phoneMasked: string;
+  /** Ad account (act_...) that owns the payment's ad; "" when it cannot be tied to one. */
+  accountId: string;
   /** Raw phone from the sheet; shown only in the Comprobantes card. */
   phone: string;
   /** Contact name in the WhatsApp/Leona chat. */
@@ -116,6 +125,8 @@ export interface Voucher {
   gone: boolean;
   /** Accepted by hand in the app (the sheet is never changed). */
   accepted: boolean;
+  /** Discarded by hand in the app: never counted, wins over `accepted` (the sheet is never changed). */
+  rejected: boolean;
 }
 
 /** Result of `ads_vouchers`: the payments of one range (the Comprobantes card has its own dates). */
@@ -123,6 +134,20 @@ export interface VouchersData {
   range: { from: string; to: string };
   comprobantes: Voucher[];
   reviewCount: number;
+}
+
+/** One hour of the day (0-23, Bogota time): sales and value by payment registration, spend by delivery hour (all in COP). */
+export interface HourPoint {
+  hour: number;
+  ventas: number;
+  valor: number;
+  /** Spend WITH IVA. */
+  gasto: number;
+  /** Spend WITHOUT IVA (the ROAS divisor). */
+  spendNet: number;
+  vat: number;
+  /** valor / spendNet; 0 without spend. */
+  roas: number;
 }
 
 export interface CountryRow extends Totals {
@@ -212,6 +237,14 @@ export interface Report {
   /** IVA (%) added to Meta's spend. */
   spendVatPct?: number;
   kpis: Totals;
+  /** Hour window applied to sales and spend (restricted = false: whole day). Messages are not split by hour. */
+  hours?: { start: number; end: number; restricted: boolean };
+  /** Sales per hour of registration for the same scope, whatever the window (24 entries). */
+  hourly?: HourPoint[];
+  /** The same 24 hours per real campaign (same keys as campaignDaily), for the chart selector. */
+  campaignHourly?: { key: string; hourly: HourPoint[] }[];
+  /** Hourly spend comes from Meta at ad level; daysMissing = days with daily spend but no hourly spend saved yet. */
+  hourlySpend?: { level: string; available: boolean; daysMissing: number };
   rows: AdRow[];
   daily: DayPoint[];
   /** Daily series per real campaign (whatever the table grouping), for the chart selector. */
@@ -255,7 +288,7 @@ export interface SyncResult {
   portfolioWarnings?: string[];
   /** Per-account outcome: one failing account never hides the others. */
   accounts?: SyncAccountResult[];
-  sheet: SyncPart & { rows?: number };
+  sheet: SyncPart & { rows?: number; warning?: string };
   backfilled?: boolean;
   history?: HistoryInfo;
 }
@@ -424,12 +457,112 @@ export interface TrackingItem {
   checkDate?: string;
 }
 
+// ---------------------------------------------------------------- Presupuestos (budget timeline + suggestion)
+
+/** Metrics of a window of days (spend WITH IVA; ROAS is value / spend without IVA). */
+export interface BudgetWindow {
+  from: string;
+  to: string;
+  /** Days of the window with spend. */
+  days: number;
+  gasto: number;
+  spendNet: number;
+  valor: number;
+  ventas: number;
+  mensajes: number;
+  roas: number;
+  costoVenta: number;
+  conversion: number;
+  costoMensaje: number;
+}
+
+export interface BudgetStatus {
+  key: "evaluating" | "worked" | "worsened" | "stable" | "overlap" | "nodata" | "cut";
+  label: string;
+  tone: ActionTone;
+}
+
+export interface BudgetChange {
+  id: string;
+  date: string;
+  exact: boolean;
+  kind: "raise" | "cut";
+  oldBudget: number;
+  newBudget: number;
+  /** Signed: negative for a cut. */
+  pct: number;
+  daysSince: number;
+  /** The after window is over. */
+  complete: boolean;
+  before: BudgetWindow;
+  after: BudgetWindow;
+  /** Cost per sale after vs before, in %; null without sales on one side. */
+  worsenPct: number | null;
+  /** Another budget change fell inside the after window. */
+  overlap: boolean;
+  /** Counts for learning: a complete raise with spend and no other change in its window. */
+  measured: boolean;
+  success: boolean;
+  status: BudgetStatus;
+}
+
+export interface BudgetSuggestion {
+  mode: "learning" | "learned";
+  action: { key: "raise" | "hold" | "lower" | "wait"; label: string; tone: ActionTone };
+  suggestedBudget: number | null;
+  suggestedPct: number | null;
+  currentBudget: number | null;
+  currency: string;
+  reason: string;
+  detail: string | null;
+  /** Measured raises the suggestion is based on (account-wide). */
+  evidence: number;
+}
+
+export interface BudgetCampaign {
+  campaignId: string;
+  name: string;
+  accountId: string;
+  accountName: string;
+  /** Currency of the budget amounts (the ad account's); metrics are in the base currency. */
+  budgetCurrency: string;
+  active: boolean;
+  paused: boolean;
+  currentBudget: number | null;
+  lastChangeDate: string | null;
+  daysSinceLastChange: number | null;
+  changeCount: number;
+  /** Newest first, only the ones inside the chosen range. */
+  changes: BudgetChange[];
+  suggestion: BudgetSuggestion | null;
+}
+
+export interface BudgetLearning {
+  mode: "learning" | "learned";
+  measured: number;
+  needed: number;
+  text: string;
+  sentence: string | null;
+  buckets: { key: string; label: string; n: number; successes: number; medianCpaChangePct: number | null }[];
+}
+
+export interface BudgetPlan {
+  range: { from: string; to: string };
+  today: string;
+  currency: string;
+  learning: BudgetLearning;
+  campaigns: BudgetCampaign[];
+  warnings: { code: string; message: string }[];
+  notes: { code: string; message: string }[];
+  settings: { windowDays: number; postBudgetDays: number; raisePct: number; minMeasured: number; minRoasToScale: number };
+}
+
 export const adsApi = {
   /** `accounts` = comma list of act ids; null/omitted = every account. Only those accounts are queried in Meta. */
   sync: (from: string, to: string, accounts: string | null = null) => invoke<SyncResult>("ads_sync", { from, to, accounts }),
   syncAuto: (accounts: string | null = null) => invoke<SyncResult>("ads_sync_auto", { accounts }),
-  report: (from: string, to: string, group: Group, country = "", split = false, accounts: string | null = null, name = "") =>
-    invoke<Report>("ads_report", { from, to, group, country: country || null, split, accounts, name: name.trim() || null }),
+  report: (from: string, to: string, group: Group, country = "", split = false, accounts: string | null = null, name = "", hours: string | null = null) =>
+    invoke<Report>("ads_report", { from, to, group, country: country || null, split, accounts, name: name.trim() || null, hours }),
   vouchers: (from: string, to: string, country = "", accounts: string | null = null, name = "") =>
     invoke<VouchersData>("ads_vouchers", { from, to, country: country || null, accounts, name: name.trim() || null }),
   /** Fetches the live exchange rates (free sources, no key); a failure keeps the last saved rate. */
@@ -438,6 +571,14 @@ export const adsApi = {
   comprobanteCountry: (key: string, code: string) => invoke<{ key: string; country: string }>("ads_comprobante_country", { key, code }),
   /** Accepts a payment by hand (or takes it back with `undo`); only the local database changes. */
   comprobanteAccept: (key: string, undo = false) => invoke<{ key: string; accepted: boolean }>("ads_comprobante_accept", { key, undo }),
+  comprobanteReject: (key: string, undo = false) => invoke<{ key: string; rejected: boolean }>("ads_comprobante_reject", { key, undo }),
+  /** Corrects the amount of a payment (null restores the sheet value); only the local database changes. */
+  comprobanteValue: (key: string, valor: number | null) => invoke<{ key: string; valor: number | null }>("ads_comprobante_value", { key, valor }),
+  /** Assigns an ad to a payment by hand (null removes it); only the local database changes. */
+  comprobanteAd: (key: string, ad: string | null) => invoke<{ key: string; adId: string }>("ads_comprobante_ad", { key, ad }),
+  /** Budget changes per campaign with the 3 days before/after and the suggested next budget. Reads stored data; never changes Meta. */
+  budgetPlan: (from: string, to: string, country = "", accounts: string | null = null, name = "") =>
+    invoke<BudgetPlan>("ads_budget_plan", { from, to, country: country || null, accounts, name: name.trim() || null }),
   status: () => invoke<AdsStatus>("ads_status"),
   configGet: () => invoke<{ config: AdsConfig; defaults: AdsConfig }>("ads_config_get"),
   configSet: (config: Partial<AdsConfig>) => invoke<{ config: AdsConfig }>("ads_config_set", { config }),

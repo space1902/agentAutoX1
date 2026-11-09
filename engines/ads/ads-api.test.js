@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { AdsError, parseArgs, runAdsCommand } from './ads-api.js';
+import { openStoreAt } from './store.js';
 
 const TOKEN = 'EAAB-secret-token-1234567890';
 const json = (body, status = 200) => ({ ok: status < 400, status, headers: new Headers(), json: async () => body, text: async () => JSON.stringify(body) });
@@ -50,7 +51,7 @@ test('sync then report returns KPIs, rows with actions, daily series and masked 
   assert.equal(report.kpis.gasto, 23800);
   assert.equal(report.kpis.vat, 3800);
   assert.equal(report.kpis.valor, 60000);
-  assert.equal(report.kpis.roas, 60000 / 23800);
+  assert.equal(report.kpis.roas, 60000 / (23800 / 1.19));
   assert.equal(report.rows[0].label, 'CT01 - ventas');
   assert.equal(report.rows[0].action.label, 'Escalar');
   assert.equal(report.rows[0].ageDays, 2); // first spend 2026-10-28 = day 1
@@ -219,4 +220,32 @@ test('fx-refresh saves the live rate (no token needed) and the report converts w
   const failed = await runAdsCommand('fx-refresh', {}, down);
   assert.equal(failed.errors.length, 1);
   assert.equal(failed.fx[0].rate, 170, 'the last saved rate is still reported');
+});
+
+test('budget-plan reads only stored data: timeline per campaign, current budget and a suggestion, with the same filters as the report', async () => {
+  const dir = tmp();
+  await runAdsCommand('sync', { from: '2026-10-28', to: '2026-10-29' }, ctx({ dataDir: dir }));
+  const store = openStoreAt(dir);
+  try {
+    store.upsertBudgetEvents([{ entityType: 'campaign', entityId: 'c1', time: Date.parse('2026-10-27T15:00:00Z'), date: '2026-10-27', oldBudget: 10000, newBudget: 12000 }], 'act_1');
+  } finally {
+    store.close();
+  }
+  const offline = { dataDir: dir, env: {}, fetchImpl: async () => { throw new Error('no network'); }, now: () => Date.parse('2026-10-29T15:00:00Z') };
+  const plan = await runAdsCommand('budget-plan', { from: '2026-10-01', to: '2026-10-29' }, offline);
+  assert.equal(plan.campaigns.length, 1);
+  const c1 = plan.campaigns[0];
+  assert.equal(c1.campaignId, 'c1');
+  assert.equal(c1.currentBudget, 12000);
+  assert.equal(c1.daysSinceLastChange, 2);
+  assert.equal(c1.changes[0].status.label, 'en evaluación (día 3 de 3)');
+  assert.equal(c1.suggestion.action.key, 'wait');
+  assert.equal(plan.learning.mode, 'learning');
+  assert.equal(plan.today, '2026-10-29');
+  const none = await runAdsCommand('budget-plan', { from: '2026-10-01', to: '2026-10-29', name: 'no existe' }, offline);
+  assert.deepEqual(none.campaigns, []);
+  const byCountry = await runAdsCommand('budget-plan', { from: '2026-10-01', to: '2026-10-29', country: 'MX' }, offline);
+  assert.deepEqual(byCountry.campaigns, []);
+  await assert.rejects(runAdsCommand('budget-plan', { from: 'ayer', to: 'hoy' }, offline), /fecha/i);
+  await assert.rejects(runAdsCommand('budget-plan', { from: '2026-10-01', to: '2026-10-29', accounts: 'act_999' }, offline), AdsError);
 });

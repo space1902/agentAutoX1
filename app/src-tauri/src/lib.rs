@@ -242,11 +242,11 @@ fn set_keep_alive(state: State<'_, AppState>, enabled: bool) -> Result<keepalive
     Ok(state.keepalive.status())
 }
 
-/// Hours a pod may stay off before the auto review cycles it (4, 6, 8, 12 or 24).
+/// Hours a pod may stay off before the auto review cycles it (4, 6, 8, 12, 24, 36, 48 or 72).
 #[tauri::command]
 fn set_keep_alive_hours(state: State<'_, AppState>, hours: u32) -> Result<keepalive::KeepAliveStatus, String> {
     if !settings::KEEP_ALIVE_HOURS.contains(&hours) {
-        return Err("Elige 4, 6, 8, 12 o 24 horas.".into());
+        return Err("Elige 4, 6, 8, 12, 24, 36, 48 o 72 horas.".into());
     }
     let mut next = state.current();
     next.keep_alive_hours = hours;
@@ -595,9 +595,10 @@ async fn ads_report(
     split: Option<bool>,
     accounts: Option<String>,
     name: Option<String>,
+    hours: Option<String>,
 ) -> Result<Value, String> {
     let settings = state.current();
-    blocking(move || ads::report(&settings, &from, &to, &group, country.as_deref(), split.unwrap_or(false), accounts.as_deref(), name.as_deref())).await
+    blocking(move || ads::report(&settings, &from, &to, &group, country.as_deref(), split.unwrap_or(false), accounts.as_deref(), name.as_deref(), hours.as_deref())).await
 }
 
 /// Payments of an arbitrary range for the Comprobantes card.
@@ -605,6 +606,20 @@ async fn ads_report(
 async fn ads_vouchers(state: State<'_, AppState>, from: String, to: String, country: Option<String>, accounts: Option<String>, name: Option<String>) -> Result<Value, String> {
     let settings = state.current();
     blocking(move || ads::vouchers(&settings, &from, &to, country.as_deref(), accounts.as_deref(), name.as_deref())).await
+}
+
+/// Budget timeline and suggested next budget per campaign (stored data only; it never changes a budget).
+#[tauri::command]
+async fn ads_budget_plan(state: State<'_, AppState>, from: String, to: String, country: Option<String>, accounts: Option<String>, name: Option<String>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::budget_plan(&settings, &from, &to, country.as_deref(), accounts.as_deref(), name.as_deref())).await
+}
+
+/// Assigns an ad to a payment by hand (empty or absent removes it).
+#[tauri::command]
+async fn ads_comprobante_ad(state: State<'_, AppState>, key: String, ad: Option<String>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::comprobante_ad(&settings, &key, ad.as_deref().filter(|a| !a.is_empty()))).await
 }
 
 /// Incremental sync (last days + today); the first run backfills the whole history.
@@ -639,6 +654,20 @@ async fn ads_comprobante_country(state: State<'_, AppState>, key: String, code: 
 async fn ads_comprobante_accept(state: State<'_, AppState>, key: String, undo: bool) -> Result<Value, String> {
     let settings = state.current();
     blocking(move || ads::comprobante_accept(&settings, &key, undo)).await
+}
+
+/// Discards a payment by hand (or restores it). The sheet is never modified.
+#[tauri::command]
+async fn ads_comprobante_reject(state: State<'_, AppState>, key: String, undo: bool) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::comprobante_reject(&settings, &key, undo)).await
+}
+
+/// Corrects the amount of one payment (`valor` absent removes the correction). The sheet is never modified.
+#[tauri::command]
+async fn ads_comprobante_value(state: State<'_, AppState>, key: String, valor: Option<u64>) -> Result<Value, String> {
+    let settings = state.current();
+    blocking(move || ads::comprobante_value(&settings, &key, valor)).await
 }
 
 #[tauri::command]
@@ -1097,9 +1126,13 @@ pub fn run() {
             ads_vouchers,
             ads_sync_auto,
             ads_tracking,
+            ads_budget_plan,
+            ads_comprobante_ad,
             ads_fx_refresh,
             ads_comprobante_country,
             ads_comprobante_accept,
+            ads_comprobante_reject,
+            ads_comprobante_value,
             ads_status,
             ads_portfolio_token_status,
             ads_portfolio_token_set,

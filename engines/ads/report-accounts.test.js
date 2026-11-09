@@ -34,6 +34,7 @@ test('an account filter keeps that account\'s spend and only the sales that map 
   assert.equal(r.kpis.valor, 49000);
   assert.equal(r.accounts.length, 1);
   assert.ok(r.comprobantes.every((c) => ['B', 'C'].includes(c.adId)));
+  assert.ok(r.comprobantes.every((c) => c.accountId === 'act_22222'), 'each listed payment carries the account of its ad');
   assert.ok(r.notes.some((n) => n.code === 'unattributed_sales' && n.count === 2));
 });
 
@@ -42,7 +43,7 @@ test('selecting every account behaves as "all"', () => {
   assert.equal(r.kpis.valor, 109000);
 });
 
-test('the name filter is starts-with, case-insensitive, comma separated, and only counts sales of matching ads', () => {
+test('the name filter is contains, case-insensitive, comma separated (OR), and only counts sales of matching ads', () => {
   const r = run({ names: parseNamePrefixes(' ct , ,PZZ ') });
   assert.equal(r.kpis.gasto, 35000);
   assert.equal(r.kpis.valor, 50000 + 40000 + 9000);
@@ -50,7 +51,8 @@ test('the name filter is starts-with, case-insensitive, comma separated, and onl
   assert.equal(ct.kpis.gasto, 15000);
   assert.equal(ct.kpis.valor, 59000);
   assert.ok(ct.notes.some((n) => n.code === 'unattributed_sales'));
-  assert.equal(run({ names: parseNamePrefixes('video') }).kpis.gasto, 0, 'contains is not starts-with');
+  assert.equal(run({ names: parseNamePrefixes('video') }).kpis.gasto, 10000, 'matches anywhere in the ad name');
+  assert.equal(run({ names: parseNamePrefixes('01 vid') }).kpis.valor, 50000);
   assert.deepEqual(r.nameFilter, ['ct', 'pzz']);
 });
 
@@ -84,7 +86,12 @@ test('parseNamePrefixes validates length and charset', () => {
   assert.throws(() => parseNamePrefixes('a'.repeat(61)), ScopeError);
   assert.throws(() => parseNamePrefixes(Array.from({ length: 25 }, (_, i) => `p${i}`).join(',')), ScopeError);
   assert.equal(matchesName('CT01 video', ['ct']), true);
-  assert.equal(matchesName('xCT01', ['ct']), false);
+  assert.equal(matchesName('xCT01', ['ct']), true, 'contains, not starts-with');
+  assert.equal(matchesName('xCT01', ['zz']), false);
+  assert.equal(matchesName('Promoción Mamá', ['promocion mama']), true, 'accent-insensitive');
+  assert.equal(matchesName({ adName: 'a', adsetName: 'Conjunto PCOL', campaignName: 'c' }, ['pcol']), true, 'ad set name');
+  assert.equal(matchesName({ adName: 'a', adsetName: 'b', campaignName: 'Campaña CT 07' }, ['zz', 'ct 07']), true, 'campaign name, terms OR-ed');
+  assert.equal(matchesName({ adName: 'a', adsetName: 'b', campaignName: 'c' }, ['ct 07']), false);
   assert.equal(matchesName('anything', []), true);
 });
 
@@ -105,4 +112,20 @@ test('under "Todas" a removed account’s history does not count (nothing is del
   assert.equal(r.kpis.gasto, 35000 + 3000);
   assert.equal(r.kpis.valor, 109000, 'the removed account’s payment is not counted either');
   assert.equal(run({ insights: all, identities: ids, comprobantes: sales }).kpis.gasto, 35000 + 7000 + 3000, 'without a selection nothing changes');
+});
+
+test('the search also matches the ad set and the campaign name, and sales follow their ad', () => {
+  const rows = [
+    { ...ins('A', 'Video 1', 'act_11111', 10000), campaignName: 'Campaña PCOL ventas', adsetName: 'Conjunto uno' },
+    { ...ins('B', 'Video 2', 'act_22222', 20000), campaignName: 'Otra', adsetName: 'Público Café' },
+  ];
+  const ids = Object.fromEntries(rows.map((r) => [r.adId, { adName: r.adName, campaignId: r.campaignId, campaignName: r.campaignName, adsetName: r.adsetName, accountId: r.accountId }]));
+  const base = { insights: rows, identities: ids, comprobantes: [pay('A', 1, 50000), pay('B', 2, 40000)] };
+  const byCampaign = run({ ...base, names: parseNamePrefixes('pcol') });
+  assert.equal(byCampaign.kpis.gasto, 10000);
+  assert.equal(byCampaign.kpis.valor, 50000);
+  const byAdset = run({ ...base, names: parseNamePrefixes('cafe') });
+  assert.equal(byAdset.kpis.gasto, 20000);
+  assert.equal(byAdset.kpis.valor, 40000);
+  assert.equal(run({ ...base, names: parseNamePrefixes('pcol, cafe') }).kpis.gasto, 30000);
 });

@@ -64,7 +64,7 @@ test('spend in the views includes the IVA; spend_net and vat are exposed without
   assert.equal(ct.spend, 11000);
   assert.equal(ct.spend_net, 10000);
   assert.equal(ct.vat, 1000);
-  assert.equal(ct.roas, 25000 / 11000);
+  assert.equal(ct.roas, 25000 / 10000);
   assert.equal(store.setSpendVat(10), false);
 });
 
@@ -92,7 +92,7 @@ test('v_campaign_daily joins spend and sales per day and per real campaign', () 
   assert.equal(row.spend, 11900); // 10000 + 19 % IVA
   assert.equal(row.sales, 1);
   assert.equal(row.revenue_cop, 25000);
-  assert.equal(row.roas, 25000 / 11900);
+  assert.equal(row.roas, 25000 / 10000);
 });
 
 test('read-only stores skip migrations and cannot write', () => {

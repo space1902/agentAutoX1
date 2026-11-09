@@ -18,12 +18,12 @@ function Metrics({ m }: { m: Totals }) {
   return (
     <dl className="dec-metrics">
       <div><dt>Gasto (con IVA)</dt><dd>{formatMoney(m.gasto)}</dd></div>
-      <div><dt>Mensajes</dt><dd>{formatInt(m.mensajes)}</dd></div>
+      <div><dt>Mensajes</dt><dd>{m.mensajes === null ? "—" : formatInt(m.mensajes)}</dd></div>
       <div><dt>Ventas</dt><dd>{formatInt(m.ventas)}</dd></div>
       <div><dt>Valor</dt><dd>{formatMoney(m.valor)}</dd></div>
-      <div><dt>ROAS</dt><dd>{m.gasto > 0 ? formatRoas(m.roas) : "—"}</dd></div>
+      <div><dt title="Valor / gasto sin IVA">ROAS</dt><dd>{m.gasto > 0 ? formatRoas(m.roas) : "—"}</dd></div>
       <div><dt>Costo por venta</dt><dd>{m.ventas > 0 && m.gasto > 0 ? formatMoney(m.costoVenta) : "—"}</dd></div>
-      <div><dt>% conversión</dt><dd>{m.mensajes > 0 ? formatPct(m.conversion) : "—"}</dd></div>
+      <div><dt>% conversión</dt><dd>{m.mensajes !== null && m.mensajes > 0 && m.conversion !== null ? formatPct(m.conversion) : "—"}</dd></div>
     </dl>
   );
 }

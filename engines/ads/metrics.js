@@ -2,10 +2,12 @@
 
 const div = (a, b) => (b ? a / b : 0);
 
-export function computeMetrics({ gasto = 0, valor = 0, ventas = 0, mensajes = 0 }) {
+// `gasto` includes Meta's IVA (cost per sale, margin and result use it); ROAS divides by `spendNet`, the spend WITHOUT
+// IVA (value / spend without IVA). Callers that have no `spendNet` fall back to `gasto` (same thing when the IVA is 0).
+export function computeMetrics({ gasto = 0, spendNet, valor = 0, ventas = 0, mensajes = 0 }) {
   return {
     resultado: valor - gasto,
-    roas: div(valor, gasto),
+    roas: div(valor, spendNet ?? gasto),
     costoMensaje: div(gasto, mensajes),
     ticket: div(valor, ventas),
     conversion: div(ventas, mensajes),

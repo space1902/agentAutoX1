@@ -24,7 +24,7 @@ export default function CountriesPanel({ countries, selected, onSelect }: { coun
               <th className="num">Costos e impuestos</th>
               <th className="num">Margen bruto</th>
               <th className="num">Margen %</th>
-              <th className="num">ROAS</th>
+              <th className="num" title="Valor / gasto sin IVA">ROAS</th>
             </tr>
           </thead>
           <tbody>

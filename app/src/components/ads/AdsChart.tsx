@@ -49,7 +49,7 @@ export default function AdsChart({ data }: { data: DayPoint[] }) {
       <div className="ads-legend" aria-hidden>
         <span><i className="sw gasto" /> Gasto (con IVA)</span>
         <span><i className="sw valor" /> Valor (pagos)</span>
-        <span><i className="sw roas" /> ROAS</span>
+        <span><i className="sw roas" /> ROAS (valor / gasto sin IVA)</span>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Gasto contra valor por día, con línea de ROAS" preserveAspectRatio="xMidYMid meet" onMouseLeave={() => setHover(null)}>
         {ticks.map((t) => (
@@ -80,7 +80,7 @@ export default function AdsChart({ data }: { data: DayPoint[] }) {
           <span>Gasto (con IVA): {formatMoney(active.gasto)}</span>
           <span className="muted">IVA: {formatMoney(vatOf(active))}</span>
           <span>Valor (pagos): {formatMoney(active.valor)}</span>
-          <span>ROAS: {active.gasto > 0 ? formatRoas(active.roas) : "—"}</span>
+          <span>ROAS (sin IVA): {active.gasto > 0 ? formatRoas(active.roas) : "—"}</span>
         </div>
       )}
     </div>

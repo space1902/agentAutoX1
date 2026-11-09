@@ -3,7 +3,7 @@
 // the CT tag is derived in JS (extractCt) and is only informational: rows are keyed by the real Meta campaign (campaign_id) and the exchange rates live in the JSON config.
 import { extractCt } from './parse.js';
 
-export const VIEWS_VERSION = 7;
+export const VIEWS_VERSION = 10;
 
 // Views of earlier versions that no longer exist (dropped on upgrade).
 const LEGACY_VIEWS = ['v_ct_daily'];
@@ -35,7 +35,7 @@ const COUNTRY = (expr) => `COALESCE(NULLIF(${expr}, ''), '${NO_COUNTRY_LABEL}')`
 // name -> { sql (SELECT body), description, columns: [[name, description]] }
 export const VIEWS = {
   v_ads_daily: {
-    description: 'Gasto y resultados de Meta por día, país, campaña y anuncio (una fila por día+anuncio+país de entrega). El gasto (spend) ya incluye el IVA que cobra Meta: úsalo tal cual para ROAS, costo por venta y ganancia; no le sumes IVA otra vez.',
+    description: 'Gasto y resultados de Meta por día, país, campaña y anuncio (una fila por día+anuncio+país de entrega). El gasto (spend) ya incluye el IVA que cobra Meta: úsalo tal cual para costo por venta y ganancia; no le sumes IVA otra vez. El ROAS se calcula con el gasto sin IVA (spend_net).',
     sql: `SELECT i.date AS date, ${COUNTRY('i.country')} AS country, COALESCE(c.ct, 'Sin CT') AS ct, i.campaign_id AS campaign_id, i.campaign_name AS campaign,
       i.ad_id AS ad_id, i.ad_name AS ad_name, i.gasto * ${VAT_FACTOR} AS spend, i.gasto AS spend_net, i.gasto * ${VAT_PCT} / 100.0 AS vat, i.mensajes AS messages, i.impressions AS impressions, i.clicks AS clicks
       FROM insights i LEFT JOIN ad_ct c ON c.ad_id = i.ad_id
@@ -48,8 +48,8 @@ export const VIEWS = {
       ['campaign', 'Nombre completo de la campaña.'],
       ['ad_id', 'ID del anuncio en Meta.'],
       ['ad_name', 'Nombre del anuncio.'],
-      ['spend', 'Gasto en COP CON IVA (lo que realmente cobra Meta). Es el que debes usar para ROAS, costo por venta y ganancia.'],
-      ['spend_net', 'Gasto en COP SIN IVA, como lo reporta la API de Meta. Solo de referencia: no lo mezcles con spend.'],
+      ['spend', 'Gasto en COP CON IVA (lo que realmente cobra Meta). Úsalo para costo por venta y ganancia (el ROAS usa spend_net).'],
+      ['spend_net', 'Gasto en COP SIN IVA, como lo reporta la API de Meta. Es el divisor del ROAS (ingresos / spend_net); no lo mezcles con spend en otras cuentas.'],
       ['vat', 'IVA sobre el gasto en COP (spend - spend_net). Ya está incluido en spend: no lo sumes otra vez.'],
       ['messages', 'Conversaciones de mensajes iniciadas.'],
       ['impressions', 'Impresiones.'],
@@ -57,16 +57,17 @@ export const VIEWS = {
     ],
   },
   v_sales: {
-    description: 'Pagos válidos (comprobantes) con su país y la campaña dueña del anuncio. Incluye el nombre del cliente. Incluye los de resultado «Pago válido» y los que el usuario aceptó a mano en la app (accepted_manually = 1); una fila = una venta.',
+    description: 'Pagos válidos (comprobantes) con su país y la campaña dueña del anuncio. Incluye el nombre del cliente. Incluye los de resultado «Pago válido» y los que el usuario aceptó a mano en la app (accepted_manually = 1); una fila = una venta. No incluye los pagos que ya no están en la hoja ni los que el usuario descartó en la app.',
     sql: `SELECT c.date AS date, ${COUNTRY('COALESCE(o.country, c.country)')} AS country, COALESCE(t.ct, 'Sin CT') AS ct,
       COALESCE(ac.campaign_id, '') AS campaign_id, CASE WHEN COALESCE(m.ad_id, c.ad_id) = '' THEN 'Sin anuncio' ELSE COALESCE(ac.campaign_name, 'Anuncio desconocido') END AS campaign, COALESCE(m.ad_id, c.ad_id) AS ad_id,
-      c.valor AS value, c.valor * COALESCE(r.rate_to_cop, 1) AS value_cop, c.flow AS flow, c.result AS result, c.bank AS bank, c.client_name AS client_name,
+      COALESCE(vo.valor, c.valor) AS value, COALESCE(vo.valor, c.valor) * COALESCE(r.rate_to_cop, 1) AS value_cop, c.flow AS flow, c.result AS result, c.bank AS bank, c.client_name AS client_name,
       CASE WHEN a.key IS NOT NULL AND c.result NOT LIKE 'pago v_lido' THEN 1 ELSE 0 END AS accepted_manually
       FROM comprobantes c LEFT JOIN comprobante_overrides o ON o.key = c.key LEFT JOIN comprobante_accepts a ON a.key = c.key
-      LEFT JOIN comprobante_ad_overrides m ON m.key = c.key LEFT JOIN ad_ct t ON t.ad_id = COALESCE(m.ad_id, c.ad_id)
+      LEFT JOIN comprobante_ad_overrides m ON m.key = c.key LEFT JOIN comprobante_value_overrides vo ON vo.key = c.key LEFT JOIN ad_ct t ON t.ad_id = COALESCE(m.ad_id, c.ad_id)
       LEFT JOIN ad_campaign ac ON ac.ad_id = COALESCE(m.ad_id, c.ad_id)
       LEFT JOIN country_rates r ON r.country = COALESCE(o.country, c.country)
-      WHERE c.result LIKE 'pago v_lido' OR a.key IS NOT NULL`,
+      WHERE (c.result LIKE 'pago v_lido' OR a.key IS NOT NULL) AND c.missing_since IS NULL
+        AND NOT EXISTS (SELECT 1 FROM comprobante_rejects j WHERE j.key = c.key)`,
     columns: [
       ['date', 'Día del pago.'],
       ['country', 'País del cliente (por teléfono, campaña o flujo) o «Sin país».'],
@@ -74,7 +75,7 @@ export const VIEWS = {
       ['campaign_id', 'ID de la campaña dueña del anuncio que originó la venta (vacío si no se pudo asignar).'],
       ['campaign', 'Nombre de esa campaña, «Sin anuncio» si el pago no trae anuncio o «Anuncio desconocido».'],
       ['ad_id', 'ID del anuncio (vacío si no se pudo asignar).'],
-      ['value', 'Valor en la moneda local del país (MXN en México, USD en Venezuela, COP en Colombia).'],
+      ['value', 'Valor (corregido a mano si el usuario lo editó en la app) en la moneda local del país (MXN en México, USD en Venezuela, COP en Colombia).'],
       ['value_cop', 'Valor convertido a COP con la tasa configurada (usa esta para sumar entre países).'],
       ['flow', 'Flujo de venta del chat.'],
       ['result', 'Resultado del comprobante en la hoja: «Pago válido» o, si se aceptó a mano, el que tenía (por ejemplo «Nombre a revisar»).'],
@@ -147,7 +148,7 @@ export const VIEWS = {
   v_campaign_daily: {
     description: 'Gasto (con IVA) y ventas por día, país y campaña de Meta en una sola tabla (para tendencias). Una fila por campaña real: dos campañas con el mismo CT en el nombre son filas distintas. Para el ROAS de un periodo suma primero y divide después.',
     sql: `SELECT date, country, campaign_id, campaign, spend, spend_net, vat, messages, sales, revenue_cop,
-      CASE WHEN spend > 0 THEN revenue_cop / spend ELSE NULL END AS roas,
+      CASE WHEN spend_net > 0 THEN revenue_cop / spend_net ELSE NULL END AS roas,
       CASE WHEN sales > 0 THEN spend / sales ELSE NULL END AS cost_per_sale
       FROM (
         SELECT date, country, campaign_id, MAX(campaign) AS campaign, SUM(spend) AS spend, SUM(spend_net) AS spend_net, SUM(vat) AS vat, SUM(messages) AS messages, SUM(sales) AS sales, SUM(revenue_cop) AS revenue_cop FROM (
@@ -160,13 +161,13 @@ export const VIEWS = {
       ['country', 'País (el del gasto viene de Meta; el de la venta, del cliente).'],
       ['campaign_id', 'ID de la campaña en Meta (vacío = ventas sin anuncio).'],
       ['campaign', 'Nombre completo de la campaña («Sin anuncio» para pagos sin anuncio).'],
-      ['spend', 'Gasto en COP CON IVA (el real). Úsalo para ROAS y costo por venta.'],
-      ['spend_net', 'Gasto en COP sin IVA (referencia; no lo mezcles con spend).'],
+      ['spend', 'Gasto en COP CON IVA (el real). Úsalo para costo por venta (el ROAS usa spend_net).'],
+      ['spend_net', 'Gasto en COP sin IVA: divisor del ROAS (no lo mezcles con spend en otras cuentas).'],
       ['vat', 'IVA del gasto (ya incluido en spend; no lo sumes otra vez).'],
       ['messages', 'Conversaciones iniciadas.'],
       ['sales', 'Número de ventas válidas.'],
       ['revenue_cop', 'Ingresos en COP.'],
-      ['roas', 'revenue_cop / spend de esa fila (NULL sin gasto).'],
+      ['roas', 'revenue_cop / spend_net de esa fila: valor entre gasto SIN IVA (NULL sin gasto).'],
       ['cost_per_sale', 'spend / sales de esa fila (NULL sin ventas).'],
     ],
   },

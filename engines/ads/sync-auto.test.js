@@ -31,7 +31,7 @@ function world({ sheet, failActivities = false } = {}) {
 }
 const at = (iso) => () => Date.parse(iso);
 const NOW = '2026-10-29T15:00:00Z';
-const timeRanges = (calls) => calls.filter((c) => c.includes('/insights') && c.includes('time_range')).map((c) => JSON.parse(new URL(c).searchParams.get('time_range')));
+const timeRanges = (calls) => calls.filter((c) => c.includes('/insights') && c.includes('time_range') && !c.includes('hourly_stats')).map((c) => JSON.parse(new URL(c).searchParams.get('time_range')));
 
 test('first auto sync backfills from the earliest day found, month by month, and remembers it', async () => {
   const store = createStore();

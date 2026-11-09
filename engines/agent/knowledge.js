@@ -8,8 +8,8 @@ export const GLOSSARY = [
   ['CT', 'Etiqueta de prueba creativa («CT 07») que algunas campañas llevan en el nombre. Es solo informativa: no agrupa ni suma campañas. Las campañas sin CT en el nombre son campañas normales.'],
   ['Día N', 'El día 1 de un anuncio (o de una campaña) es su primer día con gasto. El veredicto automático de la prueba se emite el día 4. Tras subir el presupuesto, el día del cambio es el día 1 y la revisión llega el día 2.'],
   ['Venta', 'Un pago con resultado «Pago válido». Los pagos en revisión o inválidos no cuentan. «Sin anuncio» significa que el pago no trae el anuncio y no se pudo atribuir a una campaña.'],
-  ['IVA del gasto', 'Meta cobra IVA sobre el gasto (19 % por defecto, configurable) y su API lo reporta sin IVA. En toda la app y en las vistas (spend, métricas) el gasto YA incluye el IVA; spend_net es el gasto sin IVA y vat el IVA. ROAS, costo por venta, costo por mensaje y margen usan el gasto con IVA. No sumes el IVA otra vez.'],
-  ['ROAS', 'Ingresos / gasto (con IVA). Un ROAS de 2 significa que por cada $1 gastado entraron $2.'],
+  ['IVA del gasto', 'Meta cobra IVA sobre el gasto (19 % por defecto, configurable) y su API lo reporta sin IVA. En toda la app y en las vistas (spend, métricas) el gasto YA incluye el IVA; spend_net es el gasto sin IVA y vat el IVA. El ROAS usa el gasto SIN IVA (ingresos / spend_net); costo por venta, costo por mensaje y margen usan el gasto con IVA. No sumes el IVA otra vez.'],
+  ['ROAS', 'Ingresos / gasto SIN IVA. Un ROAS de 2 significa que por cada $1 gastado (sin IVA) entraron $2.'],
   ['Costo por venta', 'Gasto / número de ventas. Costo por mensaje = gasto / conversaciones iniciadas. Conversión = ventas / mensajes.'],
   ['Margen', 'Ingresos − gasto − comisiones − costos por venta − impuestos (por país, configurables). Margen % = margen / ingresos.'],
   ['Acciones sugeridas', 'La app etiqueta cada fila con una acción según umbrales configurables (se devuelven en metrics/table): Esperar (gasto bajo el mínimo), Escalar y duplicar, Escalar, Mantener, Vigilar, Apagar.'],
@@ -24,7 +24,7 @@ export const SQL_RULES = [
   'Funciones permitidas: SUM, AVG, MIN, MAX, COUNT, ROUND, ABS, COALESCE, NULLIF, IIF, CASE, CAST, LENGTH, LOWER, UPPER, SUBSTR, REPLACE, TRIM, INSTR, DATE, STRFTIME, JULIANDAY, ventanas (ROW_NUMBER, RANK, LAG, LEAD...).',
   'Máximo 200 filas y 5 segundos. Agrega, filtra por fecha y usa LIMIT; no pidas todo el historial en bruto.',
   'Los países son códigos (CO, MX, VE) o «Sin país». Agrupa por campaign_id (v_campaign_daily, v_ads_daily); el CT es solo una etiqueta del nombre y se escribe «CT 07» (con espacio).',
-  'ROAS de un periodo = SUM(revenue_cop) / SUM(spend), nunca el promedio de los ROAS diarios.',
+  'ROAS de un periodo = SUM(revenue_cop) / SUM(spend_net) (gasto sin IVA), nunca el promedio de los ROAS diarios.',
 ];
 
 export function describeViews() {

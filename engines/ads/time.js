@@ -49,3 +49,25 @@ export function chunkRange(from, to, days = 31) {
   }
   return chunks;
 }
+
+// Epoch ms of a wall-clock date + hour in an IANA timezone (the hour's start). Two correction passes handle offsets,
+// including DST; an hour that does not exist (spring forward) lands on the next valid instant.
+export function zonedEpoch(date, hour, tz) {
+  const [y, m, d] = date.split('-').map(Number);
+  const wanted = Date.UTC(y, m - 1, d, hour);
+  let guess = wanted;
+  for (let i = 0; i < 2; i++) {
+    const p = localParts(guess, tz);
+    const [py, pm, pd] = p.date.split('-').map(Number);
+    guess += wanted - Date.UTC(py, pm - 1, pd, p.hour, p.minute);
+  }
+  return guess;
+}
+
+// Wall-clock { date, hour } in `fromTz` -> the hour of the same instant in `toTz`. When the zones differ by a fraction of
+// an hour (e.g. +5:30) the result is the toTz hour that contains the START of the source hour.
+export function convertHour(date, hour, fromTz, toTz) {
+  if (fromTz === toTz) return { date, hour };
+  const p = localParts(zonedEpoch(date, hour, fromTz), toTz);
+  return { date: p.date, hour: p.hour };
+}

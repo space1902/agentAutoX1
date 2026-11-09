@@ -23,11 +23,17 @@ export function parseNamePrefixes(value) {
   return list;
 }
 
-// Starts-with on the ad name, case-insensitive. No prefixes = everything matches.
-export function matchesName(adName, prefixes) {
-  if (!prefixes?.length) return true;
-  const name = String(adName ?? '').trim().toLowerCase();
-  return prefixes.some((p) => name.startsWith(p));
+// Lowercase without accents ("Promoción" -> "promocion"), so searches ignore case and diacritics.
+export const foldText = (value) => String(value ?? '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+
+// Search: a term matches when it appears ANYWHERE (contains, case- and accent-insensitive) in the ad name, the ad set
+// name or the campaign name. `target` is a string (an ad name) or { adName, adsetName, campaignName }. Terms are OR-ed;
+// no terms = everything matches.
+export function matchesName(target, terms) {
+  if (!terms?.length) return true;
+  const parts = typeof target === 'object' && target !== null ? [target.adName, target.adsetName, target.campaignName] : [target];
+  const haystack = parts.map((p) => foldText(p).trim()).join('\u0000');
+  return terms.some((t) => haystack.includes(foldText(t).trim()));
 }
 
 // COP per 1 unit of `currency` on a day: COP itself, the saved live rate, else a manual country rate with that currency.
@@ -64,7 +70,7 @@ export function scopeInsights({ rows, accounts = null, names = [], accountMeta =
   const out = [];
   for (const r of rows) {
     if (accounts && !accounts.has(r.accountId ?? '')) continue;
-    if (!matchesName(r.adName, names)) continue;
+    if (!matchesName(r, names)) continue;
     const currency = accountMeta[r.accountId]?.currency || base;
     if (currency === base) {
       out.push(r);

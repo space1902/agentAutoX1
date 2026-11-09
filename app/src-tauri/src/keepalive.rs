@@ -1,5 +1,5 @@
 //! "Auto revisión de números en los pods": WhatsApp unlinks devices that stay off too long, so when this is ON every
-//! pod that has been off for longer than the chosen interval (4/6/8/12/24 h, default 6) is turned on for ~15 minutes, then off again, ONE pod at a time.
+//! pod that has been off for longer than the chosen interval (4/6/8/12/24/36/48/72 h, default 6) is turned on for ~15 minutes, then off again, ONE pod at a time.
 //!
 //! The decisions live here and run against `KeepOps` + `Clock` (fake clock in the tests):
 //!   - `observe_running` / `due_pods`: the per-pod "last time it was on" bookkeeping and the queue.

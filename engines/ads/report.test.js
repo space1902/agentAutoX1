@@ -210,14 +210,14 @@ test('Apagada also applies when the campaign is split by country', () => {
   assert.ok(rows.every((r) => r.paused));
 });
 
-test('IVA on the spend: gasto includes it everywhere, spendNet keeps the raw value and ROAS/margin/costs use the gross spend', () => {
+test('IVA on the spend: gasto includes it everywhere, spendNet keeps the raw value and ROAS uses the net spend; margin/costs use the gross spend', () => {
   const r = run('campaign', { config: { ...NO_VAT, spendVatPct: 19, campaignPrefix: 'CT' } });
   const k = r.kpis;
   assert.equal(k.spendNet, 65000); // 20000 + 10000 + 30000 + 5000
   assert.equal(k.gasto, 65000 * 1.19);
   assert.equal(k.vat, 65000 * 0.19);
   assert.equal(k.gasto, k.spendNet + k.vat);
-  assert.equal(k.roas, k.valor / (65000 * 1.19));
+  assert.equal(k.roas, k.valor / 65000); // ROAS = value / spend WITHOUT IVA
   assert.equal(k.resultado, k.valor - 65000 * 1.19);
   assert.equal(k.costoMensaje, (65000 * 1.19) / 85);
   assert.equal(k.costoVenta, (65000 * 1.19) / k.ventas);
@@ -229,7 +229,7 @@ test('IVA on the spend: gasto includes it everywhere, spendNet keeps the raw val
   const d28 = r.daily.find((x) => x.date === '2026-10-28');
   assert.equal(d28.gasto, 60000 * 1.19);
   assert.equal(d28.spendNet, 60000);
-  assert.equal(d28.roas, d28.valor / (60000 * 1.19));
+  assert.equal(d28.roas, d28.valor / 60000);
   const chart = r.campaignDaily.find((c) => c.campaignId === 'c1').daily.find((x) => x.date === '2026-10-29');
   assert.equal(chart.gasto, 5000 * 1.19);
   assert.equal(chart.vat, 5000 * 0.19);
@@ -239,4 +239,26 @@ test('with 0 % IVA the spend is untouched', () => {
   const k = run('campaign').kpis;
   assert.equal(k.gasto, k.spendNet);
   assert.equal(k.vat, 0);
+});
+
+test('ROAS divides by the spend WITHOUT IVA; cost per sale, margin and result keep the spend WITH IVA', () => {
+  const config = { ...DEFAULT_CONFIG, spendVatPct: 19, campaignPrefix: 'CT' };
+  const r = buildReport({
+    insights: [ins('2026-10-28', 'A', 'Video 1', 'c1', 'CT01 - ventas', 139074 / 1.19, 40)],
+    comprobantes: [sale('2026-10-28', 'A', 447000)],
+    identities, ads, config, from: '2026-10-28', to: '2026-10-28', group: 'ad', today: '2026-10-29',
+  });
+  const net = 139074 / 1.19;
+  assert.ok(Math.abs(r.kpis.gasto - 139074) < 1e-6);
+  assert.ok(Math.abs(r.kpis.roas - 447000 / net) < 1e-9);
+  assert.ok(Math.abs(r.rows[0].roas - 447000 / net) < 1e-9);
+  assert.ok(Math.abs(r.daily[0].roas - 447000 / net) < 1e-9);
+  assert.ok(Math.abs(r.kpis.costoVenta - 139074) < 1e-6);
+  assert.ok(Math.abs(r.kpis.resultado - (447000 - 139074)) < 1e-6);
+  assert.ok(Math.abs(r.campaignDaily[0].daily[0].roas - 447000 / net) < 1e-9);
+});
+
+test('ROAS is unchanged when the IVA is 0', () => {
+  const r = run('campaign');
+  assert.equal(r.kpis.roas, r.kpis.valor / r.kpis.gasto);
 });

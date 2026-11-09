@@ -23,11 +23,11 @@ const SHEET = [
   '"28/10/2026 11:00:00","PRUEBA - borrar","573001234567","Ana","15.000","Nequi","Ana","28/10/2026 10:58","Bebidas - aporte","A","u"',
 ].join('\n');
 
-function fakeFetch({ requests = [], failMeta = null, failSheet = false, headerCheck } = {}) {
+function fakeFetch({ requests = [], failMeta = null, failSheet = false, emptySheet = false, headerCheck } = {}) {
   return async (url, init = {}) => {
     requests.push({ url: String(url), init });
     const u = new URL(url);
-    if (u.hostname === 'docs.google.com') return failSheet ? text('nope', 404) : text(SHEET);
+    if (u.hostname === 'docs.google.com') return failSheet ? text('nope', 404) : text(emptySheet ? SHEET.split(String.fromCharCode(10))[0] : SHEET);
     if (headerCheck) headerCheck(init.headers);
     if (failMeta) return json({ error: failMeta }, 400);
     if (u.pathname.endsWith('/insights')) {
@@ -149,6 +149,19 @@ test('a sheet failure does not stop Meta and keeps the previous cache', async ()
   assert.match(out.sheet.error, /No se pudo leer la hoja/);
   assert.equal(store.counts().comprobantes, 1);
   assert.match(store.getKv('lastSync').sheetError, /No se pudo leer la hoja/);
+});
+
+test('an empty sheet (header only) does not flag every payment as gone and warns instead', async () => {
+  const store = createStore();
+  await runSync({ ...base, store, fetchImpl: fakeFetch() });
+  const out = await runSync({ ...base, store, fetchImpl: fakeFetch({ emptySheet: true }) });
+  assert.equal(out.sheet.ok, true);
+  assert.equal(out.sheet.rows, 0);
+  assert.equal(out.sheet.warning, 'La hoja llegó vacía; no se marcó nada como eliminado.');
+  assert.equal(store.comprobantesBetween('2026-10-01', '2026-10-31').filter((c) => c.gone).length, 0);
+  assert.equal(store.comprobantesBetween('2026-10-01', '2026-10-31').length, 1);
+  const again = await runSync({ ...base, store, fetchImpl: fakeFetch() });
+  assert.equal(again.sheet.warning, undefined);
 });
 
 test('rate limit errors back off instead of hammering Meta', async () => {

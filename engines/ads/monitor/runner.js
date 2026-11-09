@@ -79,8 +79,10 @@ export async function startMonitor({ dataDir, env = process.env, emit = line, no
     : async () => {
       const rows = parseComprobantes(await fetchSheetCsv({ sheetId: adsConfig.sheetId, tab: adsConfig.sheetTab, fetchImpl })).rows;
       // Payments the user accepted by hand in the app count like valid ones (the sheet itself is never changed).
+      // Discarded payments never count (rejection wins over acceptance).
       const accepted = adsStore.acceptedKeys();
-      return accepted.size ? keyRows(rows).map((r) => ({ ...r, accepted: accepted.has(r.key) })) : rows;
+      const rejected = adsStore.rejectedKeys();
+      return accepted.size || rejected.size ? keyRows(rows).map((r) => ({ ...r, accepted: accepted.has(r.key), rejected: rejected.has(r.key) })) : rows;
     };
 
   const monitor = new Monitor({

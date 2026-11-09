@@ -49,6 +49,25 @@ tr.ads-review td { background: color-mix(in srgb, var(--amber) 8%, transparent);
 .ads-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-bottom: 8px; font-size: 12px; color: var(--muted); min-height: 20px; }
 .ads-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; }
 .ads-legend .sw.roas { background: var(--green); }
+.ads-chart .bar.valor.out { opacity: 0.3; }
+.ads-chart .window-band { fill: var(--amber); opacity: 0.14; pointer-events: none; }
+.ads-chart .hour-line { stroke: var(--green); stroke-width: 2; }
+.ads-chart .hour-dot { fill: var(--green); }
+.ads-chart .hour-spend-line { stroke: #ec4899; stroke-width: 2; stroke-dasharray: 5 3; }
+.ads-chart .hour-spend-dot { fill: #ec4899; }
+.ads-chart .hour-axis { fill: var(--green); }
+.ads-legend .sw.hour-value { background: var(--green); }
+.ads-legend .sw.window { background: var(--amber); opacity: 0.5; }
+.ads-hours-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 10px 0; font-size: 13px; }
+.ads-hours-bar label { display: flex; align-items: center; gap: 6px; }
+.ads-hours-bar .input { width: auto; min-width: 90px; padding: 6px 8px; }
+.ads-hours-label { font-weight: 600; }
+.ads-voucher-filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 14px; margin-top: 12px; font-size: 13px; }
+.ads-voucher-filters label { display: grid; gap: 3px; }
+.ads-voucher-filters .input { width: auto; min-width: 140px; padding: 6px 8px; }
+.ads-voucher-filters .ads-voucher-search .input { min-width: 220px; }
+.ads-amount-edit { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.ads-amount-edit .input { width: 130px; padding: 6px 8px; text-align: right; }
 .ads-hover { color: var(--text); font-weight: 600; }
 
 .spin { animation: ads-spin 1s linear infinite; }
@@ -166,3 +185,18 @@ tr.ads-review td { background: color-mix(in srgb, var(--amber) 8%, transparent);
 .ads-account-chip { display: inline-flex; align-items: center; gap: 6px; }
 .ads-account-name { background: none; border: 0; color: inherit; font: inherit; cursor: pointer; padding: 0; }
 .ads-name-filter { display: grid; gap: 4px; max-width: 420px; }
+
+/* ---------- Presupuestos tab ---------- */
+.bud-learning { margin: 0; font-weight: 600; }
+.bud-buckets { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+.bud-campaign { display: flex; flex-direction: column; gap: 12px; }
+.bud-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.bud-head h3 { margin: 0 0 2px; font-size: 16px; }
+.bud-suggest { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--input); border: 1px solid var(--border); }
+.bud-suggest.green { border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.bud-suggest.red { border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.bud-suggest-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.bud-reason { margin: 0; font-size: 13px; }
+.bud-detail { margin: 0; font-size: 12px; }
+.bud-table td.bud-pair { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ads-chart-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }

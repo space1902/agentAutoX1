@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const KEEP_ALIVE_HOURS: [u32; 5] = [4, 6, 8, 12, 24];
+pub const KEEP_ALIVE_HOURS: [u32; 8] = [4, 6, 8, 12, 24, 36, 48, 72];
 pub const DEFAULT_KEEP_ALIVE_HOURS: u32 = 6;
 
 fn default_keep_alive_hours() -> u32 {
@@ -172,7 +172,9 @@ mod tests {
         assert_eq!(Settings::merge_saved(root, &serde_json::json!({})).keep_alive_hours, 6);
         assert_eq!(Settings::merge_saved(root, &serde_json::json!({ "keepAliveHours": 7 })).keep_alive_hours, 6);
         assert_eq!(Settings::merge_saved(root, &serde_json::json!({ "keepAliveHours": "8" })).keep_alive_hours, 6);
-        for h in [4u32, 6, 8, 12, 24] {
+        assert_eq!(Settings::merge_saved(root, &serde_json::json!({ "keepAliveHours": 96 })).keep_alive_hours, 6);
+        assert_eq!(Settings::merge_saved(root, &serde_json::json!({ "keepAliveHours": 30 })).keep_alive_hours, 6);
+        for h in [4u32, 6, 8, 12, 24, 36, 48, 72] {
             assert_eq!(Settings::merge_saved(root, &serde_json::json!({ "keepAliveHours": h })).keep_alive_hours, h);
         }
         let old: Settings =

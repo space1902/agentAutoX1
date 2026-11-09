@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { accountChipGroups, accountsArg, countryChips, nameFilterProblem, readAccountsChoice, readNameFilter, resolveAccountsChoice, selectOnlyAccount, toggleAccount, writeAccountsChoice, writeNameFilter, formatNative, formatVoucherPhone, fxLine, groupTracking, hiddenInactive, noDataNote, rangeProblem, readCountryChoice, readShowInactive, resolveCountryChoice, visibleRows, writeCountryChoice, writeShowInactive } from "./adsView.ts";
+import { voucherNote, accountChipGroups, accountsArg, countryChips, nameFilterProblem, readAccountsChoice, readNameFilter, resolveAccountsChoice, selectOnlyAccount, toggleAccount, writeAccountsChoice, writeNameFilter, formatNative, formatVoucherPhone, fxLine, groupTracking, hiddenInactive, noDataNote, rangeProblem, readCountryChoice, readShowInactive, resolveCountryChoice, visibleRows, writeCountryChoice, writeShowInactive } from "./adsView.ts";
 
 test("rangeProblem accepts a valid range and explains each invalid one", () => {
   assert.equal(rangeProblem("2026-10-21", "2026-10-29", "2026-09-23", "2026-10-29"), null);
@@ -241,4 +241,11 @@ test("the name filter is persisted trimmed and validated like the engine does", 
   assert.match(nameFilterProblem("x'; DROP") ?? "", /no válidos/);
   assert.match(nameFilterProblem("<b>") ?? "", /no válidos/);
   assert.match(nameFilterProblem("a".repeat(401)) ?? "", /largo/);
+});
+
+test("voucherNote explains why a payment is not counted (discarded wins over gone)", () => {
+  assert.equal(voucherNote({ rejected: true, gone: true }), "Descartado — no se cuenta");
+  assert.equal(voucherNote({ rejected: true, gone: false }), "Descartado — no se cuenta");
+  assert.equal(voucherNote({ rejected: false, gone: true }), "Eliminado de la hoja — no se cuenta");
+  assert.equal(voucherNote({ rejected: false, gone: false }), "");
 });

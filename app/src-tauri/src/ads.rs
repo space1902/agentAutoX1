@@ -23,7 +23,7 @@ pub const TOKEN_ENV: &str = "AGENTAUTO_META_TOKEN";
 /// The portfolio whose token keeps the original keyring entry `meta-token` (the migrated single account lives there).
 pub const PRINCIPAL: &str = "principal";
 
-const ALLOWED: &[&str] = &["portfolio-add", "account-add", "sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "comprobante-accept", "activities-probe", "fx-refresh"];
+const ALLOWED: &[&str] = &["portfolio-add", "account-add", "sync", "report", "vouchers", "status", "test-token", "config-get", "config-set", "tick", "decisions", "decision-status", "alerts-config-get", "alerts-config-set", "alerts-recent", "wa-status", "tracking", "comprobante-country", "comprobante-accept", "comprobante-reject", "comprobante-value", "comprobante-ad", "budget-plan", "activities-probe", "fx-refresh"];
 const DECISION_STATUSES: &[&str] = &["pending", "done", "ignored"];
 // "ct" is the legacy name of the campaign grouping; the engine treats it as "campaign".
 const GROUPS: &[&str] = &["campaign", "ct", "ad"];
@@ -68,14 +68,20 @@ pub struct AdsArgs<'a> {
     /// `comprobante-country --key K --code MX` (an empty code removes the override).
     pub key: Option<&'a str>,
     pub code: Option<&'a str>,
-    /// `comprobante-accept --key K [--undo]`: accept a payment by hand, or take the acceptance back.
+    /// `comprobante-accept|comprobante-reject --key K [--undo]`: accept / discard a payment by hand, or take it back.
     pub undo: bool,
     /// `activities-probe --since D`.
     pub since: Option<&'a str>,
     /// `sync|report|vouchers --accounts all|act_1,act_2`: the ad accounts in scope (absent = all).
     pub accounts: Option<&'a str>,
-    /// `report|vouchers --name ct,pzz`: ad-name prefixes (starts-with, case-insensitive).
+    /// `report|vouchers --name ct,pzz`: search terms matched anywhere in the ad, ad set or campaign name (case and accent insensitive, OR-ed).
     pub name: Option<&'a str>,
+    /// `comprobante-value --key K --valor N`: corrected amount of a payment; `Some("")` (flag without a value) removes the correction.
+    pub valor: Option<&'a str>,
+    /// `comprobante-ad --key K --ad ID`: ad assigned by hand to a payment; `Some("")` (flag without a value) removes it.
+    pub ad: Option<&'a str>,
+    /// `report --hours 8-14`: only sales registered, and spend delivered, in that hour window count (start inclusive, end exclusive, may wrap midnight).
+    pub hours: Option<&'a str>,
     /// `test-token --portfolio slug`.
     pub portfolio: Option<&'a str>,
 }
@@ -97,7 +103,21 @@ pub fn valid_accounts_arg(value: &str) -> bool {
         })
 }
 
-/// Ad-name prefixes: letters, digits, spaces and a little punctuation; never a leading `--` (it would read as a flag).
+/// Largest corrected payment amount accepted (the engine checks the same bound).
+pub const MAX_VALUE_OVERRIDE: u64 = 100_000_000;
+
+/// `H-H` with start 0..=23 and end 0..=24, different from each other.
+pub fn valid_hours_arg(value: &str) -> bool {
+    let Some((a, b)) = value.split_once('-') else { return false };
+    let ok = |s: &str| !s.is_empty() && s.len() <= 2 && s.chars().all(|c| c.is_ascii_digit());
+    if !ok(a) || !ok(b) {
+        return false;
+    }
+    let (start, end): (u32, u32) = (a.parse().unwrap_or(99), b.parse().unwrap_or(99));
+    start <= 23 && end <= 24 && start != end
+}
+
+/// Search terms: letters, digits, spaces and a little punctuation; never a leading `--` (it would read as a flag).
 pub fn valid_name_filter(value: &str) -> bool {
     !value.is_empty()
         && value.chars().count() <= 400
@@ -147,7 +167,7 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
             out.extend(["--code".to_string(), code.to_string()]);
         }
     }
-    if command == "comprobante-accept" {
+    if command == "comprobante-accept" || command == "comprobante-reject" {
         let key = args.key.unwrap_or_default();
         if key.len() != 20 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err("El comprobante no es válido.".to_string());
@@ -157,8 +177,48 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
             out.push("--undo".to_string());
         }
     }
+    if command == "comprobante-value" {
+        let key = args.key.unwrap_or_default();
+        if key.len() != 20 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("El comprobante no es válido.".to_string());
+        }
+        out.extend(["--key".to_string(), key.to_string()]);
+        match args.valor {
+            None | Some("") => out.push("--valor".to_string()),
+            Some(v) => {
+                let n: u64 = if v.len() <= 9 && v.chars().all(|c| c.is_ascii_digit()) { v.parse().unwrap_or(0) } else { 0 };
+                if n == 0 || n > MAX_VALUE_OVERRIDE {
+                    return Err("El monto debe ser un número entero positivo de hasta 100.000.000.".to_string());
+                }
+                out.extend(["--valor".to_string(), n.to_string()]);
+            }
+        }
+    }
+    if command == "comprobante-ad" {
+        let key = args.key.unwrap_or_default();
+        let ad = args.ad.unwrap_or_default();
+        if key.len() != 20 || !key.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("El comprobante no es válido.".to_string());
+        }
+        if !(ad.is_empty() || ((5..=25).contains(&ad.len()) && ad.chars().all(|c| c.is_ascii_digit()))) {
+            return Err("El anuncio no es válido.".to_string());
+        }
+        out.extend(["--key".to_string(), key.to_string()]);
+        if !ad.is_empty() {
+            out.extend(["--ad".to_string(), ad.to_string()]);
+        }
+    }
+    if let Some(hours) = args.hours {
+        if command != "report" {
+            return Err("El horario solo aplica al reporte.".to_string());
+        }
+        if !valid_hours_arg(hours) {
+            return Err("El horario no es válido: usa horas de 0 a 24 y que el inicio sea distinto del fin.".to_string());
+        }
+        out.extend(["--hours".to_string(), hours.to_string()]);
+    }
     if let Some(accounts) = args.accounts {
-        if !matches!(command, "sync" | "report" | "vouchers") {
+        if !matches!(command, "sync" | "report" | "vouchers" | "budget-plan") {
             return Err("Las cuentas solo se pueden elegir al actualizar o consultar.".to_string());
         }
         if !valid_accounts_arg(accounts) {
@@ -167,7 +227,7 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
         out.extend(["--accounts".to_string(), accounts.to_string()]);
     }
     if let Some(name) = args.name.filter(|n| !n.trim().is_empty()) {
-        if !matches!(command, "report" | "vouchers") {
+        if !matches!(command, "report" | "vouchers" | "budget-plan") {
             return Err("El filtro de nombre solo aplica a los reportes.".to_string());
         }
         if !valid_name_filter(name) {
@@ -189,7 +249,7 @@ pub fn build_args(command: &str, args: &AdsArgs) -> Result<Vec<String>, String> 
     }
     if args.auto && command == "sync" {
         out.push("--auto".to_string());
-    } else if matches!(command, "sync" | "report" | "vouchers") && (args.from.is_none() || args.to.is_none()) {
+    } else if matches!(command, "sync" | "report" | "vouchers" | "budget-plan") && (args.from.is_none() || args.to.is_none()) {
         return Err("Faltan las fechas del rango.".to_string());
     }
     if command == "decision-status" {
@@ -485,8 +545,9 @@ pub fn sync_auto(settings: &Settings, accounts: Option<&str>) -> Result<Value, S
     run_engine(settings, "sync", &AdsArgs { auto: true, accounts, ..Default::default() }, None, &tokens).map(|v| with_warnings(v, warnings))
 }
 
-pub fn report(settings: &Settings, from: &str, to: &str, group: &str, country: Option<&str>, split: bool, accounts: Option<&str>, name: Option<&str>) -> Result<Value, String> {
-    run_engine(settings, "report", &AdsArgs { from: Some(from), to: Some(to), group: Some(group), country, split, accounts, name, ..Default::default() }, None, &[])
+#[allow(clippy::too_many_arguments)]
+pub fn report(settings: &Settings, from: &str, to: &str, group: &str, country: Option<&str>, split: bool, accounts: Option<&str>, name: Option<&str>, hours: Option<&str>) -> Result<Value, String> {
+    run_engine(settings, "report", &AdsArgs { from: Some(from), to: Some(to), group: Some(group), country, split, accounts, name, hours, ..Default::default() }, None, &[])
 }
 
 /// Live exchange rates to COP (free public sources, no key). Called on each data refresh; the engine saves one rate per day.
@@ -510,6 +571,27 @@ pub fn comprobante_country(settings: &Settings, key: &str, code: &str) -> Result
 /// Accepts a payment by hand (or takes it back with `undo`). Only the local database changes; the sheet is never written.
 pub fn comprobante_accept(settings: &Settings, key: &str, undo: bool) -> Result<Value, String> {
     run_engine(settings, "comprobante-accept", &AdsArgs { key: Some(key), undo, ..Default::default() }, None, &[])
+}
+
+/// Discards a payment by hand (or restores it with `undo`). Only the local database changes; the sheet is never written.
+pub fn comprobante_reject(settings: &Settings, key: &str, undo: bool) -> Result<Value, String> {
+    run_engine(settings, "comprobante-reject", &AdsArgs { key: Some(key), undo, ..Default::default() }, None, &[])
+}
+
+/// Corrects the amount of a payment (`None` removes the correction). Only the local database changes; the sheet is never written.
+pub fn comprobante_value(settings: &Settings, key: &str, valor: Option<u64>) -> Result<Value, String> {
+    let text = valor.map(|v| v.to_string());
+    run_engine(settings, "comprobante-value", &AdsArgs { key: Some(key), valor: Some(text.as_deref().unwrap_or("")), ..Default::default() }, None, &[])
+}
+
+/// Assigns an ad to a payment whose sheet row did not capture it (`None` removes the assignment). Only the local database changes.
+pub fn comprobante_ad(settings: &Settings, key: &str, ad: Option<&str>) -> Result<Value, String> {
+    run_engine(settings, "comprobante-ad", &AdsArgs { key: Some(key), ad: Some(ad.unwrap_or("")), ..Default::default() }, None, &[])
+}
+
+/// Budget timeline and suggested next budget per campaign. Reads stored data only: no Meta request, nothing is changed.
+pub fn budget_plan(settings: &Settings, from: &str, to: &str, country: Option<&str>, accounts: Option<&str>, name: Option<&str>) -> Result<Value, String> {
+    run_engine(settings, "budget-plan", &AdsArgs { from: Some(from), to: Some(to), country, accounts, name, ..Default::default() }, None, &[])
 }
 
 pub fn status(settings: &Settings) -> Result<Value, String> {
@@ -771,6 +853,28 @@ mod tests {
         assert_eq!(&build_args("comprobante-accept", &AdsArgs { key: Some(key), undo: true, ..Default::default() }).unwrap()[2..], ["comprobante-accept", "--key", key, "--undo"]);
         assert!(build_args("comprobante-accept", &AdsArgs { key: Some("../x"), ..Default::default() }).is_err());
         assert!(build_args("comprobante-accept", &AdsArgs::default()).is_err());
+        assert_eq!(&build_args("comprobante-reject", &AdsArgs { key: Some(key), ..Default::default() }).unwrap()[2..], ["comprobante-reject", "--key", key]);
+        assert_eq!(&build_args("comprobante-reject", &AdsArgs { key: Some(key), undo: true, ..Default::default() }).unwrap()[2..], ["comprobante-reject", "--key", key, "--undo"]);
+        assert!(build_args("comprobante-reject", &AdsArgs { key: Some("../x"), ..Default::default() }).is_err());
+        assert!(build_args("comprobante-reject", &AdsArgs::default()).is_err());
+        let value = |valor: Option<&'static str>| build_args("comprobante-value", &AdsArgs { key: Some(key), valor, ..Default::default() });
+        assert_eq!(&value(Some("45000")).unwrap()[2..], ["comprobante-value", "--key", key, "--valor", "45000"]);
+        assert_eq!(&value(Some("100000000")).unwrap()[2..], ["comprobante-value", "--key", key, "--valor", "100000000"]);
+        assert_eq!(&value(Some("")).unwrap()[2..], ["comprobante-value", "--key", key, "--valor"], "empty removes the correction");
+        assert_eq!(&value(None).unwrap()[2..], ["comprobante-value", "--key", key, "--valor"]);
+        for bad in ["0", "-5", "1.5", "abc", "100000001", "1e5", "1234567890", "5; calc"] {
+            assert!(value(Some(bad)).is_err(), "{bad}");
+        }
+        assert!(build_args("comprobante-value", &AdsArgs { key: Some("../x"), valor: Some("5"), ..Default::default() }).is_err());
+        assert!(build_args("comprobante-value", &AdsArgs::default()).is_err());
+        let hours = |h: &'static str| build_args("report", &AdsArgs { from: Some("2026-10-01"), to: Some("2026-10-29"), hours: Some(h), ..Default::default() });
+        assert_eq!(&hours("8-14").unwrap()[2..], ["report", "--from", "2026-10-01", "--to", "2026-10-29", "--hours", "8-14"]);
+        assert!(hours("22-6").is_ok());
+        assert!(hours("0-24").is_ok());
+        for bad in ["8", "8-8", "24-5", "5-25", "a-b", "8-14; calc", "-1-5", ""] {
+            assert!(hours(bad).is_err(), "{bad}");
+        }
+        assert!(build_args("vouchers", &AdsArgs { from: Some("2026-10-01"), to: Some("2026-10-29"), hours: Some("8-14"), ..Default::default() }).is_err(), "hours only apply to the report");
         assert!(build_args("activities-probe", &AdsArgs { since: Some("ayer"), ..Default::default() }).is_err());
     }
 
@@ -877,6 +981,36 @@ mod tests {
         for bad in ["", "Bm", "a b", "a_b", "../x", "a:b", &"x".repeat(41)] {
             assert!(!valid_slug(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn builds_budget_plan_arguments_with_the_same_filters_as_the_report() {
+        let base = AdsArgs { from: Some("2026-10-01"), to: Some("2026-10-29"), ..Default::default() };
+        assert_eq!(&build_args("budget-plan", &base).unwrap()[2..], ["budget-plan", "--from", "2026-10-01", "--to", "2026-10-29"]);
+        let full = AdsArgs { country: Some("MX"), accounts: Some("act_12345"), name: Some("ct, PZZ"), ..base.clone() };
+        assert_eq!(
+            &build_args("budget-plan", &full).unwrap()[2..],
+            ["budget-plan", "--from", "2026-10-01", "--to", "2026-10-29", "--country", "MX", "--accounts", "act_12345", "--name", "ct, PZZ"]
+        );
+        assert!(build_args("budget-plan", &AdsArgs::default()).unwrap_err().contains("fechas"), "dates are required");
+        assert!(build_args("budget-plan", &AdsArgs { from: Some("ayer"), ..base.clone() }).is_err());
+        assert!(build_args("budget-plan", &AdsArgs { accounts: Some("act_1;calc"), ..base.clone() }).is_err());
+        assert!(build_args("budget-plan", &AdsArgs { name: Some("--accounts"), ..base.clone() }).is_err());
+        assert!(build_args("budget-plan", &AdsArgs { country: Some("Mexico"), ..base.clone() }).is_err());
+        assert!(build_args("budget-plan", &AdsArgs { hours: Some("8-14"), ..base.clone() }).is_err(), "hours only apply to the report");
+    }
+
+    #[test]
+    fn builds_comprobante_ad_arguments() {
+        let key = "0123456789abcdef0123";
+        assert_eq!(&build_args("comprobante-ad", &AdsArgs { key: Some(key), ad: Some("120212345678901"), ..Default::default() }).unwrap()[2..], ["comprobante-ad", "--key", key, "--ad", "120212345678901"]);
+        assert_eq!(&build_args("comprobante-ad", &AdsArgs { key: Some(key), ad: Some(""), ..Default::default() }).unwrap()[2..], ["comprobante-ad", "--key", key], "empty removes the assignment");
+        assert_eq!(&build_args("comprobante-ad", &AdsArgs { key: Some(key), ..Default::default() }).unwrap()[2..], ["comprobante-ad", "--key", key]);
+        for bad in ["1234", "abc12345", "12345;calc", "../x", "1234567890123456789012345678"] {
+            assert!(build_args("comprobante-ad", &AdsArgs { key: Some(key), ad: Some(bad), ..Default::default() }).is_err(), "ad {bad:?}");
+        }
+        assert!(build_args("comprobante-ad", &AdsArgs { key: Some("../x"), ad: Some("12345"), ..Default::default() }).is_err());
+        assert!(build_args("comprobante-ad", &AdsArgs::default()).is_err());
     }
 
     #[test]
@@ -990,7 +1124,7 @@ mod tests {
         let saved = config_set(&settings, &json!({"flowPrefix": "Barf"})).unwrap();
         assert_eq!(saved["config"]["flowPrefix"], "Barf");
         assert!(config_set(&settings, &json!({"token": "x"})).is_err());
-        let report = report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false, None, None).unwrap();
+        let report = report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false, None, None, None).unwrap();
         assert_eq!(report["kpis"]["gasto"], 0);
         assert_eq!(report["daily"].as_array().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1020,9 +1154,9 @@ mod tests {
         assert_eq!(status["portfolios"], json!([{"id": "principal", "tokenPresent": true}]));
         assert!(!status.to_string().contains("fake-test-token"), "token values never come back");
 
-        let filtered = report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false, Some("all"), Some("ct,pzz")).unwrap();
+        let filtered = report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false, Some("all"), Some("ct,pzz"), None).unwrap();
         assert_eq!(filtered["nameFilter"], json!(["ct", "pzz"]));
-        assert!(report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false, Some("act_99999"), None).is_err(), "unknown accounts are refused by the engine");
+        assert!(report(&settings, "2026-10-01", "2026-10-02", "campaign", None, false, Some("act_99999"), None, None).is_err(), "unknown accounts are refused by the engine");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
